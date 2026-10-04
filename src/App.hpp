@@ -1,0 +1,406 @@
+#pragma once
+
+#include "Areas.hpp"
+#include "Blueprint.hpp"
+#include "Catalog.hpp"
+#include "Changes.hpp"
+#include "Formats.hpp"
+#include "Ghosts.hpp"
+#include "Loader.hpp"
+#include "ModelRenderer.hpp"
+#include "Mpq.hpp"
+#include "Project.hpp"
+#include "Renderer.hpp"
+#include "Server.hpp"
+#include "Looks.hpp"
+#include "Paths.hpp"
+#include "Spawns.hpp"
+#include "Tables.hpp"
+#include "Terrain.hpp"
+
+#include <d3d11.h>
+#include <imgui.h>
+#include <DirectXMath.h>
+#include <windows.h>
+#include <wrl/client.h>
+
+#include <functional>
+#include <map>
+#include <optional>
+#include <set>
+#include <string>
+#include <vector>
+
+/// Windows folder picker; nullopt when cancelled.
+std::optional<std::string> PickFolder(HWND owner, const wchar_t* title);
+
+/// The editor: owns the project, the change store, the adapters and every panel.
+class App
+{
+public:
+    bool Init(HWND hwnd, ID3D11Device* device, ID3D11DeviceContext* context, bool firstRun);
+
+    /// Builds the UI for one frame (between ImGui::NewFrame and ImGui::Render) and renders the viewport.
+    void Frame(float dt);
+
+    /// The window's close button asks; the editor decides after checking for unsaved changes.
+    void RequestClose() { m_closeRequested = true; }
+    bool WantsQuit() const { return m_quit; }
+
+private:
+    enum class Tool { Select, Sculpt, Copy, Holes, Objects, Paint, Creatures, Gameobjects, Zones };
+
+    struct Camera
+    {
+        DirectX::XMFLOAT3 pos{ 0, 0, 0 };
+        float yaw = 0, pitch = -0.5f, speed = 80.0f;
+        DirectX::XMVECTOR Forward() const;
+        DirectX::XMMATRIX View() const;
+    };
+
+    struct Command
+    {
+        std::string name, shortcut;
+        std::function<void()> run;
+        std::function<bool()> enabled;
+    };
+
+    // panels
+    void DrawMenuBar();
+    void DrawToolbar();
+    void DrawStatusBar();
+    void BuildDefaultLayout(unsigned int dockspace);
+    void DrawViewport(float dt);
+    void DrawToolsPanel();
+    void DrawMapsPanel();
+    /// Rebuilds the Maps panel picture when the selected map's loaded terrain changed (edits, undo, streaming).
+    void RefreshMapPreview();
+    void DrawInspector();
+    void DrawChangesPanel();
+    void DrawProblemsPanel();
+    void DrawLogPanel();
+    void DrawNewProjectModal();
+    void DrawUnsavedModal();
+    void DrawPalette();
+    void HandleShortcuts();
+
+    // server link and checks (AppServer.cpp)
+    void DrawSetupModal();
+    void OpenProjectSettings();
+    void DrawProjectSettingsModal();
+    void DrawServerPanel();
+    /// Connects the database of the project's server profile; logs the outcome.
+    void ConnectServer();
+    /// Runs a GM command over SOAP with the project's profile; logs and keeps the output for the Server panel.
+    std::optional<std::string> RunServerCommand(const std::string& command);
+    /// Export dry run into out/check plus server checks; fills m_problems.
+    void RunChecks();
+    void OpenSetup();
+
+    // populate: creature and gameobject spawns (AppPopulate.cpp)
+    uint32_t CurrentMapId() const;
+    void UpdateSpawnView();
+    /// The spawn (of the tool's kind) whose marker is under `mouse`.
+    std::optional<uint32_t> SpawnAt(const ImVec2& mouse, const ImVec2& origin, const ImVec2& size, DirectX::FXMMATRIX viewProj) const;
+    void CommitSpawns(const std::vector<std::pair<std::optional<nlohmann::json>, std::optional<nlohmann::json>>>& rows, const std::string& label);
+    void PlaceSpawn(const DirectX::XMFLOAT3& at);
+    /// One change editing every selected spawn.
+    void EditSpawns(const std::string& label, const std::function<void(Spawn&)>& fn);
+    void DeleteSpawns();
+    /// Moves the selection so its centre lands on `at` (editor axes), each spawn on the ground.
+    void MoveSpawns(const DirectX::XMFLOAT3& at);
+    /// Creatures / Gameobjects tool in the viewport: click or box select (Shift adds, Ctrl removes), place, Alt+click move.
+    void SpawnsViewport(const ImVec2& origin, const ImVec2& size, DirectX::FXMMATRIX viewProj);
+    void BuildSpawnOverlay(std::vector<LineVertex>& lines) const;
+    void DrawSpawnLabels(ImDrawList* dl, const ImVec2& origin, const ImVec2& size, DirectX::FXMMATRIX viewProj) const;
+    void DrawSpawnsPanel(float width);
+    bool SpawnTool() const { return m_tool == Tool::Creatures || m_tool == Tool::Gameobjects; }
+    /// The adapter of the kind the spawn tool works on.
+    SpawnAdapter& Spawns() { return m_spawnKind == SpawnKind::Creature ? m_creatures : m_gameobjects; }
+    const SpawnAdapter& Spawns() const { return m_spawnKind == SpawnKind::Creature ? m_creatures : m_gameobjects; }
+    /// Model tile of a kind's spawns (-3 creatures, -5 gameobjects; -4 is the armed template at the cursor).
+    static int SpawnTileKey(SpawnKind kind) { return kind == SpawnKind::Creature ? -3 : -5; }
+    void UpdateSpawnModels();
+    /// The armed template as a spawn (for its look).
+    Spawn ArmedSpawn() const;
+
+    // zones: area ids painted on chunks, AreaTable rows (AppZones.cpp)
+    void DrawZonesPanel(float width);
+    /// Zones tool in the viewport: drag paints the active area, Alt+click picks the area under the cursor.
+    void ZonesViewport();
+    /// Area borders on the loaded terrain (each chunk edge that meets another area), in each area's colour.
+    void BuildZoneOverlay(std::vector<LineVertex>& lines) const;
+    /// "Name (id)" of an area, or just the id when AreaTable lacks it.
+    std::string AreaLabel(uint32_t id) const;
+    /// Whether any applied terrain change paints area ids (the server needs its .map files extracted again).
+    bool AreasPainted() const;
+
+    // populate: creature waypoint paths (AppPaths.cpp)
+    CreaturePath PathOf() { return { m_creatures, m_waypoints, m_addons }; }
+    void BeginPathEdit(uint32_t guid);
+    void SavePathEdit();
+    void CancelPathEdit();
+    void DeletePathPoint();
+    /// The selected point onto the terrain under it.
+    void DropPathPoint();
+    /// Translate handles on the selected path point; true while the cursor is on them (the viewport then ignores clicks).
+    bool UpdatePathGizmo(const ImVec2& origin, const ImVec2& size);
+    /// Solid spheres for the shown path's points and the walk preview ball.
+    void BuildPathSolids(std::vector<LineVertex>& triangles) const;
+    /// Centre of a point's sphere (it sits on the point).
+    static DirectX::XMFLOAT3 PathPointCenter(const PathPoint& p);
+    /// Path mode in the viewport: click the ground adds a point after the selected one, drag a point moves it.
+    void PathViewport(const ImVec2& origin, const ImVec2& size, DirectX::FXMMATRIX viewProj);
+    void BuildPathOverlay(std::vector<LineVertex>& lines) const;
+    void DrawPathLabels(ImDrawList* dl, const ImVec2& origin, const ImVec2& size, DirectX::FXMMATRIX viewProj) const;
+    void DrawPathPanel(float width);
+    /// The points drawn: the path being edited, else the selected creature's own path (read on selection).
+    const std::vector<PathPoint>* ShownPath() const;
+    /// Reads the selected creature's saved path when the selection or the project changes (every frame).
+    void RefreshPathView();
+
+    // actions
+    void NewProject();
+    void OpenProjectDialog();
+    bool OpenProject(const std::string& dir);
+    void CloseProject();
+    bool Save();
+    void Export(bool playTest);
+    void Undo();
+    void Redo();
+    void GoToTile(const std::string& map, int x, int y);
+    void FocusTile();
+    void CopySelection();
+    void PasteAtCursor();
+    void RotateClipboard(int quarterTurns);
+    void RotateSelectionInPlace();
+    /// Height shift applied to the clipboard at this anchor (snap mode adds the ground offset).
+    float PasteOffsetAt(int gx, int gz) const;
+    /// Tilt for Follow slope (zero otherwise), written into the paste options.
+    void PasteSlopeAt(int gx, int gz, PasteOptions& options) const;
+    /// Placing: the ghost follows the cursor; once pinned the terrain shows the blended result.
+    void UpdatePlacement();
+    void ClearPlacementView();
+    void CommitPlacement();
+    void CancelPin();
+    void SelectMap(size_t index);
+    /// Runs `then` now, or after the user saves or discards unsaved changes.
+    void GuardUnsaved(std::function<void()> then);
+
+    void Log(const char* fmt, ...);
+    void EnsureViewportTarget(UINT width, UINT height);
+    void BuildOverlay(std::vector<LineVertex>& lines) const;
+    /// Applies a click or box result: replace, add (Shift) or remove (Ctrl).
+    void ApplySelection(const std::set<ChunkRef>& hits);
+    /// One undoable edit of the selected objects: `fn` gets each object's position, rotation and scale
+    /// (scale is null for WMOs, which cannot scale) as they were before the edit.
+    void EditObjects(const std::string& label, const std::function<void(float* pos, float* rot, float* scale)>& fn);
+    /// Live (uncommitted) version of the same; EndObjectEdit commits.
+    void PreviewObjects(const std::function<void(float* pos, float* rot, float* scale)>& fn);
+    void EndObjectEdit(const std::string& label);
+    std::optional<DirectX::XMFLOAT3> ObjectPosition(const ObjectRef& ref) const;
+    void DeleteSelectedObjects();
+    void DrawObjectPanel();
+    void DrawCatalog();
+    void DrawVersions();
+    /// Blueprints: save the selection as a reusable area, browse them in the catalog, paste them like a copy.
+    void DrawBlueprints();
+    void DrawSaveBlueprintModal();
+    void OpenSaveBlueprint();
+    void UseBlueprint(const Blueprint& b, bool inPlace);
+    /// Top-down picture of an area, rendered offscreen with its textures and objects (RGBA, size x size).
+    std::vector<uint8_t> RenderAreaThumbnail(const TerrainClipboard& clip, UINT size);
+    /// Shows one ghost layer alone, objects included (0 = the map again).
+    void SetSolo(int layer);
+    void RemoveGhostLayer(int layer);
+    /// Pins the clipboard where it was copied from, with its original heights (for ghost copies).
+    void PasteInPlace();
+    /// The chunk as the viewport shows it: the solo ghost's chunk at the same spot while soloing, else the map's.
+    const AdtChunk* ShownChunk(ChunkRef ref) const;
+    /// Places the armed catalog model at the cursor; keeps it armed with Shift.
+    void PlaceFromCatalog(bool keepArmed);
+    /// Move / rotate / scale handles on the selected objects; true while the mouse is over or dragging one.
+    bool UpdateGizmo(const ImVec2& origin, const ImVec2& size);
+    bool UpdateObjectGizmo(const ImVec2& origin, const ImVec2& size);
+    /// The handles' frame: the object's own (one object) or the selection's centre (several).
+    DirectX::XMFLOAT4X4 GizmoFrame() const;
+    /// Grid cell the clipboard's first chunk goes to so the copied area is centred on the hovered chunk.
+    std::pair<int, int> PasteAnchor() const;
+    /// Tiles the clipboard would touch at the current anchor, blend band included (kept loaded while placing).
+    std::set<int> PasteTiles() const;
+
+    HWND m_hwnd = nullptr;
+    ID3D11Device* m_device = nullptr;
+    ID3D11DeviceContext* m_context = nullptr;
+
+    MpqChain m_mpq;
+    Renderer m_renderer;
+    ChangeStore m_store;
+    TerrainAdapter m_terrain{ m_mpq, m_renderer, m_store };
+    ModelRenderer m_models;
+    ModelRenderer::DrawSettings m_modelSettings;
+    Loader m_loader;   // after m_mpq: destroyed (stopped) before the archives close
+    std::optional<Project> m_project;
+
+    std::vector<MapEntry> m_maps;
+    int m_mapIndex = -1;
+    std::vector<bool> m_mapTiles;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> m_mapPreview;   // the selected map from its WDL, coloured by height
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> m_mapPreviewTexture;
+    std::vector<std::vector<int16_t>> m_mapWdl;   // the selected map's low-detail heights, loaded tiles patched with their current heights
+    std::string m_mapPreviewDir;                  // the map m_mapWdl belongs to
+    uint64_t m_mapPreviewKey = ~0ull;             // project revision + loaded tiles the picture was made from
+    char m_mapFilter[64] = {};
+
+    Camera m_camera;
+    int m_loadRadius = 2;
+    std::optional<int> m_focusTile;   // tile key whose height the camera snaps to once it streams in
+    DrawOptions m_drawOptions;
+    Tool m_tool = Tool::Sculpt;
+    Brush m_brush;
+
+    std::optional<TerrainHit> m_hover;
+    std::set<ObjectRef> m_objSel;
+    std::optional<ObjectRef> m_objHover, m_objPress;   // under the cursor; under it when the button went down
+    enum class Gizmo { Move, Rotate, Scale };
+    Gizmo m_gizmo = Gizmo::Move;
+    bool m_gizmoLocal = false, m_gizmoSnap = false;    // Ctrl inverts snapping while dragging a handle
+    float m_snapMove = 1.0f, m_snapRotate = 15.0f, m_snapScale = 0.1f;
+    bool m_gizmoActive = false;                         // a handle is being dragged (one object edit)
+    DirectX::XMFLOAT4X4 m_gizmoMatrix{}, m_gizmoStart{};
+    Tool m_lastTool = Tool::Sculpt;
+
+    // Catalog: browse the client's models and textures; a model picked there is "armed" and placed by clicking.
+    Catalog m_catalog;
+    int m_catalogTab = 0;                 // Catalog::Kind of the tab (Count = all files)
+    char m_catalogQuery[128] = {};
+    std::string m_catalogFolder;          // lower-case folder prefix
+    float m_thumbSize = 96;
+    bool m_catalogNearby = false;         // only what the loaded tiles use
+    std::map<std::string, int> m_usage;   // catalog path -> placements on loaded tiles
+    size_t m_usageStamp = 0;
+    struct Armed { std::string path; bool wmo = false; };
+    std::optional<Armed> m_armed;
+    bool m_placeRandomYaw = true;
+    float m_placeYaw = 0, m_placeScale = 1, m_placeScaleJitter = 0;
+    std::string m_activeTexture;          // for the Paint tool
+    std::vector<std::string> m_recentTextures;   // newest first
+    PaintBrush m_paint;
+    std::optional<int> m_catalogShowTab;  // a tab the catalog should bring forward
+    void PickTexture(const std::string& path);
+    /// The project's reader falls back to the attached sources (assets pasted from other clients).
+    void UpdateFallbacks();
+    std::string m_catalogKey;             // inputs m_catalogItems was filtered with
+
+    // Ghost layers: other versions of the map (other clients, single patch archives).
+    Ghosts m_ghosts;
+    int m_soloLayer = 0, m_copyLayer = 0;          // 0 = the map itself
+
+    std::vector<Blueprint> m_blueprints;
+    std::map<std::string, Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>> m_blueprintThumbs;   // by file
+    bool m_saveBlueprintOpen = false;
+    char m_blueprintName[96] = {}, m_blueprintNotes[512] = {};
+    std::optional<size_t> m_blueprintToDelete;
+    static constexpr int kBlueprintTab = -1;
+    std::vector<Ghosts::Version> m_versions;        // of the tile under the camera
+    std::string m_versionsKey;
+    std::vector<const Catalog::Item*> m_catalogItems;
+    std::set<ChunkRef> m_selection;
+    bool m_looking = false;
+    bool m_boxing = false;
+    float m_boxStart[2] = {};
+    TerrainClipboard m_clipboard;
+    enum class PasteHeight { FollowGround, FollowSlope, LowestPoint, Absolute };
+    std::optional<PasteHeight> m_heightBeforeInPlace;   // paste in place switches to Absolute; this puts it back
+    PasteHeight m_pasteHeightMode = PasteHeight::FollowGround;
+    float m_pasteOffset = 0;
+    bool m_pasteHeights = true, m_pasteTextures = true, m_pasteHoles = true, m_pasteObjects = true;
+    bool m_holeCut = true;          // Holes tool: cut (true) or fill; Ctrl inverts while dragging
+    float m_holeRadius = 1.0f;      // yards; small values hit only the cell under the cursor
+    bool m_ghostPreview = true;
+    int m_clipVersion = 0;                       // bumps when the clipboard changes (copy, rotate)
+    bool m_placing = false;                      // Copy tool: clipboard follows the cursor
+    std::optional<std::pair<int, int>> m_pin;    // pinned centre cell (grid), when pinned
+    bool m_blend = true, m_blendAuto = true;
+    float m_blendWidth = 30.0f;                  // yards per side when not automatic
+    PastePlan m_plan;
+    std::string m_planKey;                       // inputs m_plan was built from; empty = nothing shown
+
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> m_vpColor;
+    Microsoft::WRL::ComPtr<ID3D11RenderTargetView> m_vpRtv;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> m_vpSrv;
+    Microsoft::WRL::ComPtr<ID3D11DepthStencilView> m_vpDsv;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> m_vpDepth, m_vpDepthStaging;   // depth + CPU copy for box-select occlusion
+    UINT m_vpWidth = 0, m_vpHeight = 0;
+
+    // server link
+    std::vector<ServerProfile> m_profiles;
+    Db m_db;
+    std::optional<bool> m_soapOk;            // last SOAP call worked; unknown until one runs
+    bool m_setupOpen = false;
+    bool m_settingsOpen = false;                       // Project settings dialog (AppServer.cpp)
+    std::string m_settingsName, m_settingsAuthor;
+    std::map<std::string, Project::IdRange> m_settingsRanges;
+    std::map<std::string, SpawnAdapter::RangeUse> m_settingsUse;
+    ServerProfile m_setup;                   // the wizard's working copy
+    std::string m_setupClient, m_setupDbPassword, m_setupSoapPassword;
+    std::string m_setupDbResult, m_setupSoapResult;
+    bool m_setupDbOk = false, m_setupSoapOk = false;
+    std::string m_command;                   // Server panel: GM command being typed
+    std::vector<std::pair<std::string, std::string>> m_commandLog;   // command, output (newest last)
+
+    SpawnAdapter m_creatures{ m_store, SpawnKind::Creature }, m_gameobjects{ m_store, SpawnKind::GameObject };
+    SpawnKind m_spawnKind = SpawnKind::Creature;         // the table of the Creatures / Gameobjects tool last used
+    std::vector<Spawn> m_spawnView;                      // spawns of both kinds around the camera (database + project)
+    std::set<uint32_t> m_spawnSel;                       // selected spawn guids (of m_spawnKind)
+    std::optional<uint32_t> m_spawnHover;                // spawn under the cursor (marker or model)
+    std::optional<uint32_t> m_spawnPress;                // spawn under the cursor when the button went down
+    bool m_showSpawns[2] = { true, true };               // creatures, gameobjects: markers, names and models
+    std::optional<SpawnAdapter::Template> m_spawnArmed;  // template placed by clicking the ground
+    std::optional<float> m_spawnPending;                 // facing being dragged, committed on release
+    std::string m_spawnQuery;
+    std::vector<SpawnAdapter::Template> m_spawnResults;
+    DisplayLooks m_looks{ m_mpq };                       // display ids -> models (client DBCs)
+    AreaAdapter m_areas{ m_mpq, m_store };               // AreaTable.dbc: the client's rows plus the project's
+    uint32_t m_activeArea = 0;                           // Zones tool: the area painted
+    float m_areaRadius = 1.0f;                           // yards; small values paint only the chunk under the cursor
+    std::string m_areaFilter;
+    std::string m_newAreaName;
+    uint32_t m_newAreaParent = 0, m_newAreaLevel = 1;
+    uint32_t m_areaEditId = 0;                           // the row m_areaEdit was read from (re-read when it changes)
+    uint64_t m_areaEditVersion = ~0ull;
+    nlohmann::json m_areaEdit;                           // the active area's row being edited
+    uint32_t m_spawnModelVersion[2] = { ~0u, ~0u };      // adapter version each kind's model tile was built from
+    TableRowsAdapter m_waypoints{ m_store, "waypoint_data", "id", "point" }, m_addons{ m_store, "creature_addon", "guid" };
+    struct PathEdit
+    {
+        uint32_t guid = 0;
+        std::string name;
+        std::vector<PathPoint> points;
+        std::optional<size_t> sel, drag;
+        bool dirty = false;
+    };
+    std::optional<PathEdit> m_path;                      // the creature path being edited
+    std::optional<size_t> m_pathHover;                   // point under the cursor
+    bool m_pathPreview = true;                           // a dot walking the path
+    uint32_t m_pathViewGuid = 0;                         // creature whose saved path m_pathView holds
+    uint64_t m_pathViewRevision = ~0ull;
+    std::vector<PathPoint> m_pathView;
+
+    std::vector<Problem> m_problems;
+    bool m_problemsChecked = false;
+
+    std::vector<std::string> m_log;
+    std::vector<Command> m_commands;
+    bool m_paletteOpen = false;
+    char m_paletteQuery[128] = {};
+    int m_paletteSelected = 0;
+
+    bool m_buildLayout = false;
+    bool m_newProjectOpen = false;
+    char m_newName[128] = {}, m_newDir[512] = {}, m_newClient[512] = {}, m_newAuthor[64] = {};
+    std::function<void()> m_afterUnsaved;
+    bool m_unsavedOpen = false;
+    bool m_closeRequested = false, m_quit = false;
+    float m_fps = 0;
+};

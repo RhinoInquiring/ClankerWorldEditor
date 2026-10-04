@@ -1,0 +1,12 @@
+# Build output
+/build/
+/out/
+
+# IDE / editor
+.vs/
+.vscode/
+*.user
+
+# Runtime files
+imgui.ini
+wow-world-editor.cfg
