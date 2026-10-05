@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <cctype>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <tuple>
 #include <unordered_set>
 
@@ -116,8 +118,19 @@ std::vector<MpqChain::Entry> MpqChain::List() const
     return out;
 }
 
+std::filesystem::path MpqChain::OverlayPath(const std::string& name) const
+{
+    if (m_overlay.empty() || Lower(Backslashes(name)).rfind("world\\maps\\", 0) != 0) return {};
+    std::string rel = name;
+    std::replace(rel.begin(), rel.end(), '\\', '/');
+    return m_overlay / std::filesystem::path(rel);
+}
+
 std::optional<std::vector<uint8_t>> MpqChain::Read(const std::string& name) const
 {
+    if (const auto path = OverlayPath(name); !path.empty())
+        if (std::ifstream f(path, std::ios::binary); f)
+            return std::vector<uint8_t>((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
     for (size_t a = 0; a < m_archives.size(); ++a)
         if (auto bytes = ReadFrom(a, name)) return bytes;
     for (const MpqChain* f : m_fallbacks)
@@ -127,6 +140,11 @@ std::optional<std::vector<uint8_t>> MpqChain::Read(const std::string& name) cons
 
 bool MpqChain::HasOwn(const std::string& name) const
 {
+    if (const auto path = OverlayPath(name); !path.empty())
+    {
+        std::error_code ec;
+        if (std::filesystem::exists(path, ec)) return true;
+    }
     for (size_t a = 0; a < m_archives.size(); ++a)
         if (Has(a, name)) return true;
     return false;

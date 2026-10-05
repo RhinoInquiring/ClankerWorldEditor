@@ -397,6 +397,35 @@ std::vector<bool> WdtTiles(const std::vector<uint8_t>& wdt)
     return tiles;
 }
 
+bool SetUniqueIds(std::vector<uint8_t>& adt, const std::vector<uint32_t>& doodads, const std::vector<uint32_t>& wmos)
+{
+    bool ok = true;
+    ForEachChunk(adt, 0, adt.size(), [&](uint32_t magic, size_t off, size_t size) {
+        const bool d = magic == Tag("MDDF"), w = magic == Tag("MODF");
+        if (!d && !w) return;
+        const size_t entry = d ? sizeof(MddfEntry) : sizeof(ModfEntry);
+        const auto& ids = d ? doodads : wmos;
+        if (size / entry != ids.size()) { ok = false; return; }
+        for (size_t i = 0; i < ids.size(); ++i) std::memcpy(adt.data() + off + i * entry + 4, &ids[i], 4);   // after the name index
+    });
+    return ok;
+}
+
+std::vector<uint8_t> WdtSetTile(std::vector<uint8_t> wdt, int x, int y, bool present)
+{
+    bool done = false;
+    ForEachChunk(wdt, 0, wdt.size(), [&](uint32_t magic, size_t off, size_t size) {
+        if (done || magic != Tag("MAIN") || size < 64 * 64 * 8) return;
+        uint32_t flags = 0;
+        const size_t at = off + size_t(y * 64 + x) * 8;
+        ReadAt(wdt, at, flags);
+        flags = present ? flags | 1u : flags & ~1u;
+        std::memcpy(wdt.data() + at, &flags, 4);
+        done = true;
+    });
+    return done ? wdt : std::vector<uint8_t>{};
+}
+
 std::vector<MapEntry> ParseMapDbc(const std::vector<uint8_t>& d)
 {
     struct Header { char magic[4]; uint32_t records, fields, recordSize, stringSize; };

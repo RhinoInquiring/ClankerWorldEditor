@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <filesystem>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -26,6 +27,11 @@ public:
     /// True when this chain's own archives have the file (fallbacks not consulted).
     bool HasOwn(const std::string& name) const;
     void SetFallbacks(std::vector<const MpqChain*> fallbacks) { m_fallbacks = std::move(fallbacks); }
+    /// Loose files above every archive: <dir>/<game path, '/' separators>, looked up for World\Maps\ paths only
+    /// (the project's added map tiles and the WDTs that list them). Empty = none. Set while no loader is reading.
+    void SetOverlay(std::filesystem::path dir) { m_overlay = std::move(dir); }
+    /// Where a game path lives in the overlay (empty when there is no overlay or the path is not a map file).
+    std::filesystem::path OverlayPath(const std::string& name) const;
     /// The file as one archive holds it (index into Names()), ignoring every other archive.
     std::optional<std::vector<uint8_t>> ReadFrom(size_t archive, const std::string& name) const;
     bool Has(size_t archive, const std::string& name) const;
@@ -44,4 +50,5 @@ private:
     std::vector<void*> m_archives;   // HANDLEs, highest priority first
     std::vector<const MpqChain*> m_fallbacks;
     std::vector<std::string> m_names;
+    std::filesystem::path m_overlay;
 };

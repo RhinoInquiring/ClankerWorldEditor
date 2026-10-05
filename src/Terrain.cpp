@@ -501,6 +501,8 @@ void TerrainAdapter::RefreshTextures(int key, size_t chunk)
 
 void TerrainAdapter::Set(const Change& change, bool after)
 {
+    for (const auto& e : change.data.value("tiles", nlohmann::json::array()))   // added tiles: the overlay, whatever map is open
+        SetTile(change.data.at("map"), e[0], e[1], e[2], after);
     if (change.data.at("map").get<std::string>() != m_map) return;   // other maps pick it up when loaded
     std::set<std::pair<int, int>> touched;
     for (const auto& e : change.data.at("edits"))
@@ -751,7 +753,10 @@ uint32_t TerrainAdapter::NextUniqueId() const
     uint32_t next = kEditorUniqueIdBase;
     for (const Change& c : m_store.Done())
         if (c.domain == Domain())
+        {
             for (const auto& e : c.data.value("objects", nlohmann::json::array())) next = std::max<uint32_t>(next, EntryUid(e) + 1);
+            for (const auto& e : c.data.value("tiles", nlohmann::json::array())) next = std::max<uint32_t>(next, uint32_t(e[3]) + 1);
+        }
     // ponytail: ids only need to avoid each other and Blizzard's; scan every ADT of the map if a custom map uses this range.
     return next;
 }
@@ -1487,7 +1492,12 @@ PastePlan TerrainAdapter::PlanPaste(const TerrainClipboard& clip, int gx, int gz
             w.pos[2] += originZ; w.extMin[2] += originZ; w.extMax[2] += originZ;
             w.pos[1] += dy; w.extMin[1] += dy; w.extMax[1] += dy;
             w.uniqueId = 0;
-            if (onPaste(w.pos[0], w.pos[2])) plan.wmos.push_back(std::move(w));
+            // A building comes along when its origin or its bounds touch the paste (a compared cave whose origin is off to one side).
+            bool reaches = onPaste(w.pos[0], w.pos[2]);
+            for (const auto& [cell, e] : pasted)
+                reaches = reaches || (w.extMax[0] >= cell.first * kChunkSize && w.extMin[0] < (cell.first + 1) * kChunkSize &&
+                                      w.extMax[2] >= cell.second * kChunkSize && w.extMin[2] < (cell.second + 1) * kChunkSize);
+            if (reaches) plan.wmos.push_back(std::move(w));
         }
     }
 
@@ -1877,6 +1887,123 @@ std::optional<Change> TerrainAdapter::RotateInPlace(const std::set<ChunkRef>& ch
     return change;
 }
 
+void TerrainAdapter::SetTile(const std::string& map, int x, int y, const std::string& stash, bool present)
+{
+    const std::string base = "World\\Maps\\" + map + "\\" + map;
+    const fs::path adtPath = m_mpq.OverlayPath(base + "_" + std::to_string(x) + "_" + std::to_string(y) + ".adt");
+    const fs::path wdtPath = m_mpq.OverlayPath(base + ".wdt");
+    if (adtPath.empty() || m_projectDir.empty()) return;
+    const size_t key = size_t(TileKey(x, y));
+    std::error_code ec;
+    if (present)
+    {
+        fs::create_directories(adtPath.parent_path(), ec);
+        fs::copy_file(m_projectDir / "tiles" / stash, adtPath, fs::copy_options::overwrite_existing, ec);
+    }
+    else if (map == m_map)   // out of view before its file goes
+    {
+        if (key < m_present.size()) m_present[key] = false;
+        if (m_tiles.erase(int(key)))
+        {
+            m_renderer.UnloadTile(int(key));
+            m_objectsChanged.insert(int(key));
+        }
+    }
+    if (const auto wdt = m_mpq.Read(base + ".wdt"))
+        if (const auto patched = WdtSetTile(*wdt, x, y, present); !patched.empty())
+        {
+            fs::create_directories(wdtPath.parent_path(), ec);
+            std::ofstream(wdtPath, std::ios::binary).write(reinterpret_cast<const char*>(patched.data()), std::streamsize(patched.size()));
+        }
+    if (!present) fs::remove(adtPath, ec);
+    else if (map == m_map && key < m_present.size()) m_present[key] = true;   // streams in like any other tile
+}
+
+void TerrainAdapter::RebuildOverlay()
+{
+    if (m_projectDir.empty()) return;
+    std::error_code ec;
+    fs::remove_all(m_projectDir / "overlay", ec);   // the overlay is the applied changes, nothing else
+    for (const Change& c : m_store.Done())
+        if (c.domain == Domain())
+            for (const auto& e : c.data.value("tiles", nlohmann::json::array())) SetTile(c.data.at("map"), e[0], e[1], e[2], true);
+}
+
+std::optional<Change> TerrainAdapter::AddTiles(const std::vector<std::tuple<int, int, std::vector<uint8_t>>>& tiles, bool otherBigAlpha,
+                                               std::string& error)
+{
+    if (m_map.empty() || m_projectDir.empty()) { error = "no map open"; return std::nullopt; }
+    auto lower = [](std::string s) { for (char& c : s) c = c == '/' ? '\\' : char(std::tolower((unsigned char)c)); return s; };
+
+    // Objects already listed by the map's tiles around these: the same placement under the same id is one object
+    // (a building over a tile border) and keeps its id; every other id is made fresh, shared across the new tiles.
+    std::set<int> adding;
+    for (const auto& [x, y, bytes] : tiles) adding.insert(TileKey(x, y));
+    std::map<uint32_t, std::pair<std::string, std::array<float, 3>>> nearby;
+    for (int key : adding)
+        for (int dy = -1; dy <= 1; ++dy)
+            for (int dx = -1; dx <= 1; ++dx)
+            {
+                const int nx = key % 64 + dx, ny = key / 64 + dy, n = TileKey(nx, ny);
+                if (nx < 0 || ny < 0 || nx > 63 || ny > 63 || adding.count(n) || size_t(n) >= m_present.size() || !m_present[size_t(n)]) continue;
+                const auto adt = EditedHeights(m_map, nx, ny);
+                if (!adt) continue;
+                for (const auto& d : adt->doodads) nearby[d.uniqueId] = { lower(d.model), { d.pos[0], d.pos[1], d.pos[2] } };
+                for (const auto& w : adt->wmos) nearby[w.uniqueId] = { lower(w.model), { w.pos[0], w.pos[1], w.pos[2] } };
+            }
+    uint32_t next = NextUniqueId();
+    std::map<uint32_t, uint32_t> fresh;
+    auto idFor = [&](uint32_t uid, const std::string& model, const float pos[3]) {
+        if (const auto it = nearby.find(uid); it != nearby.end() && it->second.first == lower(model) &&
+            std::fabs(it->second.second[0] - pos[0]) < 0.5f && std::fabs(it->second.second[1] - pos[1]) < 0.5f && std::fabs(it->second.second[2] - pos[2]) < 0.5f)
+            return uid;
+        auto [it, added] = fresh.try_emplace(uid, next);
+        if (added) ++next;
+        return it->second;
+    };
+
+    nlohmann::json entries = nlohmann::json::array();
+    std::error_code ec;
+    fs::create_directories(m_projectDir / "tiles", ec);
+    for (const auto& [x, y, bytes] : tiles)
+    {
+        const std::string name = m_map + "_" + std::to_string(x) + "_" + std::to_string(y);
+        if (size_t(TileKey(x, y)) < m_present.size() && m_present[size_t(TileKey(x, y))]) { error += name + ": the map has it already; "; continue; }
+        auto adt = ParseAdt(bytes, otherBigAlpha);
+        if (!adt) { error += name + ": does not parse; "; continue; }
+        std::vector<uint32_t> doodadIds, wmoIds;
+        for (const auto& d : adt->doodads) doodadIds.push_back(idFor(d.uniqueId, d.model, d.pos));
+        for (const auto& w : adt->wmos) wmoIds.push_back(idFor(w.uniqueId, w.model, w.pos));
+        // Ground effects this client has no row for crash it near the player: those layers get none.
+        bool unknownEffects = false;
+        for (AdtChunk& c : adt->chunks)
+            for (uint32_t l = 0; l < c.layerCount && l < 4; ++l)
+                if (!KnownEffect(c.effectIds[l])) { c.effectIds[l] = 0; unknownEffects = true; ++m_effectsDropped; }
+        // Every chunk's layers written again, in this map's alpha format (objects untouched here, so their chunk
+        // references stay); then the fresh ids go into the placements in place.
+        std::set<size_t> all;
+        for (size_t ci = 0; ci < adt->chunks.size(); ++ci) all.insert(ci);
+        std::vector<uint8_t> out = RewriteAdt(bytes, *adt, all, m_bigAlpha);
+        if (out.empty() && otherBigAlpha == m_bigAlpha && !unknownEffects) out = bytes;   // a layout RewriteAdt will not rebuild, nothing to convert
+        if (out.empty()) { error += name + ": its chunk layout cannot be rewritten; "; continue; }
+        if (!SetUniqueIds(out, doodadIds, wmoIds)) { error += name + ": object lists do not match the file; "; continue; }
+        if (const auto issues = ValidateAdt(out, m_bigAlpha); !issues.empty()) { error += name + ": " + issues.front() + "; "; continue; }
+        const std::string stash = name + ".adt";
+        std::ofstream f(m_projectDir / "tiles" / stash, std::ios::binary);
+        f.write(reinterpret_cast<const char*>(out.data()), std::streamsize(out.size()));
+        if (!f) { error += name + ": cannot write the project copy; "; continue; }
+        entries.push_back({ x, y, stash, next - 1 });
+    }
+    if (entries.empty()) return std::nullopt;
+    for (const auto& e : entries) SetTile(m_map, e[0], e[1], e[2], true);
+    Change c;
+    c.domain = Domain();
+    c.label = "Add " + std::to_string(entries.size()) + " tile(s)";
+    c.target = m_map + (entries.size() == 1 ? " " + std::to_string(int(entries[0][0])) + "_" + std::to_string(int(entries[0][1])) : "");
+    c.data = { { "map", m_map }, { "edits", nlohmann::json::array() }, { "tiles", std::move(entries) } };
+    return c;
+}
+
 std::set<int> TerrainAdapter::EditedTiles(const std::string& map) const
 {
     std::set<int> tiles;
@@ -1889,6 +2016,7 @@ std::set<int> TerrainAdapter::EditedTiles(const std::string& map) const
             for (const auto& e : c.data.value("layers", nlohmann::json::array())) tiles.insert(TileKey(e[0], e[1]));
             for (const auto& e : c.data.value("objects", nlohmann::json::array())) tiles.insert(TileKey(e[0], e[1]));
             for (const auto& e : c.data.value("liquids", nlohmann::json::array())) tiles.insert(TileKey(e[0], e[1]));
+            for (const auto& e : c.data.value("tiles", nlohmann::json::array())) tiles.insert(TileKey(e[0], e[1]));
         }
     return tiles;
 }
@@ -1920,9 +2048,14 @@ void TerrainAdapter::FindCracks(std::vector<Problem>& problems) const
 {
     // Final heights of the edited tiles: the client's tile plus the last value written to each vertex.
     std::map<std::pair<std::string, int>, std::map<std::pair<size_t, size_t>, float>> edits;
+    std::set<std::pair<std::string, int>> whole;
     for (const Change& c : m_store.Done())
         if (c.domain == Domain())
+        {
             for (const auto& e : c.data.at("edits")) edits[{ c.data.at("map"), TileKey(e[0], e[1]) }][{ size_t(e[2]), size_t(e[3]) }] = e[5];
+            for (const auto& e : c.data.value("tiles", nlohmann::json::array())) whole.insert({ c.data.at("map"), TileKey(e[0], e[1]) });
+        }
+    for (const auto& id : whole) edits[id];   // an added tile: all its chunks
     std::map<std::pair<std::string, int>, std::optional<Adt>> tiles;
     auto tile = [&](const std::string& map, int x, int y) -> const Adt* {
         if (x < 0 || y < 0 || x > 63 || y > 63) return nullptr;
@@ -1945,6 +2078,8 @@ void TerrainAdapter::FindCracks(std::vector<Problem>& problems) const
         if (!a) continue;
         std::set<size_t> chunks;
         for (const auto& [cv, value] : vertices) chunks.insert(cv.first);
+        if (whole.count(id))
+            for (size_t ci = 0; ci < a->chunks.size(); ++ci) chunks.insert(ci);
         size_t bad = 0;
         float worst = 0;
         for (size_t ci : chunks)
@@ -1989,6 +2124,7 @@ size_t TerrainAdapter::Export(const fs::path& outDir, std::string& error, std::v
         nlohmann::json objects = nlohmann::json::array();
     };
     std::map<std::pair<std::string, int>, TileEdits> tiles;
+    std::set<std::string> addedMaps;   // maps that gained tiles: their WDT is exported too
     for (const Change& c : m_store.Done())
     {
         if (c.domain != Domain()) continue;
@@ -1999,6 +2135,11 @@ size_t TerrainAdapter::Export(const fs::path& outDir, std::string& error, std::v
         for (const auto& e : c.data.value("areas", nlohmann::json::array())) tiles[{ map, TileKey(e[0], e[1]) }].areas[size_t(e[2])] = e[4];
         for (const auto& e : c.data.value("objects", nlohmann::json::array())) tiles[{ map, TileKey(e[0], e[1]) }].objects.push_back(e);
         for (const auto& e : c.data.value("liquids", nlohmann::json::array())) tiles[{ map, TileKey(e[0], e[1]) }].liquids[size_t(e[2])] = e[4];
+        for (const auto& e : c.data.value("tiles", nlohmann::json::array()))
+        {
+            tiles[{ map, TileKey(e[0], e[1]) }];   // read through the overlay: the added tile as converted
+            addedMaps.insert(map);
+        }
     }
 
     // Final heights of any tile (edited or not), for normals that look across tile borders.
@@ -2161,6 +2302,18 @@ size_t TerrainAdapter::Export(const fs::path& outDir, std::string& error, std::v
         ++written;
         if (files) files->push_back(path);
     }
+    for (const std::string& map : addedMaps)   // the WDT listing the added tiles (the client loads only tiles it lists)
+        if (const auto wdt = m_mpq.Read("World\\Maps\\" + map + "\\" + map + ".wdt"))
+        {
+            const fs::path path = outDir / "World" / "Maps" / map / (map + ".wdt");
+            std::error_code ec;
+            fs::create_directories(path.parent_path(), ec);
+            std::ofstream f(path, std::ios::binary);
+            f.write(reinterpret_cast<const char*>(wdt->data()), std::streamsize(wdt->size()));
+            if (!f) { error = "Cannot write " + path.string(); return written; }
+            ++written;
+            if (files) files->push_back(path);
+        }
     return written;
 }
 

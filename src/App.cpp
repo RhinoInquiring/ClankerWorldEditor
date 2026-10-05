@@ -313,6 +313,8 @@ bool App::OpenProject(const std::string& dir)
 
     CloseProject();
     const size_t archives = m_mpq.Open(project->DataDir().string());
+    m_mpq.SetOverlay(project->dir / "overlay");   // tiles the project added (rebuilt once its changes are loaded)
+    m_terrain.SetProjectDir(project->dir);
     if (!archives) Log("No MPQ archives in %s. Check the client folder in project.json.", project->DataDir().string().c_str());
     if (auto dbc = m_mpq.Read("DBFilesClient\\Map.dbc")) m_maps = ParseMapDbc(*dbc);
     std::vector<std::string> blueprintErrors;
@@ -335,6 +337,7 @@ bool App::OpenProject(const std::string& dir)
     m_loader.Start(&m_mpq);
     m_store.author = m_project->author;
     if (!m_store.Load(m_project->ChangesDir(), error)) Log("Changes not fully loaded: %s", error.c_str());
+    m_terrain.RebuildOverlay();
     std::ofstream(kConfigFile) << m_project->dir.string() << "\n";
     Log("Opened project '%s': %zu archives, %zu maps, %zu changes.", m_project->name.c_str(), archives, m_maps.size(), m_store.Done().size());
     ConnectServer();
@@ -369,6 +372,8 @@ void App::CloseProject()
     m_diffThumbs.clear();
     m_diffNoThumb.clear();
     m_diffPending.clear();
+    m_diffNewTiles.clear();
+    m_diffNewLayer = 0;
     m_diffTarget = {};
     m_mpq.SetFallbacks({});
     m_ghosts = Ghosts{};
@@ -382,6 +387,8 @@ void App::CloseProject()
     m_store.Clear();
     m_loader.Stop();   // before the archives it reads from close
     m_renderer.ClearFar();
+    m_mpq.SetOverlay({});
+    m_terrain.SetProjectDir({});
     m_mpq.Close();
     m_project.reset();
     m_db.Close();
@@ -1967,6 +1974,13 @@ std::set<int> App::PasteTiles() const
     for (int z = std::max(0, gz - band); z <= std::min(1023, gz + m_clipboard.Depth() - 1 + band); z += 1)
         for (int x = std::max(0, gx - band); x <= std::min(1023, gx + m_clipboard.Width() - 1 + band); x += 1)
             tiles.insert(TileKey(x / 16, z / 16));
+    // A carried object is added to the tile its origin stands on, which can lie beyond the paste (a cave's): loaded too.
+    auto origin = [&](const float pos[3]) {
+        const int tx = int(std::floor((gx * kChunkSize + pos[0]) / kTileSize)), tz = int(std::floor((gz * kChunkSize + pos[2]) / kTileSize));
+        if (tx >= 0 && tz >= 0 && tx < 64 && tz < 64) tiles.insert(TileKey(tx, tz));
+    };
+    for (const auto& d : m_clipboard.doodads) origin(d.pos);
+    for (const auto& w : m_clipboard.wmos) origin(w.pos);
     return tiles;
 }
 
@@ -2242,7 +2256,8 @@ void App::HandleShortcuts()
     }
     if (m_comparing && m_tool == Tool::Copy && m_pin && (ImGui::IsKeyPressed(ImGuiKey_Enter, false) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false)))
         CommitCompare();
-    if (m_comparing && !m_diffActive.empty() && ImGui::IsKeyPressed(ImGuiKey_Delete, false)) RejectDifference();
+    if ((m_comparing || !m_diffNewTiles.empty()) && !m_diffActive.empty() && ImGui::IsKeyPressed(ImGuiKey_Delete, false)) RejectDifference();
+    if (!m_diffNewTiles.empty() && (ImGui::IsKeyPressed(ImGuiKey_Enter, false) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false))) AddDifferenceTiles();
     if (m_tool == Tool::Copy && m_pin)
     {
         if (ImGui::IsKeyPressed(ImGuiKey_Enter, false) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false)) CommitPlacement();
@@ -2255,7 +2270,7 @@ void App::HandleShortcuts()
     {
         if (m_armed) m_armed.reset();                 // stop placing a catalog model
         else if (m_comparing) StopCompare();          // the map comes back as it is
-        else if (!m_diffPending.empty()) { m_diffPending.clear(); m_diffActive.clear(); }   // a review still on its way
+        else if (!m_diffPending.empty()) { EndNewTiles(); m_diffPending.clear(); m_diffActive.clear(); }   // a review still on its way
         else if (m_pin) CancelPin();                  // first Esc: unpin, terrain goes back
         else if (m_placing) m_placing = false;        // second: stop placing
         else if (m_tool == Tool::Objects && !m_objSel.empty()) m_objSel.clear();
@@ -2960,7 +2975,10 @@ void App::DrawViewport(float dt)
         dl->AddText(pad, IM_COL32(235, 238, 242, 255), caption);
         if (const Ghosts::Layer* solo = m_soloLayer ? m_ghosts.Find(m_soloLayer) : nullptr)
         {
-            const std::string line = "SOLO: " + solo->label + "   (read-only view; edits go to the map; turn Solo off in Versions)";
+            const std::string line = m_soloLayer == m_diffNewLayer
+                ? "NEW TILES: " + std::to_string(m_diffNewTiles.size()) + " tile(s) from " + m_diffTarget.label +
+                      " this map does not have   Enter add them   Del reject   Esc close"
+                : "SOLO: " + solo->label + "   (read-only view; edits go to the map; turn Solo off in Versions)";
             const ImVec2 at{ pad.x, pad.y + ImGui::GetTextLineHeight() + 10 };
             dl->AddRectFilled({ at.x - 6, at.y - 4 }, { at.x + ImGui::CalcTextSize(line.c_str()).x + 6, at.y + ImGui::GetTextLineHeight() + 4 },
                               IM_COL32(150, 70, 0, 200), 4);

@@ -91,6 +91,13 @@ bool WdtHasTile(const std::vector<uint8_t>& wdt, int x, int y);
 /// All 64x64 present flags of a WDT, indexed y * 64 + x.
 std::vector<bool> WdtTiles(const std::vector<uint8_t>& wdt);
 
+/// Sets the unique ids of an ADT's placements in place, MDDF and MODF entries in file order (ParseAdt's order).
+/// False when the lists do not match the file's.
+bool SetUniqueIds(std::vector<uint8_t>& adt, const std::vector<uint32_t>& doodads, const std::vector<uint32_t>& wmos);
+
+/// The WDT with tile (x, y) marked present or absent in MAIN (empty when it has no MAIN).
+std::vector<uint8_t> WdtSetTile(std::vector<uint8_t> wdt, int x, int y, bool present);
+
 struct MapEntry { uint32_t id = 0; std::string directory; std::string name; };
 /// Map.dbc rows (3.3.5 layout: ID, Directory, ..., MapName_lang enUS at field 5).
 std::vector<MapEntry> ParseMapDbc(const std::vector<uint8_t>& dbc);

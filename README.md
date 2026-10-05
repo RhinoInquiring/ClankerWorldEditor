@@ -3,11 +3,13 @@
 Standalone world editor for WoW 3.3.5a (build 12340) and AzerothCore. Design spec:
 the "WoW 3.3.5 World Editor — Design Spec" doc.
 
-Current state: **M1 in progress.** Docked editor UI (menu, mode toolbar, status bar, Viewport,
-Tools, Maps, Inspector, Changes, Problems, Log, Ctrl+P command palette), projects with saved change
-history, undo/redo, and the first adapter: terrain height sculpting (raise, lower, flatten, smooth)
-with export of patched ADTs and a one-click play test into the WXL client overlay.
-See `docs/change-model.md`.
+Current state: **M1 done, merging tools in use.** Docked editor UI (menu, tool groups, status bar, Viewport,
+Tools, Maps, Inspector, Catalog, Versions, Changes, Problems, Log, Ctrl+P command palette), projects with saved
+change history and undo/redo. Terrain: sculpt, texture paint, holes, copy/paste with seam blending, water,
+objects, zones and world maps; creatures, gameobjects and their paths in the AzerothCore database. Map versions:
+ghost layers, in-place compare of a selection across versions, and the Differences catalog that scans a whole
+other version and lets you approve its edits area by area, new tiles included. Export writes patched ADTs (and
+WDTs for added tiles) for a one-click play test in the WXL client. See `docs/change-model.md`.
 
 ## Build
 
@@ -52,8 +54,15 @@ objects or map position; search by area name.
 - Verdicts and per-tile results are saved under `<project>/differences/`. **Rescan** reuses every tile whose file and
   project edits have not changed, so it takes seconds; approved and rejected areas stay as decided.
 - Objects only your map has are noted on a card but are not an edit by themselves (a paste cannot remove them).
-  Areas whose tiles your map lacks altogether (new islands, say) cannot be pasted yet: they are counted and hidden
-  behind the **New terrain** checkbox. An area larger than one tile's worth of chunks is split into one card per tile.
+  An area larger than one tile's worth of chunks is split into one card per tile.
+- **New terrain** (tiles your map lacks altogether, e.g. Turtle's islands): reviewing such a card shows those tiles
+  alone (solo) from the other version; **Enter** adds them whole, as one undo step. Each is converted to your map's
+  alpha format, ground effects your client lacks are dropped, and objects get fresh unique ids (a placement a
+  neighbouring tile already lists keeps its id: it is the same object). The tiles are kept in `<project>/tiles/` and
+  served through `<project>/overlay/` (with a WDT that lists them), so streaming, compare, scans and export all see
+  them; the overlay is rebuilt from the changes when the project opens. Export writes the tiles and the map's WDT.
+  Where your map's own neighbouring tiles differ, the seam shows in Problems: paste or sculpt across it.
+  **Only new terrain** lists just these cards. Not yet: minimap and far-terrain (WDL) entries for added tiles.
 - Measured: a whole Eastern Kingdoms scan (687-741 tiles) takes about 10 s; a rescan about 6 s.
 
 ### Water in copy and paste
@@ -78,6 +87,10 @@ or set up first; those map copies are loaded as hidden layers for the selected t
   background as soon as its numbers are in.
 - **Shift+click / Shift+drag** adds chunks, **Ctrl** removes them; the preview and the numbers follow the selection.
 - **Enter** pastes the shown version and ends the compare (one undo step); **Esc** ends it and the map comes back.
+- Objects: a doodad comes with the chunk its origin stands on; a building (WMO) comes with every area its bounds
+  reach, so a cave whose origin lies off to one side still comes with the area it runs through. The paste waits for
+  the tile holding each carried object's origin (the object is filed there). The Copy tool keeps the origin rule,
+  so copying a chunk in a city does not drag the whole city model along.
 
 Per version (Versions window table, and the blue line in the viewport): chunks that differ (heights > 0.5 yd, textures,
 holes or water), mean / max height difference, chunks whose water differs (fishing/fatigue masks ignored, map editors
@@ -109,6 +122,11 @@ with itself is identical, prints every `<map>_*` copy's difference for a 4x4-chu
 cycling step (difference, copy, blended and hard plan, preview).
 `--diff-check "<client>\Data" <base map> <other map>` scans a whole map pair, prints progress and the areas found, rejects the
 largest, then scans again: every tile must come from the saved results and the rejection must hold.
+`--diff-objects "<client>\Data" <base map> <other map> <zone id>` lists, for every difference area in a zone, the
+buildings the compare carries and every building of the other version reaching into it (origin inside or not, on the
+map already or not, model in the client or not), e.g. `Kalimdor Kalimdor_Turtle 400` for Thousand Needles.
+`--tiles-check "<client>\Data" <base map> <other map>` adds two tiles only the other map has (with objects when it
+can) in a scratch project and checks heights, alpha, water, object ids, undo/redo, the rebuilt overlay and the export.
 `--water-check "<client>\Data" <map> <x> <y>` pastes a dry chunk over a wet one and back on a tile with both, checks
 undo/redo and four quarter turns, then exports and reads the tile back (pasted water exact, every other chunk's kept).
 
@@ -119,12 +137,12 @@ tile and its textures without opening a window and prints a summary.
 
 | File | Contents |
 | --- | --- |
-| `src/Mpq.*` | MPQ chain in client priority order (StormLib) |
-| `src/Formats.*` | ADT, WDT and BLP parsers; no GPU code |
+| `src/Mpq.*` | MPQ chain in client priority order (StormLib), fallbacks to attached clients, the project overlay for added tiles |
+| `src/Formats.*` | ADT, WDT, WDL, DBC and BLP parsers and writers (MH2O, rewritten ADTs, WDT tile flags); no GPU code |
 | `src/Renderer.*` | D3D11 terrain, placement boxes, overlay lines |
 | `src/Changes.*` | Change, Adapter, ChangeStore (undo/redo, save/load) |
 | `src/Project.*` | Project folder and project.json |
-| `src/Terrain.*` | Terrain-height adapter: tile loading, picking, sculpt brush, ADT export |
+| `src/Terrain.*` | Terrain adapter: tile loading, picking, sculpt/paint/holes/areas, copy/paste (heights, textures, water, objects), added tiles, ADT export |
 | `src/App.*` | Editor UI: panels, tools, camera, commands, dialogs |
 | `src/Ghosts.*` | Ghost layers (other clients, single archives, other maps at the same coordinates), background streaming, `CompareArea` |
 | `src/Differences.*` | Whole-map scan of another version on a worker thread, areas of touching edited chunks, saved results and verdicts |

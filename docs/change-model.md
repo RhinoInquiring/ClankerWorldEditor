@@ -51,6 +51,17 @@ Known gap: MCNR normals are not rewritten yet, so the client lights edited terra
 - Export rebuilds the tile's MH2O from its liquids (inserting one when the file had none); the client then ignores
   MCLQ for that tile. Like areas, the server sees water through its extracted maps: re-run the extractor.
 
+## Added tiles
+
+- Terrain changes may carry `"tiles": [[tileX, tileY, file, lastUid], ...]`: whole tiles the map lacked, taken from
+  another version. `file` is the converted copy in `<project>/tiles/`; `lastUid` the highest object id given to it
+  (NextUniqueId continues above it).
+- Apply copies the file into `<project>/overlay/World/Maps/<map>/` and marks the tile in an overlay copy of the
+  map's WDT; revert removes both. The archive reader (MpqChain::SetOverlay) serves overlay files above every MPQ for
+  `World\Maps\` paths. The overlay is rebuilt from the applied changes when the project opens, so it never outlives
+  an unsaved session.
+- Export writes each added tile (with any later edits) and the map's WDT.
+
 ## Zones (AreaTable + chunk area ids)
 
 - Terrain changes may carry `"areas": [[tileX, tileY, chunk, before, after], ...]`; export writes the MCNK header

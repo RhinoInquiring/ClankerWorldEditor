@@ -392,6 +392,11 @@ private:
     void ReviewDifference(const Differences::Region& r);
     void RejectDifference();
     void RenderDifferenceThumb(const Differences::Region& r);
+    // A reviewed area on tiles the map lacks: those tiles shown alone from the other version until Enter adds them.
+    std::set<int> m_diffNewTiles;
+    int m_diffNewLayer = 0;
+    void AddDifferenceTiles();
+    void EndNewTiles();
 
     std::vector<Blueprint> m_blueprints;
     std::map<std::string, Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>> m_blueprintThumbs;   // by file

@@ -411,9 +411,23 @@ namespace
 
     std::pair<int, int> CellOf(const float pos[3]) { return { int(std::floor(pos[0] / kChunkSize)), int(std::floor(pos[2] / kChunkSize)) }; }
 
-    /// Objects standing on `cells`, once each (an object is listed by every tile it touches), keyed by model and rounded position.
+    /// Whether a building's bounds (x/z) reach any of `cells`.
+    bool WmoReaches(const WmoPlacement& w, const std::set<std::pair<int, int>>& cells)
+    {
+        const int x0 = int(std::floor(w.extMin[0] / kChunkSize)), x1 = int(std::floor(w.extMax[0] / kChunkSize));
+        const int z0 = int(std::floor(w.extMin[2] / kChunkSize)), z1 = int(std::floor(w.extMax[2] / kChunkSize));
+        if (x1 < x0 || z1 < z0 || int64_t(x1 - x0 + 1) * (z1 - z0 + 1) > 1024 * 1024) return false;
+        for (int z = z0; z <= z1; ++z)
+            for (int x = x0; x <= x1; ++x)
+                if (cells.count({ x, z })) return true;
+        return false;
+    }
+
+    /// Objects on `cells`, once each (an object is listed by every tile it touches), keyed by model and rounded position.
+    /// An object belongs where its origin stands; with `wmoBounds` a building also belongs wherever its bounds reach
+    /// (a cave whose origin lies off to one side still runs through the area).
     struct Objects { std::map<std::string, DoodadPlacement> doodads; std::map<std::string, WmoPlacement> wmos; };
-    Objects GatherObjects(const std::map<int, LoadedTile>& tiles, const std::set<std::pair<int, int>>& cells)
+    Objects GatherObjects(const std::map<int, LoadedTile>& tiles, const std::set<std::pair<int, int>>& cells, bool wmoBounds = false)
     {
         std::set<int> keys;
         for (const auto& [gx, gz] : cells) keys.insert(TileKey(gx / 16, gz / 16));
@@ -426,7 +440,8 @@ namespace
             for (const DoodadPlacement& p : it->second.adt.doodads)
                 if (cells.count(CellOf(p.pos)) && seenD.insert(p.uniqueId).second) o.doodads.emplace(ObjectKey(p.model, p.pos), p);
             for (const WmoPlacement& p : it->second.adt.wmos)
-                if (cells.count(CellOf(p.pos)) && seenW.insert(p.uniqueId).second) o.wmos.emplace(ObjectKey(p.model, p.pos), p);
+                if ((cells.count(CellOf(p.pos)) || (wmoBounds && WmoReaches(p, cells))) && seenW.insert(p.uniqueId).second)
+                    o.wmos.emplace(ObjectKey(p.model, p.pos), p);
         }
         return o;
     }
@@ -474,7 +489,7 @@ AreaDiff CompareArea(const std::map<int, LoadedTile>& map, const std::map<int, L
     if (count) d.meanHeight = float(sum / count);
     if (edgeCount) d.meanEdge = float(edgeSum / edgeCount);
 
-    const Objects mine = GatherObjects(map, cells), theirs = GatherObjects(version, cells);
+    const Objects mine = GatherObjects(map, cells, true), theirs = GatherObjects(version, cells, true);
     for (const auto& [k, p] : theirs.doodads)
         if (!mine.doodads.count(k)) d.newDoodads.push_back(p);
     for (const auto& [k, p] : theirs.wmos)

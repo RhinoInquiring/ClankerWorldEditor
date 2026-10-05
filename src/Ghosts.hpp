@@ -140,5 +140,6 @@ std::vector<CellDiff> CompareCells(const std::map<int, LoadedTile>& map, const s
                                    const std::set<std::pair<int, int>>& cells);
 
 /// Compares the chunks at global grid cells `cells` of `version` against `map` (both by tile key). Objects match by model
-/// and position (1 yd), so a re-saved copy of the same placement is not counted as new.
+/// and position (1 yd), so a re-saved copy of the same placement is not counted as new. Buildings count wherever their
+/// bounds reach the cells (a cave's origin can lie outside the area it runs through); other objects where they stand.
 AreaDiff CompareArea(const std::map<int, LoadedTile>& map, const std::map<int, LoadedTile>& version, const std::set<std::pair<int, int>>& cells);

@@ -14,6 +14,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -275,6 +276,16 @@ public:
     /// from the client, in order; true when objects changed. Static and self-contained: safe on a worker thread.
     static bool ReplayEdits(LoadedTile& tile, const std::string& map, const std::vector<Change>& done);
 
+    /// The project folder: added tiles are kept in its tiles/ and served from its overlay/ (MpqChain::SetOverlay).
+    void SetProjectDir(const std::filesystem::path& dir) { m_projectDir = dir; }
+    /// Rebuilds overlay/ from the applied changes (the added tiles and the WDTs listing them); call once they are loaded.
+    void RebuildOverlay();
+    /// Whole tiles this map lacks, taken from another version: each {x, y, file bytes} as that version has them, in
+    /// its alpha format `otherBigAlpha`. Each is converted to this map's alpha format, ground effects this client lacks
+    /// are dropped, and object ids are made fresh (unless a neighbouring tile already lists the same placement: that
+    /// is the same object). One change adds them all; `error` collects tiles that could not be added.
+    std::optional<Change> AddTiles(const std::vector<std::tuple<int, int, std::vector<uint8_t>>>& tiles, bool otherBigAlpha, std::string& error);
+
     /// Tiles of `map` that the project's applied changes touch.
     std::set<int> EditedTiles(const std::string& map) const;
 
@@ -303,6 +314,9 @@ private:
 
     std::string m_map;
     bool m_bigAlpha = false;
+    std::filesystem::path m_projectDir;
+    /// Shows (copies tiles/<stash> into the overlay, marks it in the overlay WDT) or hides an added tile.
+    void SetTile(const std::string& map, int x, int y, const std::string& stash, bool present);
     std::vector<bool> m_present;
     std::map<int, LoadedTile> m_tiles;
     std::set<int> m_pinned;

@@ -87,7 +87,24 @@ void App::StartDifferences(const DiffCandidate& c)
 void App::UpdateDifferences()
 {
     m_diffs.Update();
-    if (m_diffPending.empty()) return;
+    if (m_diffPending.empty() || !m_diffNewTiles.empty()) return;   // nothing to review, or new tiles waiting for Enter
+    // Tiles the map does not have: shown alone (solo) from the other version; Enter adds them whole.
+    std::set<int> missing;
+    for (const auto& [gx, gz] : m_diffPending)
+        if (const int key = TileKey(gx / 16, gz / 16); size_t(key) >= m_terrain.Present().size() || !m_terrain.Present()[size_t(key)])
+            missing.insert(key);
+    if (!missing.empty())
+    {
+        const std::string shown = m_diffTarget.map == m_terrain.Map() ? std::string() : m_diffTarget.map;
+        Ghosts::Layer& l = m_ghosts.AddLayer(m_diffTarget.source, -1, m_diffTarget.label + " (new tiles)", shown);
+        l.only = missing;
+        m_diffNewLayer = l.id;
+        m_diffNewTiles = std::move(missing);
+        SetSolo(l.id);
+        Log("%zu tile(s) here are not on this map: shown alone from %s. Enter adds them, Del rejects, Esc closes.", m_diffNewTiles.size(),
+            m_diffTarget.label.c_str());
+        return;
+    }
     // A reviewed area is selected once its tiles are loaded (they are pinned meanwhile), then compared in place.
     std::set<ChunkRef> picked;
     size_t waiting = 0;
@@ -113,9 +130,55 @@ void App::UpdateDifferences()
     m_diffActive = active;   // StartCompare stops any earlier compare, which forgets the reviewed area
 }
 
+void App::EndNewTiles()
+{
+    if (m_diffNewLayer)
+    {
+        if (m_soloLayer == m_diffNewLayer) SetSolo(0);
+        RemoveGhostLayer(m_diffNewLayer);
+    }
+    m_diffNewLayer = 0;
+    m_diffNewTiles.clear();
+}
+
+void App::AddDifferenceTiles()
+{
+    if (m_diffNewTiles.empty()) return;
+    const MpqChain& chain = m_diffTarget.source ? m_ghosts.Chain(m_diffTarget.source) : m_mpq;
+    const std::string& map = m_diffs.OtherMap();
+    const auto wdt = chain.Read("World\\Maps\\" + map + "\\" + map + ".wdt");
+    std::vector<std::tuple<int, int, std::vector<uint8_t>>> tiles;
+    std::string error;
+    for (int key : m_diffNewTiles)
+    {
+        auto bytes = chain.Read("World\\Maps\\" + map + "\\" + map + "_" + std::to_string(key % 64) + "_" + std::to_string(key / 64) + ".adt");
+        if (bytes) tiles.emplace_back(key % 64, key / 64, std::move(*bytes));
+        else error += std::to_string(key % 64) + "_" + std::to_string(key / 64) + ": not in " + m_diffTarget.label + "; ";
+    }
+    auto change = m_terrain.AddTiles(tiles, wdt && WdtBigAlpha(*wdt), error);
+    if (!error.empty()) Log("Tiles not added: %s", error.c_str());
+    if (!change) return;
+    const size_t added = change->data.at("tiles").size();
+    std::set<int> done;
+    for (const auto& e : change->data.at("tiles")) done.insert(TileKey(e[0], e[1]));
+    m_store.Commit(std::move(*change));
+    // Chunks on the added tiles are done; the rest of the area (on tiles the map had) is compared as usual.
+    std::vector<std::pair<int, int>> pasted, rest;
+    for (const auto& cell : m_diffPending) (done.count(TileKey(cell.first / 16, cell.second / 16)) ? pasted : rest).push_back(cell);
+    m_diffs.SetStatus(pasted, Differences::Status::Pasted);
+    EndNewTiles();
+    m_diffPending = std::move(rest);
+    if (m_diffPending.empty()) m_diffActive.clear();
+    std::vector<Problem> cracks;
+    m_terrain.FindCracks(cracks);
+    Log("Added %zu tile(s) from %s (one undo step).%s", added, m_diffTarget.label.c_str(),
+        cracks.empty() ? "" : " Their edges do not meet every neighbour: see Problems (paste or sculpt across the seam).");
+}
+
 void App::ReviewDifference(const Differences::Region& r)
 {
     StopCompare();
+    EndNewTiles();
     m_selection.clear();
     if (m_terrain.Map() != m_diffs.BaseMap()) GoToTile(m_diffs.BaseMap(), r.x0 / 16, r.z0 / 16);
     // Look at it from the south, high enough to see all of it.
@@ -139,6 +202,9 @@ void App::RejectDifference()
         Log("Difference at %s rejected (%zu chunks).", AreaLabel(r->area).c_str(), r->cells.size());
     }
     StopCompare();
+    EndNewTiles();
+    m_diffPending.clear();
+    m_diffActive.clear();
 }
 
 void App::RenderDifferenceThumb(const Differences::Region& r)
@@ -207,12 +273,14 @@ void App::DrawDifferences()
     if (!m_diffs.Started()) { ImGui::TextColored(kQuiet, "Pick the other version, then Scan. Each edited area becomes a card here."); return; }
 
     // Filters and order.
-    // Terrain the map has no tile for cannot be pasted yet: those cards stay out of the way unless asked for.
+    // Terrain the map has no tile for (new islands, say) is added as whole tiles; it can be listed on its own.
     auto newTerrainOnly = [](const Differences::Region& r) { return (r.kinds & ~CellDiff::NewTerrain) == 0; };
     size_t pending = 0, rejected = 0, newTerrain = 0;
     for (const auto& r : m_diffs.Regions())
-        if (newTerrainOnly(r)) ++newTerrain;
-        else (r.status == Differences::Status::Rejected ? rejected : pending) += 1;
+    {
+        (r.status == Differences::Status::Rejected ? rejected : pending) += 1;
+        newTerrain += newTerrainOnly(r) && r.status == Differences::Status::Pending;
+    }
     ImGui::TextColored(kAccent, "%zu area(s) to review", pending);
     ImGui::SameLine();
     ImGui::TextColored(kQuiet, "  %zu rejected   vs %s", rejected, m_diffs.OtherLabel().c_str());
@@ -227,8 +295,8 @@ void App::DrawDifferences()
     if (newTerrain)
     {
         ImGui::SameLine();
-        ImGui::Checkbox(("New terrain (" + std::to_string(newTerrain) + ")").c_str(), &m_diffShowNewTerrain);
-        ImGui::SetItemTooltip("Areas on tiles this map does not have at all (new islands, say).\nShown to look at; pasting them needs new tiles, not supported yet.");
+        ImGui::Checkbox(("Only new terrain (" + std::to_string(newTerrain) + ")").c_str(), &m_diffShowNewTerrain);
+        ImGui::SetItemTooltip("Areas on tiles this map does not have at all (new islands, say).\nApproving one adds its tiles whole from the other version.");
     }
     ImGui::SameLine();
     ImGui::SetNextItemWidth(120);
@@ -241,8 +309,8 @@ void App::DrawDifferences()
     std::vector<const Differences::Region*> shown;
     for (const auto& r : m_diffs.Regions())
     {
-        if (newTerrainOnly(r) != m_diffShowNewTerrain) continue;   // the new-terrain view lists only those
-        if (!m_diffShowNewTerrain && (r.status == Differences::Status::Rejected) != m_diffShowRejected) continue;
+        if (m_diffShowNewTerrain && !newTerrainOnly(r)) continue;
+        if ((r.status == Differences::Status::Rejected) != m_diffShowRejected) continue;
         if (!query.empty())
         {
             std::string name = AreaLabel(r.area);
