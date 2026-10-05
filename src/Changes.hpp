@@ -30,7 +30,7 @@ struct Problem
     int tx = -1, ty = -1;
 };
 
-/// One per domain. Applies and reverts its own changes; see docs/change-model.md.
+/// One per domain. Applies and reverts its own changes; see docs/concepts/change-model.md.
 class Adapter
 {
 public:

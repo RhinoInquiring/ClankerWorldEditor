@@ -10,7 +10,7 @@
 #include <utility>
 #include <vector>
 
-/// The project folder: project.json, changes/, out/. See docs/change-model.md.
+/// The project folder: project.json, changes/, out/. See docs/concepts/change-model.md.
 struct Project
 {
     std::filesystem::path dir;
@@ -18,7 +18,7 @@ struct Project
     std::string clientDir;   // WXL client used as data source and for play-testing
     std::string author;
     /// IDs this project hands out, per kind ("creature.guid", "gameobject.guid", "area.id", "wmoarea.id"): new rows take the lowest free id in
-    /// their range and never leave it. IDs are permanent once a change records them (docs/change-model.md).
+    /// their range and never leave it. IDs are permanent once a change records them (docs/concepts/change-model.md).
     struct IdRange { uint32_t first = 0, last = 0; };
     std::map<std::string, IdRange> idRanges = { { "creature.guid", { 9000000, 9099999 } }, { "gameobject.guid", { 9000000, 9099999 } },
                                                 { "area.id", { 20000, 20999 } },        // AreaTable; creature.zoneId is 16-bit

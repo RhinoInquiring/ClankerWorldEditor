@@ -1,0 +1,72 @@
+# Command-line checks
+
+[Back to the README](../../README.md)
+
+`wow-world-editor.exe` runs headless when given one of these; each prints what it did and exits with 0 when every
+expectation held. Most need a 3.3.5 client's Data folder (`"<client>\Data"` below); rendering checks use a software
+Direct3D device. Checks that write files use a temporary folder and remove it.
+
+## Core
+
+| Command | Checks |
+| --- | --- |
+| `--selftest` | Parsers, writers, change store, clipboard rotation, blueprints, on synthetic data |
+| `--check <Data> <map> <x> <y>` | Parses one real tile and its textures |
+| `--validate <adt files...>` | Structural check of ADTs as the client reads them |
+| `--validate-refs <Data> <adt files...>` | Every model and texture the tiles use exists |
+| `--ground-effects <Data> <adt files...>` | Every ground effect the tiles use exists in the client |
+| `--rewrite-check <Data> <map> <x> <y>` | Rewrites a tile's layers, re-parses and validates it |
+| `--normals-check <Data> <map> <x> <y>` | Recomputed normals against Blizzard's |
+| `--stream-check <Data> <map> <x> <y> [other client]` | Frame times while flying across tiles with background loading |
+
+## Terrain and objects
+
+| Command | Checks |
+| --- | --- |
+| `--plan-check <Data>` | Copy, rotate, blended paste, objects, furniture carrying, area paint, export |
+| `--water-check <Data> <map> <x> <y>` | Dry over wet and back, undo/redo, rotation, export of water |
+| `--blueprint-check <Data> <map> <x> <y> <out.png>` | Save, load and draw a blueprint |
+| `--model-check <Data> <map> <x> <y>` | Every model a tile places loads, boxes fit |
+| `--anim-check <Data> <model.m2> [...]` | Skeletons animate without flying apart |
+| `--catalog-check <Data> <out.png>` | Catalog build time, search, thumbnails |
+| `--asset-check <Data> <other client> <map> <x> <y>` | Paste from another client, cracks, the asset closure |
+| `--render <Data> <map> <x> <y> <out.png> [yaw pitch above fx fz]` | Draws a view to a PNG |
+| `--map-preview <Data> <map> <out.png>` | The Maps panel picture |
+
+## Versions
+
+| Command | Checks |
+| --- | --- |
+| `--ghost-check <Data> <other client> <map> <x> <y>` | Tile versions, ghost layers, copy from a ghost |
+| `--compare-check <Data> <map> <x> <y>` | Edge layout, every `<map>_*` copy's difference, cycling cost |
+| `--diff-check <Data> <base map> <other map>` | Whole-map scan, areas, rejection, rescan from saved results |
+| `--diff-objects <Data> <base map> <other map> <zone id>` | Buildings each difference area carries, and why |
+| `--tiles-check <Data> <base map> <other map>` | Adding tiles: heights, alpha, water, ids, far heights, undo, overlay, export, packing |
+
+## Sources and output
+
+| Command | Checks |
+| --- | --- |
+| `--sources-check <Data>` | Layer order, overrides, disabling, "players have it", notes, project.json |
+| `--scan-check` | Scanning a mixed folder into layers, strays, rescan |
+| `--mpq-check <folder> [keep.MPQ]` | Packs a folder like the patch and reads every file back |
+| `--minimap-check <Data> <map> <x> <y> [out.png]` | The editor's minimap of a tile beside the client's (`<out>.client.png`) |
+| `--export <project folder>` | What Ctrl+E does, without the window |
+
+## Server
+
+| Command | Checks |
+| --- | --- |
+| `--server-check <server folder> [soap account] [password]` | Reads worldserver.conf, queries the database, runs `server info` |
+| `--spawn-check <server folder>` | Spawn and path adapters: place, move, group edits, undo, export, id ranges (leaves the database as it was) |
+| `--unit-catalog-check <server folder> <Data>` | Every creature and gameobject template and its model |
+| `--area-check <Data>` | AreaTable, WMOAreaTable and world map adapters on the real DBCs |
+
+## Tools
+
+| Command | Does |
+| --- | --- |
+| `--find <Data> <word>` | Every listed file whose path contains the word, with its archive |
+| `--extract <Data> <game path> <out file>` | One file as the client resolves it |
+| `--where <Data> <map> <text>` | Every placement on the map whose model path contains the text |
+| `--sql <server folder> "<query>"` | Prints a query's rows |
