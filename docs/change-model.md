@@ -53,14 +53,28 @@ Known gap: MCNR normals are not rewritten yet, so the client lights edited terra
 
 ## Added tiles
 
-- Terrain changes may carry `"tiles": [[tileX, tileY, file, lastUid], ...]`: whole tiles the map lacked, taken from
-  another version. `file` is the converted copy in `<project>/tiles/`; `lastUid` the highest object id given to it
-  (NextUniqueId continues above it).
-- Apply copies the file into `<project>/overlay/World/Maps/<map>/` and marks the tile in an overlay copy of the
-  map's WDT; revert removes both. The archive reader (MpqChain::SetOverlay) serves overlay files above every MPQ for
+- Terrain changes may carry `"tiles": [[tileX, tileY, file, lastUid, minimap], ...]`: whole tiles the map lacked,
+  taken from another version. `file` is the converted copy in `<project>/tiles/`; `lastUid` the highest object id
+  given to it (NextUniqueId continues above it); `minimap` the other version's minimap image kept beside it (empty
+  when it had none).
+- Apply copies the file into `<project>/overlay/World/Maps/<map>/`, marks the tile in overlay copies of the map's
+  WDT and gives it far heights in the WDL (computed from the tile); revert removes the file and clears both. The archive reader (MpqChain::SetOverlay) serves overlay files above every MPQ for
   `World\Maps\` paths. The overlay is rebuilt from the applied changes when the project opens, so it never outlives
   an unsaved session.
-- Export writes each added tile (with any later edits) and the map's WDT.
+- Export writes each added tile (with any later edits), the map's WDT and WDL, the minimap images (as
+  `textures/Minimap/wwe_<map>_<x>_<y>.blp`) and the client's `md5translate.trs` with lines naming them.
+
+## Output
+
+- `out/client/`: client files of the last export, rebuilt from empty each time; `out/<patchName>` (project.json,
+  default `patch-enUS-Z.MPQ`) is that folder packed. `out/server/`: SQL and server DBCs.
+
+## Derived files
+
+- `<project>/minimaps/`: pictures of edited tiles drawn by the editor at export, `index.json` mapping each tile to
+  the hash of its edits (TerrainAdapter::EditHashes); a tile is drawn again when its hash changes.
+- `<project>/differences/`: per-tile scan results and verdicts (see Differences), keyed by the same hashes.
+- Neither is part of the change history; both can be deleted and are rebuilt.
 
 ## Zones (AreaTable + chunk area ids)
 

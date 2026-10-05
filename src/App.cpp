@@ -1,4 +1,5 @@
 #include "App.hpp"
+#include "Minimap.hpp"
 #include "Assets.hpp"
 
 #include <imgui.h>
@@ -224,6 +225,8 @@ bool App::Init(HWND hwnd, ID3D11Device* device, ID3D11DeviceContext* context, bo
         { "Save", "Ctrl+S", [this] { Save(); }, hasProject },
         { "Export client files", "Ctrl+E", [this] { Export(false); }, hasProject },
         { "Play test (export to client overlay)", "F5", [this] { Export(true); }, hasProject },
+        { "Build patch MPQ", "Ctrl+Shift+E", [this] { BuildPatch(false); }, hasProject },
+        { "Build patch MPQ and install it into the client", "", [this] { BuildPatch(true); }, hasProject },
         { "Undo", "Ctrl+Z", [this] { Undo(); }, [this] { return m_store.CanUndo(); } },
         { "Redo", "Ctrl+Y", [this] { Redo(); }, [this] { return m_store.CanRedo(); } },
         { "Tool: Select", "V", [this] { m_tool = Tool::Select; }, always },
@@ -443,9 +446,16 @@ void App::Export(bool playTest)
     std::string error;
     const fs::path out = m_project->ClientOutDir();
     std::vector<fs::path> tiles;
+    {
+        // Every export starts empty, so a file an undone edit made earlier never lingers into the patch or the overlay.
+        std::error_code clearEc;
+        fs::remove_all(out, clearEc);
+        if (clearEc) { Log("Export failed: cannot clear %s: %s", out.string().c_str(), clearEc.message().c_str()); return; }
+    }
     // Tiles that fail a check are skipped and listed in Problems; the rest are written.
     m_problems.clear();
     m_problemsChecked = true;
+    RenderMinimaps();
     const size_t written = m_terrain.Export(out, error, &tiles, &m_problems);
     m_terrain.FindCracks(m_problems);
     if (!error.empty()) { Log("Export failed: %s", error.c_str()); return; }
@@ -503,6 +513,12 @@ void App::Export(bool playTest)
         Log("Play test needs the wxl-editor-poc extension in the client (%s missing).", overlay.parent_path().string().c_str());
         return;
     }
+    // The overlay mirrors this export: what the last one had and this one does not goes (an undone tile, say).
+    size_t removed = 0;
+    for (const auto& entry : fs::recursive_directory_iterator(overlay, ec))
+        if (entry.is_regular_file() && !fs::exists(out / fs::relative(entry.path(), overlay, ec), ec)) removed += fs::remove(entry.path(), ec);
+    ec.clear();
+    if (removed) Log("Play test: %zu file(s) no longer exported were taken out of the overlay.", removed);
     // Each file lands whole: copied beside its target, then renamed over it, so a running client never reads half a tile.
     size_t copied = 0;
     for (const auto& entry : fs::recursive_directory_iterator(out, ec))
@@ -517,6 +533,47 @@ void App::Export(bool playTest)
         ++copied;
     }
     Log("Play test ready: %zu file(s) in the overlay; relog in the client to see the changes.", copied);
+}
+
+void App::BuildPatch(bool install)
+{
+    if (!m_project) return;
+    Export(false);
+    const fs::path out = m_project->ClientOutDir(), patch = m_project->PatchOutPath();
+    std::error_code ec;
+    if (!fs::exists(out, ec) || fs::is_empty(out, ec)) { Log("Patch not built: the export wrote nothing (no edits yet?)."); return; }
+    std::string error;
+    size_t files = 0;
+    if (!WriteMpq(patch, out, error, &files)) { Log("Patch not built: %s", error.c_str()); return; }
+    Log("Patch built: %s, %zu file(s), %.1f MB.", patch.string().c_str(), files, double(fs::file_size(patch, ec)) / (1024.0 * 1024.0));
+
+    // Archives in the client that load after it would hide its files where they overlap (a later module patch, say).
+    std::vector<std::string> above;
+    for (const fs::path& dir : { m_project->DataDir(), m_project->PatchInstallPath().parent_path() })
+        for (const auto& entry : fs::directory_iterator(dir, ec))
+            if (const std::string name = entry.path().filename().string();
+                entry.is_regular_file() && entry.path().extension().string().size() == 4 && LoadsAfter(name, m_project->patchName) &&
+                _stricmp(entry.path().extension().string().c_str(), ".mpq") == 0)
+                above.push_back(name);
+    ec.clear();
+    for (const auto& name : above)
+    {
+        const std::string text = name + " in the client loads after " + m_project->patchName + ": where both have a file, the client uses its";
+        Log("Warning: %s.", text.c_str());
+        m_problems.push_back({ Problem::Severity::Warning, "Patch", text });
+    }
+    if (!install) return;
+    const fs::path target = m_project->PatchInstallPath(), temp = target.string() + ".partial";
+    fs::create_directories(target.parent_path(), ec);
+    fs::copy_file(patch, temp, fs::copy_options::overwrite_existing, ec);
+    if (!ec) fs::rename(temp, target, ec);
+    if (ec)
+    {
+        fs::remove(temp, ec);
+        Log("Patch not installed into %s: close the client first (it holds its archives open).", target.string().c_str());
+        return;
+    }
+    Log("Patch installed: %s. Start the client to see it (also restart the worldserver if DBCs changed).", target.string().c_str());
 }
 
 void App::Undo()
@@ -1264,73 +1321,57 @@ std::vector<uint8_t> App::RenderAreaThumbnail(const TerrainClipboard& clip, UINT
     return rgba;
 }
 
+void App::RenderMinimaps()
+{
+    if (!m_project || m_terrain.Map().empty()) return;
+    const std::string& map = m_terrain.Map();
+    const fs::path dir = m_project->dir / "minimaps";
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    nlohmann::json index = nlohmann::json::object();   // tile -> edit hash its picture shows
+    if (std::ifstream f(dir / "index.json"); f)
+        try { index = nlohmann::json::parse(f); } catch (const std::exception&) {}
+    ClearPlacementView();   // the terrain as it is, not a pinned paste
+    DrawOptions look = m_drawOptions;
+    ModelRenderer::DrawSettings models = m_modelSettings;
+    look.solo = models.layer = 0;
+    MinimapLook(look, models);
+    for (const auto& l : m_ghosts.Layers()) m_renderer.SetLayerStyle(l.id, l.tint, false);
+    size_t rendered = 0;
+    for (const auto& [key, hash] : TerrainAdapter::EditHashes(m_store.Done(), map))
+    {
+        const int x = key % 64, y = key / 64;
+        const std::string name = map + "_" + std::to_string(x) + "_" + std::to_string(y);
+        if (index.value(name, size_t(0)) == hash && fs::exists(dir / (name + ".blp"), ec)) continue;
+        std::string error;
+        if (!m_terrain.LoadNow(x, y, error)) continue;   // a tile taken away again: no picture
+        const LoadedTile& tile = m_terrain.Tiles().at(key);
+        if (!m_models.HasTile(key)) m_models.AddTile(key, tile.adt, m_mpq);
+        const std::vector<uint8_t> rgba = MinimapFromTopDown(RenderTopDown(m_device, m_context, m_renderer, m_models, look, models, x * kTileSize,
+                                                                           y * kTileSize, kTileSize, kTileSize, tile.maxHeight + 50.0f,
+                                                                           kMinimapSize, kMinimapSize, true),
+                                                             kMinimapSize);
+        if (rgba.empty()) continue;
+        const std::vector<uint8_t> blp = WriteBlp(kMinimapSize, kMinimapSize, rgba.data());
+        std::ofstream(dir / (name + ".blp"), std::ios::binary).write(reinterpret_cast<const char*>(blp.data()), std::streamsize(blp.size()));
+        index[name] = hash;
+        ++rendered;
+    }
+    std::ofstream(dir / "index.json") << index.dump(1);
+    if (rendered) Log("Minimaps: %zu edited tile(s) of %s drawn again.", rendered, map.c_str());
+    // Tiles edited on other maps keep their last picture (or the client's) until their map is open at an export.
+}
+
 std::vector<uint8_t> App::RenderOrtho(float x0, float z0, float spanX, float spanZ, float top, UINT width, UINT height, int layer)
 {
-    std::vector<uint8_t> rgba;
-    D3D11_TEXTURE2D_DESC d{};
-    d.Width = width;
-    d.Height = height;
-    d.MipLevels = d.ArraySize = 1;
-    d.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-    d.SampleDesc.Count = 1;
-    d.BindFlags = D3D11_BIND_RENDER_TARGET;
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> color, depth, staging;
-    Microsoft::WRL::ComPtr<ID3D11RenderTargetView> rtv;
-    Microsoft::WRL::ComPtr<ID3D11DepthStencilView> dsv;
-    m_device->CreateTexture2D(&d, nullptr, &color);
-    d.Usage = D3D11_USAGE_STAGING;
-    d.BindFlags = 0;
-    d.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-    m_device->CreateTexture2D(&d, nullptr, &staging);
-    d.Usage = D3D11_USAGE_DEFAULT;
-    d.CPUAccessFlags = 0;
-    d.Format = DXGI_FORMAT_D32_FLOAT;
-    d.BindFlags = D3D11_BIND_DEPTH_STENCIL;
-    m_device->CreateTexture2D(&d, nullptr, &depth);
-    if (color && depth && staging && SUCCEEDED(m_device->CreateRenderTargetView(color.Get(), nullptr, &rtv)) &&
-        SUCCEEDED(m_device->CreateDepthStencilView(depth.Get(), nullptr, &dsv)))
-    {
-        Microsoft::WRL::ComPtr<ID3D11RenderTargetView> oldRtv;
-        Microsoft::WRL::ComPtr<ID3D11DepthStencilView> oldDsv;
-        m_context->OMGetRenderTargets(1, &oldRtv, &oldDsv);
-        UINT viewports = 1;
-        D3D11_VIEWPORT oldVp{};
-        m_context->RSGetViewports(&viewports, &oldVp);
-        const float cx = x0 + spanX / 2, cz = z0 + spanZ / 2;
-        const XMFLOAT3 eye{ cx, top + 1000.0f, cz };
-        const XMMATRIX viewProj = XMMatrixLookAtRH(XMLoadFloat3(&eye), XMVectorSet(cx, top, cz, 1), XMVectorSet(0, 0, -1, 0)) *
-                                  XMMatrixOrthographicRH(spanX, spanZ, 1.0f, 4000.0f);
-        const float background[4] = { 0.16f, 0.17f, 0.20f, 1 };
-        m_context->OMSetRenderTargets(1, rtv.GetAddressOf(), dsv.Get());
-        const D3D11_VIEWPORT vp{ 0, 0, float(width), float(height), 0, 1 };
-        m_context->RSSetViewports(1, &vp);
-        m_context->ClearRenderTargetView(rtv.Get(), background);
-        m_context->ClearDepthStencilView(dsv.Get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
-        // Only `layer`: ghost layers are hidden for this draw (the frame sets their styles again).
-        if (layer == 0)
-            for (const auto& l : m_ghosts.Layers()) m_renderer.SetLayerStyle(l.id, l.tint, false);
-        DrawOptions options = m_drawOptions;
-        options.solo = layer;
-        options.wireframe = false;
-        options.lod = false;   // seen whole, at full detail
-        m_renderer.Draw(viewProj, options);
-        ModelRenderer::DrawSettings models = m_modelSettings;
-        models.layer = layer;
-        models.distance = 100000.0f;
-        m_models.Draw(viewProj, eye, models);
-        m_context->CopyResource(staging.Get(), color.Get());
-        D3D11_MAPPED_SUBRESOURCE m{};
-        if (SUCCEEDED(m_context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &m)))
-        {
-            rgba.resize(size_t(width) * height * 4);
-            for (UINT y = 0; y < height; ++y)
-                memcpy(rgba.data() + size_t(y) * width * 4, static_cast<const uint8_t*>(m.pData) + size_t(y) * m.RowPitch, size_t(width) * 4);
-            m_context->Unmap(staging.Get(), 0);
-        }
-        m_context->OMSetRenderTargets(1, oldRtv.GetAddressOf(), oldDsv.Get());
-        if (viewports) m_context->RSSetViewports(1, &oldVp);
-    }
-    return rgba;
+    // Only `layer`: ghost layers are hidden for this draw (the frame sets their styles again).
+    if (layer == 0)
+        for (const auto& l : m_ghosts.Layers()) m_renderer.SetLayerStyle(l.id, l.tint, false);
+    DrawOptions options = m_drawOptions;
+    options.solo = layer;
+    ModelRenderer::DrawSettings models = m_modelSettings;
+    models.layer = layer;
+    return RenderTopDown(m_device, m_context, m_renderer, m_models, options, models, x0, z0, spanX, spanZ, top, width, height, true);
 }
 
 void App::UseBlueprint(const Blueprint& b, bool inPlace)
@@ -2185,6 +2226,7 @@ void App::HandleShortcuts()
     if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_O, global)) OpenProjectDialog();
     if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_S, global)) Save();
     if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_E, global)) Export(false);
+    if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_E, global)) BuildPatch(false);
     if (ImGui::Shortcut(ImGuiKey_F5, global)) Export(true);
     if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_Z, global)) Undo();
     if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_Y, global) || ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_Z, global)) Redo();
@@ -2296,6 +2338,8 @@ void App::DrawMenuBar()
         ImGui::Separator();
         if (ImGui::MenuItem("Export client files", "Ctrl+E", false, m_project.has_value())) Export(false);
         if (ImGui::MenuItem("Play test", "F5", false, m_project.has_value())) Export(true);
+        if (ImGui::MenuItem("Build patch MPQ", "Ctrl+Shift+E", false, m_project.has_value())) BuildPatch(false);
+        if (ImGui::MenuItem("Build patch MPQ and install into client", nullptr, false, m_project.has_value())) BuildPatch(true);
         ImGui::Separator();
         if (ImGui::MenuItem("Project settings...", nullptr, false, m_project.has_value())) OpenProjectSettings();
         if (ImGui::MenuItem("Server setup...", nullptr, false, m_project.has_value())) OpenSetup();
@@ -2891,6 +2935,11 @@ void App::DrawViewport(float dt)
         }
     }
 
+    if (m_terrain.TakeFarChanged())   // tiles added or taken away: their low-detail heights changed
+    {
+        const auto wdl = m_mpq.Read("World\\Maps\\" + m_terrain.Map() + "\\" + m_terrain.Map() + ".wdl");
+        m_renderer.LoadFar(wdl ? ParseWdl(*wdl) : std::vector<std::vector<int16_t>>{});
+    }
     UpdateDifferences();
     UpdateCompare();
     UpdatePlacement();

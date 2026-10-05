@@ -153,6 +153,31 @@ LoadedTile LoadedTile::Make(int x, int y, std::vector<uint8_t> bytes, Adt adt)
     return tile;
 }
 
+std::map<int, size_t> TerrainAdapter::EditHashes(const std::vector<Change>& done, const std::string& map)
+{
+    std::map<int, size_t> out;
+    for (const Change& c : done)
+    {
+        if (c.domain != "terrain.heights" || c.data.value("map", std::string()) != map) continue;
+        for (const char* field : { "edits", "layers", "holes", "areas", "liquids", "objects", "tiles" })
+            for (const auto& e : c.data.value(field, nlohmann::json::array()))
+            {
+                size_t& h = out[TileKey(e[0], e[1])];
+                h = h * 1000003u ^ std::hash<std::string>{}(e.dump());
+            }
+    }
+    return out;
+}
+
+bool TerrainAdapter::LoadNow(int x, int y, std::string& error)
+{
+    const int key = TileKey(x, y);
+    if (m_tiles.count(key)) return true;
+    if (size_t(key) >= m_present.size() || !m_present[size_t(key)]) { error = "the map has no tile there"; return false; }
+    TileStats stats;
+    return LoadTile(x, y, stats, error);
+}
+
 bool TerrainAdapter::LoadTile(int x, int y, TileStats& stats, std::string& error)
 {
     const std::string name = "World\\Maps\\" + m_map + "\\" + m_map + "_" + std::to_string(x) + "_" + std::to_string(y) + ".adt";
@@ -1915,6 +1940,21 @@ void TerrainAdapter::SetTile(const std::string& map, int x, int y, const std::st
             fs::create_directories(wdtPath.parent_path(), ec);
             std::ofstream(wdtPath, std::ios::binary).write(reinterpret_cast<const char*>(patched.data()), std::streamsize(patched.size()));
         }
+    // The low-detail WDL: the tile's heights from its own file (cleared again when it goes).
+    if (const auto wdl = m_mpq.Read(base + ".wdl"))
+    {
+        std::optional<Adt> adt;
+        if (present)
+            if (std::ifstream f(m_projectDir / "tiles" / stash, std::ios::binary); f)
+                adt = ParseAdt(std::vector<uint8_t>((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>()), m_bigAlpha);
+        if (const auto patched = WdlSetTile(*wdl, x, y, adt ? &*adt : nullptr); !patched.empty())
+        {
+            const fs::path wdlPath = m_mpq.OverlayPath(base + ".wdl");
+            fs::create_directories(wdlPath.parent_path(), ec);
+            std::ofstream(wdlPath, std::ios::binary).write(reinterpret_cast<const char*>(patched.data()), std::streamsize(patched.size()));
+            if (map == m_map) m_farChanged = true;
+        }
+    }
     if (!present) fs::remove(adtPath, ec);
     else if (map == m_map && key < m_present.size()) m_present[key] = true;   // streams in like any other tile
 }
@@ -1929,8 +1969,18 @@ void TerrainAdapter::RebuildOverlay()
             for (const auto& e : c.data.value("tiles", nlohmann::json::array())) SetTile(c.data.at("map"), e[0], e[1], e[2], true);
 }
 
-std::optional<Change> TerrainAdapter::AddTiles(const std::vector<std::tuple<int, int, std::vector<uint8_t>>>& tiles, bool otherBigAlpha,
-                                               std::string& error)
+std::optional<TerrainAdapter::NewTile> TerrainAdapter::ReadNewTile(const MpqChain& chain, const std::string& map, int x, int y)
+{
+    auto adt = chain.Read("World\\Maps\\" + map + "\\" + map + "_" + std::to_string(x) + "_" + std::to_string(y) + ".adt");
+    if (!adt) return std::nullopt;
+    NewTile t{ x, y, std::move(*adt) };
+    if (const auto trs = chain.Read("textures\\Minimap\\md5translate.trs"))
+        if (const auto file = TrsLookup(*trs, map, x, y))
+            if (auto blp = chain.Read("textures\\Minimap\\" + *file)) t.minimap = std::move(*blp);
+    return t;
+}
+
+std::optional<Change> TerrainAdapter::AddTiles(const std::vector<NewTile>& tiles, bool otherBigAlpha, std::string& error)
 {
     if (m_map.empty() || m_projectDir.empty()) { error = "no map open"; return std::nullopt; }
     auto lower = [](std::string s) { for (char& c : s) c = c == '/' ? '\\' : char(std::tolower((unsigned char)c)); return s; };
@@ -1938,7 +1988,7 @@ std::optional<Change> TerrainAdapter::AddTiles(const std::vector<std::tuple<int,
     // Objects already listed by the map's tiles around these: the same placement under the same id is one object
     // (a building over a tile border) and keeps its id; every other id is made fresh, shared across the new tiles.
     std::set<int> adding;
-    for (const auto& [x, y, bytes] : tiles) adding.insert(TileKey(x, y));
+    for (const NewTile& t : tiles) adding.insert(TileKey(t.x, t.y));
     std::map<uint32_t, std::pair<std::string, std::array<float, 3>>> nearby;
     for (int key : adding)
         for (int dy = -1; dy <= 1; ++dy)
@@ -1965,8 +2015,10 @@ std::optional<Change> TerrainAdapter::AddTiles(const std::vector<std::tuple<int,
     nlohmann::json entries = nlohmann::json::array();
     std::error_code ec;
     fs::create_directories(m_projectDir / "tiles", ec);
-    for (const auto& [x, y, bytes] : tiles)
+    for (const NewTile& t : tiles)
     {
+        const int x = t.x, y = t.y;
+        const std::vector<uint8_t>& bytes = t.adt;
         const std::string name = m_map + "_" + std::to_string(x) + "_" + std::to_string(y);
         if (size_t(TileKey(x, y)) < m_present.size() && m_present[size_t(TileKey(x, y))]) { error += name + ": the map has it already; "; continue; }
         auto adt = ParseAdt(bytes, otherBigAlpha);
@@ -1992,7 +2044,14 @@ std::optional<Change> TerrainAdapter::AddTiles(const std::vector<std::tuple<int,
         std::ofstream f(m_projectDir / "tiles" / stash, std::ios::binary);
         f.write(reinterpret_cast<const char*>(out.data()), std::streamsize(out.size()));
         if (!f) { error += name + ": cannot write the project copy; "; continue; }
-        entries.push_back({ x, y, stash, next - 1 });
+        std::string minimap;   // kept beside it; export names it in md5translate.trs
+        if (!t.minimap.empty())
+        {
+            minimap = name + ".minimap.blp";
+            std::ofstream(m_projectDir / "tiles" / minimap, std::ios::binary)
+                .write(reinterpret_cast<const char*>(t.minimap.data()), std::streamsize(t.minimap.size()));
+        }
+        entries.push_back({ x, y, stash, next - 1, minimap });
     }
     if (entries.empty()) return std::nullopt;
     for (const auto& e : entries) SetTile(m_map, e[0], e[1], e[2], true);
@@ -2124,7 +2183,8 @@ size_t TerrainAdapter::Export(const fs::path& outDir, std::string& error, std::v
         nlohmann::json objects = nlohmann::json::array();
     };
     std::map<std::pair<std::string, int>, TileEdits> tiles;
-    std::set<std::string> addedMaps;   // maps that gained tiles: their WDT is exported too
+    std::set<std::string> addedMaps;   // maps that gained tiles: their WDT and WDL are exported too
+    std::map<std::pair<std::string, int>, fs::path> minimaps;   // tile -> its minimap image (added tiles: the other version's)
     for (const Change& c : m_store.Done())
     {
         if (c.domain != Domain()) continue;
@@ -2139,6 +2199,7 @@ size_t TerrainAdapter::Export(const fs::path& outDir, std::string& error, std::v
         {
             tiles[{ map, TileKey(e[0], e[1]) }];   // read through the overlay: the added tile as converted
             addedMaps.insert(map);
+            if (e.size() > 4 && !e[4].get<std::string>().empty()) minimaps[{ map, TileKey(e[0], e[1]) }] = m_projectDir / "tiles" / e[4].get<std::string>();
         }
     }
 
@@ -2301,19 +2362,43 @@ size_t TerrainAdapter::Export(const fs::path& outDir, std::string& error, std::v
         if (!f) { error = "Cannot write " + path.string(); return written; }
         ++written;
         if (files) files->push_back(path);
+        // A minimap the editor rendered of the tile as edited (App::RenderMinimaps) replaces the client's picture.
+        if (const fs::path rendered = m_projectDir / "minimaps" / (name + ".blp"); !m_projectDir.empty() && fs::exists(rendered, ec))
+            minimaps[id] = rendered;
     }
-    for (const std::string& map : addedMaps)   // the WDT listing the added tiles (the client loads only tiles it lists)
-        if (const auto wdt = m_mpq.Read("World\\Maps\\" + map + "\\" + map + ".wdt"))
+    auto writeFile = [&](const fs::path& path, const std::vector<uint8_t>& bytes) {
+        std::error_code ec;
+        fs::create_directories(path.parent_path(), ec);
+        std::ofstream f(path, std::ios::binary);
+        f.write(reinterpret_cast<const char*>(bytes.data()), std::streamsize(bytes.size()));
+        if (!f) { error = "Cannot write " + path.string(); return false; }
+        ++written;
+        if (files) files->push_back(path);
+        return true;
+    };
+    // The WDT listing the added tiles (the client loads only tiles it lists) and the WDL with their far heights.
+    for (const std::string& map : addedMaps)
+        for (const char* ext : { ".wdt", ".wdl" })
+            if (const auto bytes = m_mpq.Read("World\\Maps\\" + map + "\\" + map + ext))
+                if (!writeFile(outDir / "World" / "Maps" / map / (map + ext), *bytes)) return written;
+    // Minimaps of the added tiles: their images under names of our own, and the index naming them (the client reads
+    // one md5translate.trs, so the whole index as the client has it plus these lines).
+    if (!minimaps.empty())
+    {
+        const std::string trsName = "textures\\Minimap\\md5translate.trs";
+        std::vector<uint8_t> trs = m_mpq.Read(trsName).value_or(std::vector<uint8_t>{});
+        for (const auto& [id, image] : minimaps)
         {
-            const fs::path path = outDir / "World" / "Maps" / map / (map + ".wdt");
-            std::error_code ec;
-            fs::create_directories(path.parent_path(), ec);
-            std::ofstream f(path, std::ios::binary);
-            f.write(reinterpret_cast<const char*>(wdt->data()), std::streamsize(wdt->size()));
-            if (!f) { error = "Cannot write " + path.string(); return written; }
-            ++written;
-            if (files) files->push_back(path);
+            const auto& [map, key] = id;
+            std::ifstream f(image, std::ios::binary);
+            const std::vector<uint8_t> blp((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+            if (blp.empty()) continue;
+            const std::string file = "wwe_" + map + "_" + std::to_string(key % 64) + "_" + std::to_string(key / 64) + ".blp";
+            if (!writeFile(outDir / "textures" / "Minimap" / file, blp)) return written;
+            trs = TrsSet(trs, map, key % 64, key / 64, file);
         }
+        if (!writeFile(outDir / "textures" / "Minimap" / "md5translate.trs", trs)) return written;
+    }
     return written;
 }
 

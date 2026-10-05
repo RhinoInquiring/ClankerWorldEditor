@@ -1140,6 +1140,95 @@ std::vector<std::vector<int16_t>> ParseWdl(const std::vector<uint8_t>& d)
     return tiles;
 }
 
+std::vector<uint8_t> WdlSetTile(std::vector<uint8_t> wdl, int x, int y, const Adt* adt)
+{
+    size_t maof = 0;
+    ForEachChunk(wdl, 0, wdl.size(), [&](uint32_t magic, size_t off, size_t size) { if (magic == Tag("MAOF") && size >= 4096 * 4) maof = off; });
+    if (!maof || x < 0 || y < 0 || x > 63 || y > 63) return {};
+    const size_t slot = maof + size_t(y * 64 + x) * 4;
+    if (!adt) { SetU32(wdl, slot, 0); return wdl; }
+    // Chunks by their place in the tile (row along z, column along x, as the grid is everywhere else).
+    std::array<const AdtChunk*, 256> grid{};
+    for (const AdtChunk& c : adt->chunks)
+    {
+        const int col = int(std::lround(c.baseX / kChunkSize)) - x * 16, row = int(std::lround(c.baseZ / kChunkSize)) - y * 16;
+        if (col >= 0 && col < 16 && row >= 0 && row < 16) grid[size_t(row * 16 + col)] = &c;
+    }
+    auto height = [&](int row, int col, int vrow, int vcol) -> int16_t {
+        const AdtChunk* c = grid[size_t(row * 16 + col)];
+        if (!c) return 0;
+        return int16_t(std::clamp(std::lround(c->baseY + c->heights[size_t(vrow * 17 + vcol)]), -32768L, 32767L));
+    };
+    std::vector<uint8_t> mare;
+    auto put = [&](int16_t v) { mare.insert(mare.end(), reinterpret_cast<uint8_t*>(&v), reinterpret_cast<uint8_t*>(&v) + 2); };
+    for (int r = 0; r <= 16; ++r)   // chunk corners; the last row and column are the far edges of the last chunks
+        for (int c = 0; c <= 16; ++c) put(height(std::min(r, 15), std::min(c, 15), r == 16 ? 8 : 0, c == 16 ? 8 : 0));
+    for (int r = 0; r < 16; ++r)    // chunk centres
+        for (int c = 0; c < 16; ++c) put(height(r, c, 4, 4));
+    SetU32(wdl, slot, uint32_t(wdl.size()));   // absolute offset of the MARE chunk
+    PutChunk(wdl, Tag("MARE"), mare);
+    PutChunk(wdl, Tag("MAHO"), std::vector<uint8_t>(32, 0));   // no low-detail holes
+    return wdl;
+}
+
+std::optional<std::string> TrsLookup(const std::vector<uint8_t>& trs, const std::string& map, int x, int y)
+{
+    const std::string key = map + "\\map" + std::to_string(x) + "_" + std::to_string(y) + ".blp";
+    auto lower = [](std::string s) { for (char& c : s) c = char(std::tolower((unsigned char)c)); return s; };
+    const std::string want = lower(key);
+    size_t at = 0;
+    const std::string text(trs.begin(), trs.end());
+    while (at < text.size())
+    {
+        size_t end = text.find('\n', at);
+        if (end == std::string::npos) end = text.size();
+        std::string line = text.substr(at, end - at);
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (const size_t tab = line.find('\t'); tab != std::string::npos && lower(line.substr(0, tab)) == want) return line.substr(tab + 1);
+        at = end + 1;
+    }
+    return std::nullopt;
+}
+
+std::vector<uint8_t> TrsSet(const std::vector<uint8_t>& trs, const std::string& map, int x, int y, const std::string& file)
+{
+    auto lower = [](std::string s) { for (char& c : s) c = char(std::tolower((unsigned char)c)); return s; };
+    const std::string key = map + "\\map" + std::to_string(x) + "_" + std::to_string(y) + ".blp", entry = key + "\t" + file;
+    std::vector<std::string> lines;
+    const std::string text(trs.begin(), trs.end());
+    for (size_t at = 0; at < text.size();)
+    {
+        size_t end = text.find('\n', at);
+        if (end == std::string::npos) end = text.size();
+        std::string line = text.substr(at, end - at);
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        lines.push_back(std::move(line));
+        at = end + 1;
+    }
+    bool done = false;
+    for (std::string& line : lines)
+        if (const size_t tab = line.find('\t'); tab != std::string::npos && lower(line.substr(0, tab)) == lower(key)) { line = entry; done = true; }
+    if (!done)
+    {
+        const std::string header = "dir: " + lower(map);
+        auto it = std::find_if(lines.begin(), lines.end(), [&](const std::string& l) { return lower(l) == header; });
+        if (it == lines.end()) { lines.push_back("dir: " + map); lines.push_back(entry); }
+        else
+        {
+            auto next = std::find_if(it + 1, lines.end(), [](const std::string& l) { return l.rfind("dir: ", 0) == 0; });
+            lines.insert(next, entry);
+        }
+    }
+    std::vector<uint8_t> out;
+    for (const std::string& l : lines)
+    {
+        out.insert(out.end(), l.begin(), l.end());
+        out.push_back('\r');
+        out.push_back('\n');
+    }
+    return out;
+}
+
 std::vector<uint8_t> MapPreview(const std::vector<std::vector<int16_t>>& wdl, int px)
 {
     const int side = 64 * px;

@@ -149,6 +149,17 @@ private:
 /// (row along z, column along x, the tile's corner vertices included), empty where the map has no tile.
 std::vector<std::vector<int16_t>> ParseWdl(const std::vector<uint8_t>& wdl);
 
+/// The WDL with tile (x, y)'s low-detail heights taken from `adt` (17 x 17 chunk corners, 16 x 16 chunk centres, in
+/// yards; a new MARE + MAHO pair is appended and MAOF points at it), or cleared (MAOF 0) when `adt` is null. Empty
+/// when the WDL has no MAOF.
+std::vector<uint8_t> WdlSetTile(std::vector<uint8_t> wdl, int x, int y, const Adt* adt);
+
+/// The minimap file md5translate.trs names for tile (x, y) of `map` (relative to textures\Minimap\), if any.
+std::optional<std::string> TrsLookup(const std::vector<uint8_t>& trs, const std::string& map, int x, int y);
+/// The index with tile (x, y) of `map` pointing at `file` (its line replaced, else added under the map's "dir:"
+/// section, which is created at the end when missing).
+std::vector<uint8_t> TrsSet(const std::vector<uint8_t>& trs, const std::string& map, int x, int y, const std::string& file);
+
 /// A top-down picture of a map for the Maps panel: `pixels` per tile, 64 x 64 tiles, RGBA rows. Coloured by WDL
 /// height: land green (sea level) -> brown (350 yd) -> pale rock (1400 yd), water (below 0) bright blue at the shore fading to dark in the deep;
 /// tiles without terrain are transparent.

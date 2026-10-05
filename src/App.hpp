@@ -204,6 +204,9 @@ private:
     void CloseProject();
     bool Save();
     void Export(bool playTest);
+    /// Exports, then packs out/client into the project's patch MPQ (out/<patchName>); with `install`, copies it into
+    /// the client's Data folder too (the client must be closed: it holds its archives open).
+    void BuildPatch(bool install);
     void Undo();
     void Redo();
     void GoToTile(const std::string& map, int x, int y);
@@ -371,6 +374,9 @@ private:
     void ShowCompareClip(const std::string& tag, const TerrainClipboard& clip);
     /// Enter in a compare: paste the shown version; a reviewed difference is marked pasted (its blend band too).
     void CommitCompare();
+    /// Minimaps of the open map's edited tiles as they are now (only those whose edits changed since the last
+    /// render), into <project>/minimaps/ for export.
+    void RenderMinimaps();
 
     // Differences: another version of the map scanned against this one; each edited area is a catalog card to
     // review in place, then approve (paste) or reject.

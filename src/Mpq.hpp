@@ -7,6 +7,14 @@
 #include <string>
 #include <vector>
 
+/// Packs every file under `root` into a new MPQ at `archive` (archived names: paths relative to root with '\'
+/// separators), zlib-compressed, with (listfile) and (attributes). Built beside it first, then moved over an older one;
+/// false (and `error`) when it cannot be written, e.g. a running client holds the old one open.
+bool WriteMpq(const std::filesystem::path& archive, const std::filesystem::path& root, std::string& error, size_t* files = nullptr);
+
+/// True when the client loads archive `a` after archive `b` (file names, e.g. "patch-enUS-Z.MPQ"): `a`'s files win.
+bool LoadsAfter(const std::string& a, const std::string& b);
+
 /// Read-only view over a 3.3.5 client's Data folder (reads are thread-safe): every MPQ, searched highest priority first,
 /// the way the client resolves a file that several archives contain.
 class MpqChain

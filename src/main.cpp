@@ -9,6 +9,7 @@
 #include "Catalog.hpp"
 #include "Formats.hpp"
 #include "Ghosts.hpp"
+#include "Minimap.hpp"
 #include "Loader.hpp"
 #include "ModelRenderer.hpp"
 #include "Models.hpp"
@@ -1331,6 +1332,55 @@ namespace
         return 0;
     }
 
+    /// Packs `folder` into `<scratch>/Data/<name>`, opens that Data folder as a client would, and compares every file
+    /// read back with the one on disk. Returns how many differ (or are missing); prints a line.
+    int PackAndVerify(const std::filesystem::path& folder, const std::filesystem::path& scratch, const std::string& name)
+    {
+        std::error_code ec;
+        std::filesystem::remove_all(scratch, ec);
+        const auto archive = scratch / "Data" / name;
+        std::string error;
+        size_t files = 0;
+        if (!WriteMpq(archive, folder, error, &files)) { printf("  pack: %s\n", error.c_str()); return 1; }
+        int bad = 0;
+        {
+            MpqChain mpq;
+            mpq.Open((scratch / "Data").string());
+            for (const auto& entry : std::filesystem::recursive_directory_iterator(folder, ec))
+            {
+                if (!entry.is_regular_file()) continue;
+                std::ifstream f(entry.path(), std::ios::binary);
+                const std::vector<uint8_t> disk((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+                const auto packed = mpq.Read(std::filesystem::relative(entry.path(), folder, ec).string());
+                bad += !packed || *packed != disk;
+            }
+            printf("  packed %zu file(s) into %s (%.1f MB from %.1f MB), read back: %d differ\n", files, name.c_str(),
+                   double(std::filesystem::file_size(archive, ec)) / 1048576.0, [&] {
+                       uintmax_t total = 0;
+                       for (const auto& e : std::filesystem::recursive_directory_iterator(folder, ec)) total += e.is_regular_file() ? e.file_size() : 0;
+                       return double(total) / 1048576.0;
+                   }(), bad);
+        }
+        std::filesystem::remove_all(scratch, ec);
+        return bad;
+    }
+
+    /// `--mpq-check <folder> [keep.MPQ]`: packs a folder as the project's patch is packed and reads every file back;
+    /// with a second path, also writes the pack there (to open with other tools).
+    int MpqCheck()
+    {
+        if (__argc < 3 || !__wargv) return 2;
+        setvbuf(stdout, nullptr, _IONBF, 0);
+        const int bad = PackAndVerify(__wargv[2], std::filesystem::temp_directory_path() / "wow-world-editor-mpqcheck", "patch-enUS-Z.MPQ");
+        if (__argc > 3)
+        {
+            std::string error;
+            if (!WriteMpq(__wargv[3], __wargv[2], error)) printf("  keep: %s\n", error.c_str());
+        }
+        printf("%d problem(s)\n", bad);
+        return bad ? 1 : 0;
+    }
+
     /// `--tiles-check <data dir> <base map> <other map>`: in a scratch project, adds two tiles only the other map has
     /// (neighbours when it can), then checks they stream in exactly as the other map has them (heights, alpha, water),
     /// object ids, undo/redo through the overlay, a rebuilt overlay, and the export (ADT plus the WDT listing it).
@@ -1389,8 +1439,15 @@ namespace
         printf("adding %zu tile(s) of %s to %s (alpha %s -> %s):", pick.size(), other.c_str(), base.c_str(), otherBig ? "8-bit" : "4-bit", baseBig ? "8-bit" : "4-bit");
         for (int k : pick) printf(" %d_%d", k % 64, k / 64);
         printf("\n");
-        std::vector<std::tuple<int, int, std::vector<uint8_t>>> tiles;
-        for (int k : pick) tiles.emplace_back(k % 64, k / 64, *mpq.Read(adtPath(other, k)));
+        std::vector<TerrainAdapter::NewTile> tiles;
+        size_t withMinimap = 0;
+        for (int k : pick)
+            if (auto t = TerrainAdapter::ReadNewTile(mpq, other, k % 64, k / 64))
+            {
+                withMinimap += !t->minimap.empty();
+                tiles.push_back(std::move(*t));
+            }
+        printf("  %zu of them with a minimap image in %s\n", withMinimap, other.c_str());
         auto change = terrain.AddTiles(tiles, otherBig, error);
         if (!error.empty()) printf("  add: %s\n", error.c_str());
         expect(change.has_value() && change->data.at("tiles").size() == pick.size(), "every tile added");
@@ -1404,6 +1461,31 @@ namespace
         };
         auto present = [&]() { return std::all_of(pick.begin(), pick.end(), [&](int k) { return terrain.Present()[size_t(k)] && WdtTiles(*wdtOf(base))[size_t(k)]; }); };
         expect(present(), "the map lists them (editor and overlay WDT)");
+        auto wdlHas = [&](int k) {
+            const auto wdl = mpq.Read("World\\Maps\\" + base + "\\" + base + ".wdl");
+            return wdl && !ParseWdl(*wdl)[size_t(k)].empty();
+        };
+        expect(std::all_of(pick.begin(), pick.end(), wdlHas), "the overlay WDL has their far heights");
+        {
+            // The far heights as the editor writes them, against Blizzard's own WDL, on 20 stock tiles with real relief.
+            const auto wdlBytes = *mpq.Read("World\\Maps\\" + base + "\\" + base + ".wdl");
+            const auto stockWdl = ParseWdl(wdlBytes);
+            int worst = 0, tested = 0, relief = 0;
+            for (int k = 0; k < 4096 && tested < 20; ++k)
+            {
+                if (!ours[size_t(k)] || stockWdl[size_t(k)].empty()) continue;
+                const auto [lo, hi] = std::minmax_element(stockWdl[size_t(k)].begin(), stockWdl[size_t(k)].end());
+                if (*hi - *lo < 30) continue;   // flat sea: proves nothing
+                const auto adt = ParseAdt(*mpq.Read(adtPath(base, k)), baseBig);
+                if (!adt) continue;
+                const auto mine = ParseWdl(WdlSetTile(wdlBytes, k % 64, k / 64, &*adt));
+                for (size_t i = 0; i < 289; ++i) worst = std::max(worst, std::abs(int(mine[size_t(k)][i]) - int(stockWdl[size_t(k)][i])));
+                relief = std::max(relief, *hi - *lo);
+                ++tested;
+            }
+            printf("  WDL from %d stock tiles (up to %d yd of relief) vs Blizzard's: corners within %d yd\n", tested, relief, worst);
+            expect(tested > 0 && worst <= 2, "far heights match Blizzard's WDL (rounding aside)");
+        }
         expect(loaded(), "they stream in");
         // As the other map has them: heights, alpha maps, water; objects with fresh (or kept) ids.
         float worstHeight = 0;
@@ -1438,6 +1520,7 @@ namespace
         // (the base archives may still hold a stray file for the tile: only the WDT decides whether the client loads it)
         expect(!std::any_of(pick.begin(), pick.end(), [&](int k) { return WdtTiles(*wdtOf(base))[size_t(k)] || std::filesystem::exists(mpq.OverlayPath(adtPath(base, k))); }),
                "undo: gone from the overlay and its WDT");
+        expect(!std::any_of(pick.begin(), pick.end(), wdlHas), "undo: gone from the WDL");
         store.Redo();
         expect(present() && loaded(), "redo: back");
 
@@ -1446,6 +1529,12 @@ namespace
         expect(std::all_of(pick.begin(), pick.end(), [&](int k) { return mpq.HasOwn(adtPath(base, k)); }) && present(), "overlay rebuilt from the changes");
 
         const auto out = project / "out";
+        // A minimap the editor rendered of the first tile (App::RenderMinimaps writes these) must win over the other map's.
+        const std::vector<uint8_t> rendered = WriteBlp(4, 4, std::vector<uint8_t>(64, 200).data());
+        const std::string firstName = base + "_" + std::to_string(pick[0] % 64) + "_" + std::to_string(pick[0] / 64);
+        std::filesystem::create_directories(project / "minimaps", ec);
+        std::ofstream(project / "minimaps" / (firstName + ".blp"), std::ios::binary)
+            .write(reinterpret_cast<const char*>(rendered.data()), std::streamsize(rendered.size()));
         std::vector<std::filesystem::path> files;
         std::vector<Problem> exportProblems;
         terrain.Export(out, error, &files, &exportProblems);
@@ -1462,6 +1551,24 @@ namespace
         if (std::ifstream w(out / "World" / "Maps" / base / (base + ".wdt"), std::ios::binary); w)   // closed before the folder goes
             wdt.assign(std::istreambuf_iterator<char>(w), std::istreambuf_iterator<char>());
         expect(!wdt.empty() && std::all_of(pick.begin(), pick.end(), [&](int k) { return WdtTiles(wdt)[size_t(k)]; }), "exported WDT lists them");
+        {
+            std::vector<uint8_t> wdl, trs;
+            if (std::ifstream f(out / "World" / "Maps" / base / (base + ".wdl"), std::ios::binary); f) wdl.assign(std::istreambuf_iterator<char>(f), {});
+            if (std::ifstream f(out / "textures" / "Minimap" / "md5translate.trs", std::ios::binary); f) trs.assign(std::istreambuf_iterator<char>(f), {});
+            expect(!wdl.empty() && std::all_of(pick.begin(), pick.end(), [&](int k) { return !ParseWdl(wdl)[size_t(k)].empty(); }), "exported WDL has them");
+            size_t named = 0;
+            for (int k : pick)
+                if (const auto file = TrsLookup(trs, base, k % 64, k / 64))
+                    named += std::filesystem::exists(out / "textures" / "Minimap" / *file);
+            printf("  exported minimaps: %zu of %zu tile(s) named in md5translate.trs with their image\n", named, pick.size());
+            expect(named >= withMinimap, "every minimap the other map had is exported and indexed");
+            std::vector<uint8_t> first;
+            if (const auto file = TrsLookup(trs, base, pick[0] % 64, pick[0] / 64))
+                if (std::ifstream f(out / "textures" / "Minimap" / *file, std::ios::binary); f) first.assign(std::istreambuf_iterator<char>(f), {});
+            expect(first == rendered, "an editor-rendered minimap wins over the other map's");
+        }
+        // The export as the project's patch MPQ: every file must read back exactly.
+        expect(PackAndVerify(out, project / "mpqcheck", "patch-enUS-Z.MPQ") == 0, "export packed into a patch MPQ reads back exactly");
         std::vector<Problem> cracks;
         terrain.FindCracks(cracks);
         printf("  crack report: %zu tile(s) with open edges (seams with the map's own tiles are expected where the versions differ)\n", cracks.size());
@@ -1709,6 +1816,139 @@ namespace
     /// `--render <data dir> <map> <x> <y> <out.png> [yaw] [pitch] [height above ground] [fx] [fz]`:
     /// degrees for yaw/pitch, yards above the ground under the camera, (fx, fz) = camera spot within the tile (0..1).
     /// load the tile and its neighbours on a software device and save what the editor camera would show.
+    /// RGBA pixels of a BLP's first mip (BC1/2/3 colour decoded, alpha ignored; RGBA8 as is), for comparing pictures.
+    std::vector<uint8_t> BlpPixels(const BlpImage& b)
+    {
+        std::vector<uint8_t> out(size_t(b.width) * b.height * 4, 255);
+        if (b.mips.empty()) return {};
+        const std::vector<uint8_t>& m = b.mips[0];
+        if (b.format == BlpImage::Format::RGBA8) return m.size() >= out.size() ? std::vector<uint8_t>(m.begin(), m.begin() + std::ptrdiff_t(out.size())) : out;
+        const size_t block = b.format == BlpImage::Format::BC1 ? 8 : 16;
+        auto rgb565 = [](uint16_t c) { return std::array<int, 3>{ (c >> 11) * 255 / 31, ((c >> 5) & 63) * 255 / 63, (c & 31) * 255 / 31 }; };
+        for (uint32_t by = 0; by < b.height / 4; ++by)
+            for (uint32_t bx = 0; bx < b.width / 4; ++bx)
+            {
+                const size_t at = (size_t(by) * (b.width / 4) + bx) * block + (block - 8);   // the colour half
+                if (at + 8 > m.size()) continue;
+                const uint16_t c0 = uint16_t(m[at] | m[at + 1] << 8), c1 = uint16_t(m[at + 2] | m[at + 3] << 8);
+                const auto a = rgb565(c0), z = rgb565(c1);
+                std::array<std::array<int, 3>, 4> pal{ a, z };
+                for (int k = 0; k < 3; ++k)
+                {
+                    pal[2][size_t(k)] = (c0 > c1 || block == 16) ? (2 * a[size_t(k)] + z[size_t(k)]) / 3 : (a[size_t(k)] + z[size_t(k)]) / 2;
+                    pal[3][size_t(k)] = (c0 > c1 || block == 16) ? (a[size_t(k)] + 2 * z[size_t(k)]) / 3 : 0;
+                }
+                const uint32_t bits = uint32_t(m[at + 4] | m[at + 5] << 8 | m[at + 6] << 16 | uint32_t(m[at + 7]) << 24);
+                for (int py = 0; py < 4; ++py)
+                    for (int px = 0; px < 4; ++px)
+                    {
+                        const auto& c = pal[(bits >> (2 * (py * 4 + px))) & 3];
+                        const size_t o = ((size_t(by) * 4 + py) * b.width + bx * 4 + px) * 4;
+                        out[o] = uint8_t(c[0]); out[o + 1] = uint8_t(c[1]); out[o + 2] = uint8_t(c[2]);
+                    }
+            }
+        return out;
+    }
+
+    /// `--minimap-check <data dir> <map> <x> <y> [out.png]`: renders the tile straight down as the editor's minimaps
+    /// are, decodes the client's own minimap of it, and scores every rotation / mirror of the render against it: the
+    /// layout MinimapFromTopDown uses is printed with them. The score only hints (lighting and textures differ, so it can
+    /// even come out negative for the right layout); the PNGs settle it: <out> is the editor's, <out>.client.png the
+    /// client's. Checked by eye 2026-10-05: no turn, no mirror (Northshire, Elwynn lakes, a Kalimdor coast).
+    int MinimapCheck()
+    {
+        if (__argc < 6 || !__wargv) return 2;
+        setvbuf(stdout, nullptr, _IONBF, 0);
+        auto arg = [](int i) {
+            char buf[1024] = {};
+            WideCharToMultiByte(CP_ACP, 0, __wargv[i], -1, buf, sizeof buf, nullptr, nullptr);
+            return std::string(buf);
+        };
+        const std::string map = arg(3);
+        const int tx = std::stoi(arg(4)), ty = std::stoi(arg(5));
+        ComPtr<ID3D11Device> device;
+        ComPtr<ID3D11DeviceContext> context;
+        if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &device, nullptr, &context))) return 1;
+        Renderer renderer;
+        ModelRenderer models;
+        std::string error;
+        if (!renderer.Init(device.Get(), context.Get(), error) || !models.Init(device.Get(), context.Get(), renderer, error)) { printf("%s\n", error.c_str()); return 1; }
+        MpqChain mpq;
+        mpq.Open(arg(2));
+        ChangeStore store;
+        TerrainAdapter terrain(mpq, renderer, store);
+        if (!terrain.SetMap(map, error)) { printf("%s\n", error.c_str()); return 1; }
+        for (int i = 0; i < 4; ++i) terrain.Stream((tx + 0.5f) * kTileSize, (ty + 0.5f) * kTileSize, 0, error);
+        const auto it = terrain.Tiles().find(TileKey(tx, ty));
+        if (it == terrain.Tiles().end()) { printf("tile not loaded\n"); return 1; }
+        models.AddTile(it->first, it->second.adt, mpq);
+        DrawOptions look;
+        ModelRenderer::DrawSettings lookModels;
+        MinimapLook(look, lookModels);
+        const std::vector<uint8_t> mine = MinimapFromTopDown(
+            RenderTopDown(device.Get(), context.Get(), renderer, models, look, lookModels, tx * kTileSize, ty * kTileSize,
+                          kTileSize, kTileSize, it->second.maxHeight + 50.0f, kMinimapSize, kMinimapSize, true),
+            kMinimapSize);
+
+        const auto trs = mpq.Read("textures\\Minimap\\md5translate.trs");
+        const auto file = trs ? TrsLookup(*trs, map, tx, ty) : std::nullopt;
+        const auto blp = file ? mpq.Read("textures\\Minimap\\" + *file) : std::nullopt;
+        const auto image = blp ? ParseBlp(*blp) : std::nullopt;
+        if (!image || image->width != kMinimapSize || image->height != kMinimapSize) { printf("no %ux%u client minimap for the tile\n", kMinimapSize, kMinimapSize); return 1; }
+        const std::vector<uint8_t> theirs = BlpPixels(*image);
+
+        // Large-scale structure (16 x 16 block means of luminance: mountains, valleys, water) of the render, turned,
+        // against the client's picture; texel detail and lighting differ too much between them to compare directly.
+        const int n = 16, block = int(kMinimapSize) / n;
+        auto blocks = [&](const std::vector<uint8_t>& p) {
+            std::vector<double> b(size_t(n * n), 0.0);
+            for (int y = 0; y < int(kMinimapSize); ++y)
+                for (int x = 0; x < int(kMinimapSize); ++x)
+                {
+                    const size_t i = size_t(y) * kMinimapSize + size_t(x);
+                    b[size_t((y / block) * n + x / block)] += 0.3 * p[i * 4] + 0.59 * p[i * 4 + 1] + 0.11 * p[i * 4 + 2];
+                }
+            return b;
+        };
+        const std::vector<double> bm = blocks(mine), bt = blocks(theirs);
+        auto score = [&](int turn, bool mirror) {
+            double sa = 0, sb = 0, saa = 0, sbb = 0, sab = 0;
+            for (int y = 0; y < n; ++y)
+                for (int x = 0; x < n; ++x)
+                {
+                    int u = mirror ? n - 1 - x : x, v = y;
+                    for (int t = 0; t < turn; ++t) { const int w = u; u = n - 1 - v; v = w; }
+                    const double a = bm[size_t(v * n + u)], b = bt[size_t(y * n + x)];
+                    sa += a; sb += b; saa += a * a; sbb += b * b; sab += a * b;
+                }
+            const double N = double(n) * n, cov = sab / N - sa / N * sb / N;
+            const double va = saa / N - (sa / N) * (sa / N), vb = sbb / N - (sb / N) * (sb / N);
+            return va > 0 && vb > 0 ? cov / std::sqrt(va * vb) : 0.0;
+        };
+        double best = -2, identity = score(0, false);
+        int bestTurn = 0;
+        bool bestMirror = false;
+        for (int mirror = 0; mirror < 2; ++mirror)
+            for (int turn = 0; turn < 4; ++turn)
+            {
+                const double s = score(turn, mirror != 0);
+                printf("  turn %3d deg%s: correlation %.3f\n", turn * 90, mirror ? ", mirrored" : "          ", s);
+                if (s > best) { best = s; bestTurn = turn; bestMirror = mirror != 0; }
+            }
+        printf("best: turn %d deg%s (%.3f); the editor's layout scores %.3f\n", bestTurn * 90, bestMirror ? " mirrored" : "", best, identity);
+        if (__argc > 6)
+        {
+            CoInitializeEx(nullptr, COINIT_MULTITHREADED);   // WIC writes the PNGs
+            std::vector<uint8_t> bgra = mine;
+            for (size_t i = 0; i < bgra.size(); i += 4) std::swap(bgra[i], bgra[i + 2]);
+            SavePng(__wargv[6], kMinimapSize, kMinimapSize, std::move(bgra));
+            std::vector<uint8_t> client = theirs;   // the client's own beside it: <out>.client.png
+            for (size_t i = 0; i < client.size(); i += 4) std::swap(client[i], client[i + 2]);
+            SavePng(std::wstring(__wargv[6]) + L".client.png", kMinimapSize, kMinimapSize, std::move(client));
+        }
+        return mine.empty() ? 1 : 0;
+    }
+
     int RenderCheck()
     {
         if (__argc < 7 || !__wargv) return 2;
@@ -1927,6 +2167,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdLine, int)
     if (cmdLine && wcsstr(cmdLine, L"--water-check")) return WaterCheck();
     if (cmdLine && wcsstr(cmdLine, L"--diff-check")) return DiffCheck();
     if (cmdLine && wcsstr(cmdLine, L"--tiles-check")) return TilesCheck();
+    if (cmdLine && wcsstr(cmdLine, L"--minimap-check")) return MinimapCheck();
+    if (cmdLine && wcsstr(cmdLine, L"--mpq-check")) return MpqCheck();
     if (cmdLine && wcsstr(cmdLine, L"--diff-objects")) return DiffObjects();
     if (cmdLine && wcsstr(cmdLine, L"--blueprint-check")) return BlueprintCheck();
     if (cmdLine && wcsstr(cmdLine, L"--asset-check")) return AssetCheck();

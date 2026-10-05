@@ -26,6 +26,12 @@ struct Project
     bool Owns(const std::string& kind, uint32_t id) const { const IdRange r = Range(kind); return id >= r.first && id <= r.last && r.first; }
     std::string serverProfile;   // name of the user's ServerProfile (Server.hpp); credentials never live here
     std::vector<std::pair<std::string, std::string>> sources;   // other clients to compare against: name, data dir
+    /// The patch MPQ the project builds (out/<name>) and installs (client Data, in the locale folder for a
+    /// patch-<locale>-X name). patch-enUS-Z loads after every patch-X, so the project's files win over the modules'.
+    std::string patchName = "patch-enUS-Z.MPQ";
+    std::filesystem::path PatchOutPath() const { return dir / "out" / patchName; }
+    /// Where the client looks for it: Data\<locale>\ for patch-<locale>-X.MPQ, else Data\.
+    std::filesystem::path PatchInstallPath() const;
 
     std::filesystem::path DataDir() const { return std::filesystem::path(clientDir) / "Data"; }
     std::filesystem::path ChangesDir() const { return dir / "changes"; }

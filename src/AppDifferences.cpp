@@ -147,14 +147,11 @@ void App::AddDifferenceTiles()
     const MpqChain& chain = m_diffTarget.source ? m_ghosts.Chain(m_diffTarget.source) : m_mpq;
     const std::string& map = m_diffs.OtherMap();
     const auto wdt = chain.Read("World\\Maps\\" + map + "\\" + map + ".wdt");
-    std::vector<std::tuple<int, int, std::vector<uint8_t>>> tiles;
+    std::vector<TerrainAdapter::NewTile> tiles;
     std::string error;
     for (int key : m_diffNewTiles)
-    {
-        auto bytes = chain.Read("World\\Maps\\" + map + "\\" + map + "_" + std::to_string(key % 64) + "_" + std::to_string(key / 64) + ".adt");
-        if (bytes) tiles.emplace_back(key % 64, key / 64, std::move(*bytes));
+        if (auto t = TerrainAdapter::ReadNewTile(chain, map, key % 64, key / 64)) tiles.push_back(std::move(*t));
         else error += std::to_string(key % 64) + "_" + std::to_string(key / 64) + ": not in " + m_diffTarget.label + "; ";
-    }
     auto change = m_terrain.AddTiles(tiles, wdt && WdtBigAlpha(*wdt), error);
     if (!error.empty()) Log("Tiles not added: %s", error.c_str());
     if (!change) return;

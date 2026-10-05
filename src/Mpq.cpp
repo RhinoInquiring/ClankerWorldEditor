@@ -58,6 +58,51 @@ namespace
 
 MpqChain::~MpqChain() { Close(); }
 
+bool LoadsAfter(const std::string& a, const std::string& b) { return Rank(a) > Rank(b); }
+
+bool WriteMpq(const std::filesystem::path& archive, const std::filesystem::path& root, std::string& error, size_t* files)
+{
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    std::vector<std::pair<fs::path, std::string>> list;   // file on disk, archived name
+    for (const auto& entry : fs::recursive_directory_iterator(root, ec))
+        if (entry.is_regular_file(ec))
+            list.push_back({ entry.path(), Backslashes(fs::relative(entry.path(), root, ec).string()) });
+    if (ec) { error = "Cannot read " + root.string() + ": " + ec.message(); return false; }
+    if (list.empty()) { error = "Nothing to pack in " + root.string(); return false; }
+    DWORD slots = 16;   // hash table: a power of two with room to spare
+    while (slots < list.size() * 2 + 16) slots *= 2;
+
+    const fs::path temp = archive.string() + ".partial";
+    fs::create_directories(archive.parent_path(), ec);
+    fs::remove(temp, ec);
+    HANDLE h = nullptr;
+    if (!SFileCreateArchive(temp.string().c_str(), MPQ_CREATE_LISTFILE | MPQ_CREATE_ATTRIBUTES | MPQ_CREATE_ARCHIVE_V1, slots, &h))
+    {
+        error = "Cannot create " + temp.string() + " (error " + std::to_string(GetLastError()) + ")";
+        return false;
+    }
+    for (const auto& [path, name] : list)
+        if (!SFileAddFileEx(h, path.string().c_str(), name.c_str(), MPQ_FILE_COMPRESS | MPQ_FILE_REPLACEEXISTING, MPQ_COMPRESSION_ZLIB,
+                            MPQ_COMPRESSION_NEXT_SAME))
+        {
+            error = "Cannot add " + name + " (error " + std::to_string(GetLastError()) + ")";
+            SFileCloseArchive(h);
+            fs::remove(temp, ec);
+            return false;
+        }
+    if (!SFileCloseArchive(h)) { error = "Cannot finish " + temp.string(); fs::remove(temp, ec); return false; }
+    fs::rename(temp, archive, ec);
+    if (ec)
+    {
+        error = "Cannot replace " + archive.string() + ": " + ec.message() + " (is a client running with it?)";
+        fs::remove(temp, ec);
+        return false;
+    }
+    if (files) *files = list.size();
+    return true;
+}
+
 void MpqChain::Close()
 {
     for (void* h : m_archives) SFileCloseArchive(h);

@@ -61,6 +61,7 @@ add_executable(wow-world-editor WIN32
     src/Formats.cpp
     src/Ghosts.cpp
     src/Loader.cpp
+    src/Minimap.cpp
     src/ModelRenderer.cpp
     src/Models.cpp
     src/Mpq.cpp

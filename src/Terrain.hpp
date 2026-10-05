@@ -280,11 +280,23 @@ public:
     void SetProjectDir(const std::filesystem::path& dir) { m_projectDir = dir; }
     /// Rebuilds overlay/ from the applied changes (the added tiles and the WDTs listing them); call once they are loaded.
     void RebuildOverlay();
-    /// Whole tiles this map lacks, taken from another version: each {x, y, file bytes} as that version has them, in
-    /// its alpha format `otherBigAlpha`. Each is converted to this map's alpha format, ground effects this client lacks
-    /// are dropped, and object ids are made fresh (unless a neighbouring tile already lists the same placement: that
-    /// is the same object). One change adds them all; `error` collects tiles that could not be added.
-    std::optional<Change> AddTiles(const std::vector<std::tuple<int, int, std::vector<uint8_t>>>& tiles, bool otherBigAlpha, std::string& error);
+    /// A tile this map lacks, as another version has it: its ADT and (if that version has one) its minimap image.
+    struct NewTile { int x = 0, y = 0; std::vector<uint8_t> adt, minimap; };
+    /// Whole tiles this map lacks, taken from another version (ADTs in its alpha format `otherBigAlpha`). Each is
+    /// converted to this map's alpha format, ground effects this client lacks are dropped, and object ids are made
+    /// fresh (unless a neighbouring tile already lists the same placement: that is the same object). The map's WDT
+    /// and low-detail WDL list them (overlay), and export ships their minimaps. One change adds them all; `error`
+    /// collects tiles that could not be added.
+    std::optional<Change> AddTiles(const std::vector<NewTile>& tiles, bool otherBigAlpha, std::string& error);
+    /// Tile (x, y) of `map` as `chain` has it, minimap included (its md5translate.trs entry), for AddTiles.
+    static std::optional<NewTile> ReadNewTile(const MpqChain& chain, const std::string& map, int x, int y);
+    /// The project's terrain edits per tile of `map`, one hash each: a tile's derived files (scan results, its
+    /// rendered minimap) are good while its hash stays.
+    static std::map<int, size_t> EditHashes(const std::vector<Change>& done, const std::string& map);
+    /// Loads tile (x, y) of the open map now, on this thread, if the map has it and it is not loaded yet.
+    bool LoadNow(int x, int y, std::string& error);
+    /// True once after added tiles came or went: the far (WDL) view should be read again.
+    bool TakeFarChanged() { return std::exchange(m_farChanged, false); }
 
     /// Tiles of `map` that the project's applied changes touch.
     std::set<int> EditedTiles(const std::string& map) const;
@@ -315,6 +327,7 @@ private:
     std::string m_map;
     bool m_bigAlpha = false;
     std::filesystem::path m_projectDir;
+    bool m_farChanged = false;
     /// Shows (copies tiles/<stash> into the overlay, marks it in the overlay WDT) or hides an added tile.
     void SetTile(const std::string& map, int x, int y, const std::string& stash, bool present);
     std::vector<bool> m_present;

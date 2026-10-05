@@ -29,7 +29,10 @@ cmake --build build --config Release
 2. **File > New project**: name, parent folder, and the WXL client folder (the one with `Data`).
 3. In **Maps**, pick a map and click a lit square in the tile grid.
 4. Sculpt with the left mouse (B), select chunks (V); right drag looks, WASD/Q/E move.
-5. **Ctrl+S** saves, **F5** play-tests (exports into the client overlay; relog to see it).
+5. **Ctrl+S** saves, **F5** play-tests (exports into the WXL client overlay; relog to see it).
+   **Ctrl+Shift+E** (File > Build patch MPQ) builds the patch any 3.3.5 client loads, no WXL needed:
+   `<project>/out/patch-enUS-Z.MPQ`. **File > Build patch MPQ and install into client** also copies it into the
+   client's `Data\enUS\` (close the client first; it holds its archives open).
 6. **File > Server setup** links the AzerothCore server: "Read settings from worldserver.conf" fills the database and
    SOAP fields; SOAP needs `SOAP.Enabled = 1` and a game account with GM level 3. Passwords go to the Windows
    credential store, the rest to `%APPDATA%\wow-world-editor\profiles.json`; the project keeps only the profile name.
@@ -60,10 +63,38 @@ objects or map position; search by area name.
   alpha format, ground effects your client lacks are dropped, and objects get fresh unique ids (a placement a
   neighbouring tile already lists keeps its id: it is the same object). The tiles are kept in `<project>/tiles/` and
   served through `<project>/overlay/` (with a WDT that lists them), so streaming, compare, scans and export all see
-  them; the overlay is rebuilt from the changes when the project opens. Export writes the tiles and the map's WDT.
+  them; the overlay is rebuilt from the changes when the project opens. The map's low-detail WDL gets each added
+  tile's far heights (chunk corners and centres from the tile itself; within 1 yd of what Blizzard's tools write),
+  so it shows from a distance in the editor and the client. The other version's minimap image of the tile is kept
+  beside it. Export writes the tiles, the map's WDT and WDL, the minimap images and the client's md5translate.trs
+  with their lines added.
   Where your map's own neighbouring tiles differ, the seam shows in Problems: paste or sculpt across it.
-  **Only new terrain** lists just these cards. Not yet: minimap and far-terrain (WDL) entries for added tiles.
+  **Only new terrain** lists just these cards.
 - Measured: a whole Eastern Kingdoms scan (687-741 tiles) takes about 10 s; a rescan about 6 s.
+
+### Export and the patch MPQ
+
+- **Ctrl+E** writes the client files to `<project>/out/client`, starting from an empty folder each time (an undone
+  edit leaves nothing behind); server files go to `<project>/out/server` (spawn/path SQL, server DBCs).
+- **F5** does the same and mirrors `out/client` into the WXL extension's overlay (files no longer exported are taken
+  out), for a quick relog test.
+- **Ctrl+Shift+E** exports, then packs `out/client` into one MPQ (StormLib: zlib, (listfile), (attributes)):
+  tiles, WDT/WDL of added tiles, minimap images and md5translate.trs, client DBCs, world map art, and the files
+  copied from other clients. The name is `patchName` in project.json, default `patch-enUS-Z.MPQ`: it loads after
+  every `patch-X.MPQ` (the map modules use letters up to Z), so its files win. Archives in the client that would load
+  after it are listed as warnings. Install puts it in `Data\enUS\` (`Data\` for a non-locale name).
+- The patch carries the client side only: the server still needs `out/server` applied and, after terrain or area
+  edits, its maps extracted again from the patched client.
+
+### Minimaps
+
+Every export draws the minimap of each edited tile of the open map again, as it now looks: straight down, terrain,
+buildings and water, no trees or editor outlines (the client's own minimaps leave doodads out too), 256 x 256, in the
+client's layout (checked against Blizzard's pictures). Only tiles whose edits changed since the last export are drawn
+(`<project>/minimaps/`, with `index.json` holding the edits each picture shows). Export ships them as
+`textures/Minimap/wwe_<map>_<x>_<y>.blp` with the client's md5translate.trs plus their lines; a drawn picture wins
+over an added tile's picture from its other version. Tiles edited on another map keep their last picture until their
+map is open at an export. Building interiors (caves) use the buildings' own minimaps, which come with the map modules.
 
 ### Water in copy and paste
 
@@ -125,8 +156,14 @@ largest, then scans again: every tile must come from the saved results and the r
 `--diff-objects "<client>\Data" <base map> <other map> <zone id>` lists, for every difference area in a zone, the
 buildings the compare carries and every building of the other version reaching into it (origin inside or not, on the
 map already or not, model in the client or not), e.g. `Kalimdor Kalimdor_Turtle 400` for Thousand Needles.
+`--mpq-check <folder> [keep.MPQ]` packs a folder the way the patch is packed, opens it as a client Data folder and
+compares every file read back (the tiles check does this with a real export too).
+`--minimap-check "<client>\Data" <map> <x> <y> [out.png]` draws the tile as the editor's minimaps are drawn and saves it
+beside the client's own minimap of it (`<out>.client.png`) to compare; it also prints a rough match score per
+rotation/mirror (lighting differs too much for the score to decide alone).
 `--tiles-check "<client>\Data" <base map> <other map>` adds two tiles only the other map has (with objects when it
-can) in a scratch project and checks heights, alpha, water, object ids, undo/redo, the rebuilt overlay and the export.
+can) in a scratch project and checks heights, alpha, water, object ids, far heights (also against Blizzard's WDL on 20
+stock tiles), undo/redo, the rebuilt overlay and the export (ADT, WDT, WDL, minimap images and md5translate.trs).
 `--water-check "<client>\Data" <map> <x> <y>` pastes a dry chunk over a wet one and back on a tile with both, checks
 undo/redo and four quarter turns, then exports and reads the tile back (pasted water exact, every other chunk's kept).
 
@@ -147,6 +184,7 @@ tile and its textures without opening a window and prints a summary.
 | `src/Ghosts.*` | Ghost layers (other clients, single archives, other maps at the same coordinates), background streaming, `CompareArea` |
 | `src/Differences.*` | Whole-map scan of another version on a worker thread, areas of touching edited chunks, saved results and verdicts |
 | `src/AppDifferences.cpp` | Catalog > Differences: scan controls, progress, cards with pictures, review / approve / reject |
+| `src/Minimap.*` | Top-down orthographic render (minimaps, world maps, thumbnails) and the minimap look |
 | `src/AppCompare.cpp` | Compare selection: cycle versions of the selected chunks in place, per-version difference table |
 | `src/AppServer.cpp` | Server setup wizard, Server panel (GM commands), Problems panel |
 | `src/Loader.*` | Background tile preparation: reads/parses ADTs, decodes textures, builds model meshes off the UI thread |

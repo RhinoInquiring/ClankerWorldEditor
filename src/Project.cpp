@@ -12,6 +12,7 @@ bool Project::Save(std::string& error) const
     fs::create_directories(dir, ec);
     nlohmann::json j = { { "name", name }, { "clientDir", clientDir }, { "author", author }, { "format", 1 } };
     if (!serverProfile.empty()) j["serverProfile"] = serverProfile;
+    j["patchName"] = patchName;
     for (const auto& [kind, r] : idRanges) j["idRanges"][kind] = { r.first, r.last };
     for (const auto& [sourceName, dataDir] : sources) j["sources"].push_back({ { "name", sourceName }, { "dataDir", dataDir } });
     std::ofstream f(dir / "project.json");
@@ -33,6 +34,7 @@ std::optional<Project> Project::Load(const fs::path& dir, std::string& error)
         p.clientDir = j.value("clientDir", "");
         p.author = j.value("author", "");
         p.serverProfile = j.value("serverProfile", "");
+        p.patchName = j.value("patchName", p.patchName);
         if (j.contains("idRanges"))
             for (const auto& [kind, r] : j["idRanges"].items()) p.idRanges[kind] = { r.at(0).get<uint32_t>(), r.at(1).get<uint32_t>() };
         else   // format before ranges: an open start per table
@@ -49,4 +51,13 @@ std::optional<Project> Project::Load(const fs::path& dir, std::string& error)
         error = "project.json: " + std::string(e.what());
         return std::nullopt;
     }
+}
+
+std::filesystem::path Project::PatchInstallPath() const
+{
+    // patch-enUS-Z.MPQ: the locale is the part between the first two dashes when it is four letters.
+    std::string locale;
+    if (const size_t a = patchName.find('-'), b = patchName.find('-', a + 1); a != std::string::npos && b != std::string::npos && b - a - 1 == 4)
+        locale = patchName.substr(a + 1, 4);
+    return locale.empty() ? DataDir() / patchName : DataDir() / locale / patchName;
 }

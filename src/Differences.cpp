@@ -21,22 +21,6 @@ namespace
         return std::hash<std::string_view>{}(std::string_view(reinterpret_cast<const char*>(bytes.data()), bytes.size()));
     }
 
-    /// The project's terrain edits per tile of `map`, as one hash each (a tile's result is reused while it stays).
-    std::map<int, size_t> EditHashes(const std::vector<Change>& done, const std::string& map)
-    {
-        std::map<int, size_t> out;
-        for (const Change& c : done)
-        {
-            if (c.domain != "terrain.heights" || c.data.value("map", std::string()) != map) continue;
-            for (const char* field : { "edits", "layers", "holes", "areas", "liquids", "objects" })
-                for (const auto& e : c.data.value(field, nlohmann::json::array()))
-                {
-                    size_t& h = out[TileKey(e[0], e[1])];
-                    h = h * 1000003u ^ std::hash<std::string>{}(e.dump());
-                }
-        }
-        return out;
-    }
 }
 
 std::set<int> Differences::Region::Tiles() const
@@ -100,7 +84,7 @@ void Differences::Start(const MpqChain& baseChain, const std::string& baseMap, c
 
 void Differences::Run(std::vector<int> keys, std::vector<Change> done, std::map<int, TileResult> cache, bool baseBigAlpha, bool otherBigAlpha)
 {
-    const std::map<int, size_t> edits = EditHashes(done, m_baseMap);
+    const std::map<int, size_t> edits = TerrainAdapter::EditHashes(done, m_baseMap);
     for (int key : keys)
     {
         if (m_stop) break;
