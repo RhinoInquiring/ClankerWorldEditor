@@ -54,12 +54,52 @@ void App::UpdateSpawnView()
     float minX, minY, maxX, maxY, unused;
     EditorToServer({ x1, 0, z1 }, minX, minY, unused);
     EditorToServer({ x0, 0, z0 }, maxX, maxY, unused);
+    m_spawnEvents.clear();
     for (SpawnAdapter* spawns : { &m_creatures, &m_gameobjects })
-    {
-        const auto& around = spawns->Around(CurrentMapId(), minX, minY, maxX, maxY);
-        m_spawnView.insert(m_spawnView.end(), around.begin(), around.end());
-    }
+        for (const Spawn& s : spawns->Around(CurrentMapId(), minX, minY, maxX, maxY))
+        {
+            for (int e : s.events) ++m_spawnEvents[std::abs(e)];
+            if (!m_spawnEvent || s.InWorld(*m_spawnEvent)) m_spawnView.push_back(s);
+        }
     RefreshPathView();
+}
+
+std::string App::EventName(int event)
+{
+    if (!m_eventNames && m_db.Connected())   // ponytail: loaded once per session; reopen the editor after editing game_event
+    {
+        m_eventNames.emplace();
+        std::string error;
+        if (const auto rows = m_db.Query("SELECT eventEntry, COALESCE(description, '') FROM game_event", error))
+            for (const auto& r : *rows) (*m_eventNames)[std::stoi(r[0])] = r[1];
+        else Log("game_event: %s", error.c_str());
+    }
+    if (m_eventNames)
+        if (const auto it = m_eventNames->find(event); it != m_eventNames->end() && !it->second.empty()) return std::to_string(event) + "  " + it->second;
+    return std::to_string(event);
+}
+
+void App::DrawEventFilter(float w)
+{
+    const std::string preview = !m_spawnEvent ? "Every spawn" : *m_spawnEvent ? "During event " + EventName(*m_spawnEvent) : "No event running";
+    ImGui::SetNextItemWidth(w - 110);
+    if (ImGui::BeginCombo("Game event", preview.c_str()))
+    {
+        std::optional<std::optional<int>> pick;
+        if (ImGui::Selectable("Every spawn (events ignored)", !m_spawnEvent)) pick = std::optional<int>{};
+        if (ImGui::Selectable("No event running", m_spawnEvent == 0)) pick = 0;
+        for (const auto& [event, count] : m_spawnEvents)
+            if (ImGui::Selectable(("During " + EventName(event) + "  (" + std::to_string(count) + " here)").c_str(), m_spawnEvent == event)) pick = event;
+        ImGui::EndCombo();
+        if (pick && *pick != m_spawnEvent)
+        {
+            m_spawnEvent = *pick;
+            m_spawnSel.clear();   // no edits to spawns the filter hides
+            m_creatures.Refresh();
+            m_gameobjects.Refresh();
+        }
+    }
+    ImGui::SetItemTooltip("game_event_creature / _gameobject: which spawns are in the world.\nAn event's spawns appear only while it runs; negative entries leave during it.\nThe list holds the events of the spawns around the camera.");
 }
 
 void App::UpdateSpawnModels()
@@ -311,7 +351,8 @@ void App::DrawSpawnLabels(ImDrawList* dl, const ImVec2& origin, const ImVec2& si
         p.y += 3.5f;
         if (const auto at = ToScreen(viewProj, p, origin, size))
         {
-            const std::string text = s.name.empty() ? "#" + std::to_string(s.entry) : s.name;
+            std::string text = s.name.empty() ? "#" + std::to_string(s.entry) : s.name;
+            for (int e : s.events) text += e > 0 ? "  [event " + std::to_string(e) + "]" : "  [not in event " + std::to_string(-e) + "]";
             const ImVec2 t = ImGui::CalcTextSize(text.c_str());
             const ImU32 col = selected || hovered ? IM_COL32(255, 255, 255, 255)
                             : s.kind == SpawnKind::GameObject ? IM_COL32(150, 210, 255, 230) : IM_COL32(255, 230, 150, 230);
@@ -342,6 +383,7 @@ void App::DrawSpawnsPanel(float w)
         ImGui::Checkbox("Show creatures", &m_showSpawns[int(SpawnKind::Creature)]);
         ImGui::SameLine();
         ImGui::Checkbox("Show gameobjects", &m_showSpawns[int(SpawnKind::GameObject)]);
+        DrawEventFilter(w);
         ImGui::TextColored(kQuiet, "Pick a %s (here or in the Catalog), click the ground\nto place it. Click a spawn or its model: select\n"
                                    "Drag: box select   Shift: add   Ctrl: remove\nAlt+click: move selection there   Del: delete   Esc: stop",
                            creature ? "creature" : "gameobject");
@@ -392,6 +434,8 @@ void App::DrawSpawnsPanel(float w)
             ImGui::TextColored(kQuiet, "%.2f, %.2f, %.2f", first.x, first.y, first.z);
             const auto look = m_looks.SpawnLook(first);
             ImGui::TextColored(kQuiet, "display %u: %s", first.displayId, look ? look->look.model.c_str() : "(no model)");
+            for (int e : first.events)
+                ImGui::TextColored(kWarn, "%s event %s", e > 0 ? "Only during" : "Gone during", EventName(std::abs(e)).c_str());
         }
         else
         {

@@ -2362,6 +2362,7 @@ void App::DrawMenuBar()
         ImGui::MenuItem("Terrain level of detail", nullptr, &m_drawOptions.lod);
         ImGui::MenuItem("Creatures", nullptr, &m_showSpawns[int(SpawnKind::Creature)]);
         ImGui::MenuItem("Gameobjects", nullptr, &m_showSpawns[int(SpawnKind::GameObject)]);
+        DrawEventFilter(330);
         if (ImGui::MenuItem("Focus camera on tile", "F", false, !m_terrain.Tiles().empty())) FocusTile();
         ImGui::Separator();
         ImGui::MenuItem("Sources", nullptr, &m_showSources);

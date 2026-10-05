@@ -2648,6 +2648,26 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdLine, int)
         SpawnAdapter spawns(store, kind);
         store.Register(spawns);
         spawns.SetDb(&db);
+        {
+            // Game event membership: Around reads game_event_<table>; InWorld follows the core (negative = gone during).
+            Spawn e;
+            e.events = { 12, -7 };
+            check(e.InWorld(12) && !e.InWorld(0) && !e.InWorld(7) && !e.InWorld(3), "InWorld: only during event 12");
+            e.events = { -7 };
+            check(e.InWorld(0) && e.InWorld(3) && !e.InWorld(7), "InWorld: gone during event 7 only");
+            if (const auto ev = db.QueryRows("SELECT c.guid, c.map, c.position_x AS x, c.position_y AS y, g.eventEntry FROM game_event_" + table +
+                                             " g JOIN " + table + " c ON c.guid = g.guid LIMIT 1", error); ev && !ev->empty())
+            {
+                const auto& r = (*ev)[0];
+                const float x = std::stof(r["x"].get<std::string>()), y = std::stof(r["y"].get<std::string>());
+                const uint32_t guid = std::stoul(r["guid"].get<std::string>());
+                bool found = false;
+                for (const Spawn& s : spawns.Around(std::stoul(r["map"].get<std::string>()), x - 1, y - 1, x + 1, y + 1))
+                    if (s.guid == guid)
+                        found = std::find(s.events.begin(), s.events.end(), std::stoi(r["eventEntry"].get<std::string>())) != s.events.end();
+                check(found, "Around: an event spawn carries its event");
+            }
+        }
         auto commit = [&](const std::optional<nlohmann::json>& b, const std::optional<nlohmann::json>& a, const char* label) {
             Change c = spawns.MakeChange(b, a, label);
             spawns.Apply(c);

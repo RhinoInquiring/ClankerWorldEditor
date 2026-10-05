@@ -30,6 +30,11 @@ struct Spawn
     uint32_t displayId = 0;       // display id (creature: creature_template_model Idx 0), display only
     float size = 1;               // model scale (gameobject_template size / creature DisplayScale), display only
     uint32_t weapons[2] = {}, weaponTypes[2] = {};   // creature: main/off hand item displayid + InventoryType, display only
+    std::vector<int> events;      // game_event_creature / _gameobject eventEntry (negative: gone during it), display only
+
+    /// Whether the spawn is in the world while only `event` runs (0: none): an event's spawns appear only during
+    /// it, negative ones leave during it.
+    bool InWorld(int event) const;
 
     /// From a row (column -> value); missing columns keep the defaults above.
     static Spawn FromRow(const nlohmann::json& row, SpawnKind kind = SpawnKind::Creature);

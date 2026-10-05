@@ -145,6 +145,10 @@ private:
     void BuildSpawnOverlay(std::vector<LineVertex>& lines) const;
     void DrawSpawnLabels(ImDrawList* dl, const ImVec2& origin, const ImVec2& size, DirectX::FXMMATRIX viewProj) const;
     void DrawSpawnsPanel(float width);
+    /// "12 Hallow's End" from game_event (just the number when unknown).
+    std::string EventName(int event);
+    /// The game event filter (combo): which spawns the viewport shows.
+    void DrawEventFilter(float width);
     bool SpawnTool() const { return m_tool == Tool::Creatures || m_tool == Tool::Gameobjects; }
     /// The adapter of the kind the spawn tool works on.
     SpawnAdapter& Spawns() { return m_spawnKind == SpawnKind::Creature ? m_creatures : m_gameobjects; }
@@ -501,6 +505,9 @@ private:
     std::optional<uint32_t> m_spawnHover;                // spawn under the cursor (marker or model)
     std::optional<uint32_t> m_spawnPress;                // spawn under the cursor when the button went down
     bool m_showSpawns[2] = { true, true };               // creatures, gameobjects: markers, names and models
+    std::optional<int> m_spawnEvent;                     // game event filter: none = every spawn, 0 = no event running, N = only event N
+    std::map<int, size_t> m_spawnEvents;                 // events of the spawns around the camera -> spawn count
+    std::optional<std::map<int, std::string>> m_eventNames;   // game_event descriptions, loaded on first use
     std::optional<SpawnAdapter::Template> m_spawnArmed;  // template placed by clicking the ground
     std::optional<float> m_spawnPending;                 // facing being dragged, committed on release
     std::string m_spawnQuery;

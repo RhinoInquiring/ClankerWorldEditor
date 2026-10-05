@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <fstream>
 #include <set>
+#include <sstream>
 
 namespace fs = std::filesystem;
 
@@ -58,15 +59,30 @@ Spawn Spawn::FromRow(const nlohmann::json& row, SpawnKind kind)
         s.weapons[hand] = u(n.c_str(), 0);
         s.weaponTypes[hand] = u((n + "Type").c_str(), 0);
     }
+    std::stringstream events(Text(row, "events"));   // "12,-7" (GROUP_CONCAT)
+    for (std::string e; std::getline(events, e, ',');) s.events.push_back(std::stoi(e));
     return s;
+}
+
+bool Spawn::InWorld(int event) const
+{
+    bool any = false, during = false;
+    for (int e : events)
+    {
+        if (e == -event) return false;
+        any |= e > 0;
+        during |= e == event;
+    }
+    return !any || during;
 }
 
 nlohmann::json Spawn::ToRow(nlohmann::json row) const
 {
-    // Joined from the template, not spawn columns.
+    // Joined from the template or game_event_*, not spawn columns.
     row.erase("name");
     row.erase("displayId");
     row.erase("size");
+    row.erase("events");
     for (const char* c : { "weapon1", "weapon1Type", "weapon2", "weapon2Type" }) row.erase(c);
     const bool turned = Text(row, "orientation") != Num(orientation);
     row["guid"] = std::to_string(guid);
@@ -197,7 +213,8 @@ const std::vector<Spawn>& SpawnAdapter::Around(uint32_t map, float minX, float m
     {
         const bool creature = m_kind == SpawnKind::Creature;
         const std::string sql =
-            "SELECT c.guid, c.id, c.map, c.zoneId, c.areaId, c.position_x, c.position_y, c.position_z, c.orientation, c.spawntimesecs, " +
+            "SELECT c.guid, c.id, c.map, c.zoneId, c.areaId, c.position_x, c.position_y, c.position_z, c.orientation, c.spawntimesecs, "
+            "(SELECT GROUP_CONCAT(ge.eventEntry) FROM game_event_" + std::string(Table()) + " ge WHERE ge.guid = c.guid) AS events, " +
             std::string(creature ? "c.wander_distance, c.MovementType, m.CreatureDisplayID AS displayId, m.DisplayScale AS size, t.name, "
                                    "i1.displayid AS weapon1, i1.InventoryType AS weapon1Type, i2.displayid AS weapon2, i2.InventoryType AS weapon2Type FROM creature c "
                                    "LEFT JOIN creature_template t ON t.entry = c.id "
@@ -225,6 +242,7 @@ const std::vector<Spawn>& SpawnAdapter::Around(uint32_t map, float minX, float m
             s.size = it->second.size;
             std::copy(std::begin(it->second.weapons), std::end(it->second.weapons), s.weapons);
             std::copy(std::begin(it->second.weaponTypes), std::end(it->second.weaponTypes), s.weaponTypes);
+            s.events = it->second.events;
         }
         found[guid] = s;
     }

@@ -27,6 +27,20 @@ The **Selected** tab edits one spawn or many at once: facing, wander distance, r
 delete. Editing a group is one undo step. The **Inspector** shows every column of the spawn's row and of its
 template.
 
+## Game events
+
+Spawns tied to a game event (`game_event_creature`, `game_event_gameobject`) carry a tag in their label:
+`[event 12]` appears only while event 12 runs, `[not in event 12]` leaves while it runs. The Selected tab names the
+event. **Game event** (Place tab, also in the View menu) picks what the viewport shows:
+
+| Choice | Shows |
+| --- | --- |
+| Every spawn | All rows, events ignored (default) |
+| No event running | The world on a normal day |
+| During event N | The world while only event N runs (listed: the events of the spawns around the camera) |
+
+Changing the filter clears the selection, so hidden spawns are never edited.
+
 ## How edits reach the server
 
 Each edit is a change holding the whole row before and after. With the server linked, changes are written to the
