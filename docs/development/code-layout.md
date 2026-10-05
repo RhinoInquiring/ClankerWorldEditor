@@ -26,8 +26,9 @@ format code never touches the GPU; the `App*` files are the UI.
 | `src/Blueprint.*` | Blueprints on disk |
 | `src/Areas.*` | DBC row adapters: AreaTable, WMOAreaTable, WorldMapArea, WorldMapOverlay |
 | `src/Spawns.*` | Creature and gameobject spawns in the world database, SQL export |
-| `src/Tables.*` | Rows-by-key adapter: waypoint_data, creature_addon |
+| `src/Tables.*` | Rows-by-key adapter: waypoint_data, creature_addon, areatrigger, areatrigger_teleport, instance_template |
 | `src/Paths.*` | A creature's waypoint path as one change |
+| `src/Triggers.*` | Area triggers (shape, inside test, ray hit), teleports, AreaTrigger.dbc and Map.dbc corpse entrance adapters |
 
 ## Versions
 
@@ -63,6 +64,7 @@ format code never touches the GPU; the `App*` files are the UI.
 | `src/AppPopulate.cpp` | Creatures and Gameobjects tools, unit catalog |
 | `src/AppPaths.cpp` | Path editing |
 | `src/AppZones.cpp` | Zones tool, buildings' room names |
+| `src/AppTriggers.cpp` | Triggers tool: triggers, teleports, entrances, their checks |
 | `src/AppWorldMap.cpp` | World map drawing |
 | `src/AppInspect.cpp` | Inspector |
 | `src/AppServer.cpp` | Server setup, Server panel, Problems |

@@ -36,7 +36,7 @@ The last project reopens on start. To compare against other clients or stack mod
 | Maps | Every map of the client, the whole-map picture and its tile grid (orange = edited, blue outline = loaded) |
 | Inspector | What the tool works on: the chunk, object, spawn or area under the cursor or selected, every field |
 | Object | Transform of the selected objects |
-| Catalog | Models, buildings, textures, units, blueprints, differences ([Catalog](objects/catalog.md)) |
+| Catalog | Models, buildings, textures, units, blueprints, differences, portal effects ([Catalog](objects/catalog.md)) |
 | Versions | Ghost layers, compare, sources ([Ghost layers](versions/ghost-layers.md)) |
 | Changes | The project's edits, newest last |
 | Problems | What an export would refuse or fix; click one to go there |
@@ -45,6 +45,9 @@ The last project reopens on start. To compare against other clients or stack mod
 
 Panels dock anywhere; **View > Reset panel layout** puts them back. **Ctrl+P** opens the command palette: every
 command by name.
+
+Sizes, scales, angles and other values with limits are sliders: drag the bar, or **Ctrl+click** it to type a value.
+Positions have no limits and stay as drag fields (drag sideways, or double-click to type).
 
 ## Tool groups
 
@@ -55,7 +58,7 @@ Tools are grouped; **F1 to F4** switch groups, and each group remembers its last
 | F1 Terrain | Select (V), Sculpt (B), Paint (T), Holes (H), Copy (C) |
 | F2 Objects | Objects (O) |
 | F3 Units | Creatures (N), Gameobjects (I) |
-| F4 Regions | Zones (Z) |
+| F4 Regions | Zones (Z), Triggers (K) |
 
 ## Camera
 

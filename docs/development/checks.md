@@ -61,6 +61,7 @@ Direct3D device. Checks that write files use a temporary folder and remove it.
 | `--spawn-check <server folder>` | Spawn and path adapters: place, move, group edits, undo, export, id ranges (leaves the database as it was) |
 | `--unit-catalog-check <server folder> <Data>` | Every creature and gameobject template and its model |
 | `--area-check <Data>` | AreaTable, WMOAreaTable and world map adapters on the real DBCs |
+| `--triggers-check <Data>` | AreaTrigger.dbc and Map.dbc adapters on the real DBCs: layout, shapes, export changes only the edited fields |
 
 ## Tools
 

@@ -53,6 +53,7 @@ build\Release\wow-world-editor.exe
 | --- | --- |
 | [Zones](docs/regions/zones.md) | Paint area ids onto the ground, edit AreaTable rows, name buildings' rooms (WMOAreaTable) |
 | [World maps](docs/regions/world-maps.md) | Draw a zone's world map and its explored-area overlays from the terrain |
+| [Triggers and entrances](docs/regions/triggers.md) | Area triggers (client DBC and server row together), teleports and their arrival points, instance entrances and exits |
 
 ### Map versions
 | Feature | What it does |

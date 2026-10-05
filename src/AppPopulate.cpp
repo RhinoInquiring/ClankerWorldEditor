@@ -413,7 +413,7 @@ void App::DrawSpawnsPanel(float w)
         {
             float wander = first.wander;
             ImGui::SetNextItemWidth(w - 110);
-            ImGui::DragFloat("Wander", &wander, 0.25f, 0, 60, "%.1f yd");
+            ImGui::SliderFloat("Wander", &wander, 0, 60, "%.1f yd", ImGuiSliderFlags_AlwaysClamp);
             if (ImGui::IsItemDeactivatedAfterEdit()) EditSpawns("Wander " + what, [wander](Spawn& s) { s.wander = wander; });
             ImGui::SetItemTooltip("Random movement radius (MovementType 1); 0 stands still.");
         }

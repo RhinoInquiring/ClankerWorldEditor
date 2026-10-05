@@ -52,6 +52,7 @@ add_executable(wow-world-editor WIN32
     src/AppServer.cpp
     src/AppSources.cpp
     src/AppWorldMap.cpp
+    src/AppTriggers.cpp
     src/AppZones.cpp
     src/Areas.cpp
     src/Assets.cpp
@@ -73,7 +74,8 @@ add_executable(wow-world-editor WIN32
     src/Spawns.cpp
     src/Tables.cpp
     src/Paths.cpp
-    src/Terrain.cpp)
+    src/Terrain.cpp
+    src/Triggers.cpp)
 target_compile_definitions(wow-world-editor PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_link_libraries(wow-world-editor PRIVATE imgui StormLib::storm nlohmann_json::nlohmann_json
     d3d11 d3dcompiler dxgi ole32 shell32 uuid windowscodecs advapi32 winhttp)

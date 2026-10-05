@@ -76,7 +76,7 @@ void App::ConnectServer()
         // The project's spawn changes go to this database (idempotent; catches up after offline edits).
         for (SpawnAdapter* spawns : { &m_creatures, &m_gameobjects })
             if (std::string error; !spawns->Sync(error)) Log("%s spawns not written to the database: %s", spawns->Table(), error.c_str());
-        for (TableRowsAdapter* table : { &m_waypoints, &m_addons })
+        for (TableRowsAdapter* table : { &m_waypoints, &m_addons, &m_triggerRows, &m_teleports, &m_instances })
             if (std::string error; !table->Sync(error)) Log("%s not written to the database: %s", table->Table().c_str(), error.c_str());
     }
     else Log("Server '%s': database not connected: %s", p->name.c_str(), result.c_str());
@@ -311,7 +311,7 @@ void App::RunChecks()
         m_problems.push_back({ Problem::Severity::Warning, "Server", "Database of profile '" + m_project->serverProfile + "' is not connected." });
     for (const SpawnAdapter* spawns : { &m_creatures, &m_gameobjects })
         if (!spawns->LastError().empty()) m_problems.push_back({ Problem::Severity::Error, "Server", spawns->LastError() });
-    for (const TableRowsAdapter* table : { &m_waypoints, &m_addons })
+    for (const TableRowsAdapter* table : { &m_waypoints, &m_addons, &m_triggerRows, &m_teleports, &m_instances })
         if (!table->LastError().empty()) m_problems.push_back({ Problem::Severity::Error, "Server", table->LastError() });
     // ID ranges: rows someone else put in ours, and ranges with no ids left.
     for (const SpawnAdapter* spawns : { &m_creatures, &m_gameobjects })
@@ -347,6 +347,7 @@ void App::RunChecks()
             table->CheckIds(r.first, r.last, "Zones", m_problems);
         else
             m_problems.push_back({ Problem::Severity::Error, "IDs", std::string("No ") + kind + " range set (File > Project settings)." });
+    CheckTriggers(m_problems);
     if (AreasPainted())
         m_problems.push_back({ Problem::Severity::Warning, "Zones",
                                "Area ids were painted: the server reads areas from its extracted .map files, so extract them again from the exported tiles." });
@@ -481,7 +482,7 @@ void App::DrawProjectSettingsModal()
             if (!r.first || r.last < r.first) valid = false;
             ImGui::PopID();
         }
-        for (const char* kind : { "area.id", "wmoarea.id", "worldmaparea.id", "worldmapoverlay.id" })   // DBC ids live in the client's files, not the database
+        for (const char* kind : { "area.id", "wmoarea.id", "worldmaparea.id", "worldmapoverlay.id", "areatrigger.id" })   // DBC ids live in the client's files, not the database
         {
             Project::IdRange& r = m_settingsRanges[kind];
             ImGui::PushID(kind);

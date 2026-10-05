@@ -23,6 +23,7 @@
 #include "Spawns.hpp"
 #include "Tables.hpp"
 #include "Terrain.hpp"
+#include "Triggers.hpp"
 
 #include <imgui.h>
 #include <imgui_impl_dx11.h>
@@ -2349,6 +2350,96 @@ namespace
     }
 }
 
+namespace
+{
+    /// `--triggers-check <data dir>`: AreaTrigger.dbc and Map.dbc read through their adapters (layout, shapes), then a
+    /// trigger moved and turned, one added and a corpse entrance moved, exported and read back: only those fields differ,
+    /// and the mod-dbc-patch files list one add and the modifies.
+    int TriggersCheck()
+    {
+        if (__argc < 3 || !__wargv) return 2;
+        setvbuf(stdout, nullptr, _IONBF, 0);
+        namespace fs = std::filesystem;
+        char buf[1024] = {};
+        WideCharToMultiByte(CP_ACP, 0, __wargv[2], -1, buf, sizeof buf, nullptr, nullptr);
+        int problems = 0;
+        auto expect = [&](bool ok, const std::string& what) { printf("  %-66s %s\n", what.c_str(), ok ? "ok" : "FAILED"); problems += !ok; };
+        MpqChain chain;
+        chain.Open(std::string(buf));
+        ChangeStore store;
+        AreaTriggerAdapter triggers(chain, store);
+        MapRowsAdapter maps(chain, store);
+        store.Register(triggers);
+        store.Register(maps);
+
+        const auto rows = triggers.Rows();
+        size_t shaped = 0;
+        for (const auto& [id, row] : rows)
+        {
+            const Trigger t = Trigger::FromRow(row);
+            shaped += t.Sphere() || (t.length > 0 && t.width > 0 && t.height > 0);
+        }
+        expect(rows.size() > 1000, "AreaTrigger.dbc read: " + std::to_string(rows.size()) + " triggers");
+        expect(shaped * 100 >= rows.size() * 99, std::to_string(shaped) + " have a sphere or box size");
+        expect(triggers.OnMap(0).size() > 50 && triggers.OnMap(1).size() > 50, "Eastern Kingdoms and Kalimdor have triggers");
+        const auto mapRows = maps.Rows();
+        uint32_t corpseMap = 0;
+        for (const auto& [id, row] : mapRows)
+            if (row.value("CorpseMapID", 0x80000000u) < 0x80000000u && row.value("InstanceType", 0u) == 1) { corpseMap = id; break; }
+        expect(mapRows.size() > 100 && corpseMap, "Map.dbc read: " + std::to_string(mapRows.size()) + " maps, dungeon " + std::to_string(corpseMap) + " has a corpse entrance");
+
+        const nlohmann::json firstRow = rows.begin()->second;
+        Trigger moved = Trigger::FromRow(firstRow);
+        moved.x += 10;
+        moved.yaw = 1.0f;
+        triggers.Commit(moved.id, moved.ToDbcRow(firstRow), "move");
+        const Trigger added{ 60000, 0, 1, 2, 3, 0, 10, 4, 6, 0.5f };
+        triggers.Commit(added.id, added.ToDbcRow(), "add");
+        nlohmann::json corpse = maps.Row(corpseMap);
+        corpse["Corpse[0]"] = corpse["Corpse[0]"].get<float>() + 5;
+        maps.Commit(corpseMap, corpse, "corpse");
+
+        const fs::path t = fs::temp_directory_path() / "wow-world-editor-triggerscheck";
+        std::error_code ec;
+        fs::remove_all(t, ec);
+        std::string error;
+        expect(triggers.Export({ t / "dbc" }, t / "patch", error) && maps.Export({ t / "dbc" }, t / "patch", error), "exported " + error);
+        auto readBack = [&](const std::string& name, const std::set<std::pair<uint32_t, uint32_t>>& changed, uint32_t fields, int extra) {
+            Dbc a, b;
+            std::ifstream f(t / "dbc" / (name + ".dbc"), std::ios::binary);
+            std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(f)), {});
+            if (!a.Load(*chain.Read("DBFilesClient\\" + name + ".dbc")) || !b.Load(bytes)) return false;
+            if (b.Rows() != a.Rows() + extra) return false;
+            size_t differ = 0;
+            for (uint32_t r = 0; r < a.Rows(); ++r)
+            {
+                const auto rb = b.Find(a.U32(r, 0));
+                if (!rb) return false;
+                for (uint32_t c = 0; c < fields; ++c)
+                    if (a.U32(r, c) != b.U32(*rb, c) && !changed.count({ a.U32(r, 0), c })) ++differ;
+            }
+            return differ == 0;
+        };
+        expect(readBack("AreaTrigger", { { moved.id, 2 }, { moved.id, 9 } }, 10, 1), "AreaTrigger.dbc: one row added, only x and yaw of the moved one differ");
+        expect(readBack("Map", { { corpseMap, 60 } }, 66, 0), "Map.dbc: only the corpse x of one map differs");
+        {
+            Dbc b;
+            std::ifstream f(t / "dbc" / "AreaTrigger.dbc", std::ios::binary);
+            std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(f)), {});
+            const auto r = b.Load(bytes) ? b.Find(60000) : std::nullopt;
+            expect(r && Trigger::FromRow(triggers.Row(60000)).length == 10 && b.F32(*r, 6) == 10 && b.F32(*r, 9) == 0.5f && b.U32(*r, 1) == 0,
+                   "the added trigger reads back");
+        }
+        std::ifstream pj(t / "patch" / "AreaTrigger.json");
+        const nlohmann::json patch = nlohmann::json::parse(pj, nullptr, false);
+        expect(!patch.is_discarded() && patch["add"].size() == 1 && patch["modify"].size() == 1 && patch["modify"][0].size() == 3,
+               "mod-dbc-patch: 1 add, 1 modify of ID + 2 fields");
+        fs::remove_all(t, ec);
+        printf(problems ? "%d problem(s)\n" : "triggers check passed\n", problems);
+        return problems ? 1 : 0;
+    }
+}
+
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdLine, int)
 {
     if (cmdLine && wcsstr(cmdLine, L"--model-check")) return ModelCheck();
@@ -2363,6 +2454,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdLine, int)
     if (cmdLine && wcsstr(cmdLine, L"--mpq-check")) return MpqCheck();
     if (cmdLine && wcsstr(cmdLine, L"--sources-check")) return SourcesCheck();
     if (cmdLine && wcsstr(cmdLine, L"--scan-check")) return ScanCheck();
+    if (cmdLine && wcsstr(cmdLine, L"--triggers-check")) return TriggersCheck();
     if (cmdLine && wcsstr(cmdLine, L"--diff-objects")) return DiffObjects();
     if (cmdLine && wcsstr(cmdLine, L"--blueprint-check")) return BlueprintCheck();
     if (cmdLine && wcsstr(cmdLine, L"--asset-check")) return AssetCheck();
@@ -3289,7 +3381,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdLine, int)
         return problems ? 1 : 0;
     }
     if (cmdLine && wcsstr(cmdLine, L"--rewrite-check")) return RewriteCheck();
-    if (cmdLine && wcsstr(cmdLine, L"--selftest")) return FormatsSelfTest() && ChangesSelfTest() && TerrainSelfTest() && BlendSelfTest() && CatalogSelfTest() && BlueprintSelfTest() ? 0 : 1;
+    if (cmdLine && wcsstr(cmdLine, L"--selftest")) return FormatsSelfTest() && ChangesSelfTest() && TerrainSelfTest() && BlendSelfTest() && CatalogSelfTest() && BlueprintSelfTest() && TriggersSelfTest() ? 0 : 1;
     if (cmdLine && wcsstr(cmdLine, L"--check")) return Check();
 
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);

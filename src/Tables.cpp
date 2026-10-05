@@ -64,6 +64,23 @@ std::vector<nlohmann::json> TableRowsAdapter::Rows(uint32_t key) const
     return rows.value_or(std::vector<nlohmann::json>{});
 }
 
+std::map<uint32_t, std::vector<nlohmann::json>> TableRowsAdapter::All() const
+{
+    std::map<uint32_t, std::vector<nlohmann::json>> all;
+    if (Connected())
+    {
+        std::string error;
+        for (auto& row : m_db->QueryRows("SELECT * FROM " + m_table, error).value_or(std::vector<nlohmann::json>{}))
+            if (row[m_key].is_string()) all[uint32_t(std::stoul(row[m_key].get<std::string>()))].push_back(std::move(row));
+    }
+    std::map<uint32_t, nlohmann::json> now, original;
+    NetState(now, original);
+    for (const auto& [key, rows] : now)
+        if (rows.empty()) all.erase(key);
+        else all[key] = rows.get<std::vector<nlohmann::json>>();
+    return all;
+}
+
 Change TableRowsAdapter::MakeChange(uint32_t key, const std::vector<nlohmann::json>& before, const std::vector<nlohmann::json>& after,
                                     const std::string& label) const
 {

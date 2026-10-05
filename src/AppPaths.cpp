@@ -340,7 +340,7 @@ void App::DrawPathPanel(float w)
             ImGui::TableNextColumn();
             float seconds = p.delay / 1000.0f;
             ImGui::SetNextItemWidth(-1);
-            if (ImGui::DragFloat("##wait", &seconds, 0.1f, 0, 600, "%.1f")) { p.delay = uint32_t(std::max(seconds, 0.0f) * 1000 + 0.5f); e.dirty = true; }
+            if (ImGui::SliderFloat("##wait", &seconds, 0, 600, "%.1f", ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_AlwaysClamp)) { p.delay = uint32_t(std::max(seconds, 0.0f) * 1000 + 0.5f); e.dirty = true; }
             ImGui::TableNextColumn();
             ImGui::SetNextItemWidth(-1);
             int move = int(std::min<uint32_t>(p.moveType, 3));

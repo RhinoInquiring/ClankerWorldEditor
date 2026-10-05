@@ -41,7 +41,7 @@ Derived folders can be deleted; they are rebuilt.
 
 ## IDs
 
-New rows (spawns, areas, world map rows) take ids from the project's ranges (`project.json` `idRanges`, edited in
+New rows (spawns, areas, world map rows, triggers) take ids from the project's ranges (`project.json` `idRanges`, edited in
 **File > Project settings**): the lowest free one, never reused. An id is stored in the change that creates the row and
 never recomputed, so exports stay stable and other projects can claim other ranges.
 
@@ -80,12 +80,13 @@ every source for `World\Maps\` paths. Export writes the tiles, the WDT, the WDL,
 `{rows: [{guid, before, after}]}`, each side the whole row as column to text (null = no row). Applied to the world
 database as they happen when a server is linked; exported as SQL with revert scripts.
 
-### world.waypoint_data, world.creature_addon
+### world.waypoint_data, world.creature_addon, world.areatrigger, world.areatrigger_teleport, world.instance_template
 
-Rows of one key (path id, guid) before and after, written as delete-then-insert. A path save is a batch: points,
-addon and the creature's movement type in one undo step.
+Rows of one key (path id, guid, trigger id, map) before and after, written as delete-then-insert. A path save is a
+batch: points, addon and the creature's movement type in one undo step. A trigger edit is a batch too: its
+AreaTrigger.dbc row, its `areatrigger` row (same shape) and its teleport.
 
-### dbc.AreaTable, dbc.WMOAreaTable, dbc.WorldMapArea, dbc.WorldMapOverlay
+### dbc.AreaTable, dbc.WMOAreaTable, dbc.WorldMapArea, dbc.WorldMapOverlay, dbc.AreaTrigger, dbc.Map
 
 `{id, before, after}`, rows as every field by mod-dbc-patch schema name (null = no row). Export writes the client's
 table plus the project's rows to `out/client/DBFilesClient` and `out/server/dbc`, and the changes as JSON to `out/dbc`.
@@ -96,6 +97,8 @@ The client and worldserver read DBCs at start.
   row per room and name sets stop at 127.
 - WorldMapArea gives a zone picture's world rectangle; WorldMapOverlay the pieces shown once areas are explored.
   Pictures are rendered into `<project>/assets/` (not changes: rendering needs the tiles loaded).
+- Map rows are only ever modified (corpse entrance); the editor knows a few Map.dbc fields and leaves the rest as the
+  client has them.
 
 ## Sources
 

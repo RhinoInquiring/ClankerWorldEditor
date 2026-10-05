@@ -18,6 +18,7 @@
 #include "Spawns.hpp"
 #include "Tables.hpp"
 #include "Terrain.hpp"
+#include "Triggers.hpp"
 
 #include <d3d11.h>
 #include <imgui.h>
@@ -49,14 +50,14 @@ public:
     bool WantsQuit() const { return m_quit; }
 
 private:
-    enum class Tool { Select, Sculpt, Copy, Holes, Objects, Paint, Creatures, Gameobjects, Zones };
+    enum class Tool { Select, Sculpt, Copy, Holes, Objects, Paint, Creatures, Gameobjects, Zones, Triggers };
     /// Tools come in groups (the toolbar's buttons); a group remembers the tool last used in it.
     enum class Group { Terrain, Objects, Units, Regions };
     static constexpr const char* kGroupNames[4] = { "Terrain", "Objects", "Units", "Regions" };
     static Group GroupOf(Tool t)
     {
         return t == Tool::Objects ? Group::Objects : t == Tool::Creatures || t == Tool::Gameobjects ? Group::Units
-             : t == Tool::Zones   ? Group::Regions : Group::Terrain;
+             : t == Tool::Zones || t == Tool::Triggers ? Group::Regions : Group::Terrain;
     }
     void SetGroup(Group g) { m_tool = m_groupTool[int(g)]; }
     Tool m_groupTool[4] = { Tool::Sculpt, Tool::Objects, Tool::Creatures, Tool::Zones };
@@ -172,6 +173,25 @@ private:
     std::string AreaLabel(uint32_t id) const;
     /// Whether any applied terrain change paints area ids (the server needs its .map files extracted again).
     bool AreasPainted() const;
+
+    // regions: area triggers, teleports and instance entrances (AppTriggers.cpp)
+    void DrawTriggersPanel(float width);
+    /// Triggers tool in the viewport: click picks a trigger, Alt+click moves the selected one, and an armed pick
+    /// (place, move, teleport target, corpse point) takes the next click on the ground.
+    void TriggersViewport(const ImVec2& origin, const ImVec2& size, DirectX::FXMMATRIX viewProj);
+    void BuildTriggerOverlay(std::vector<LineVertex>& lines) const;
+    void DrawTriggerLabels(ImDrawList* dl, const ImVec2& origin, const ImVec2& size, DirectX::FXMMATRIX viewProj) const;
+    /// One undo step over a trigger's AreaTrigger.dbc row, its `areatrigger` row and its areatrigger_teleport row
+    /// (nullopt removes them); parts that do not change are left out. Reloads teleports over SOAP when one changed.
+    void CommitTrigger(uint32_t id, const std::optional<Trigger>& after, const std::optional<Teleport>& teleport, const std::string& label);
+    /// Teleports by trigger id (database and project), re-read when the project changes.
+    const std::map<uint32_t, Teleport>& TeleportsView() const;
+    /// Triggers of the open map (cached).
+    const std::vector<Trigger>& TriggersOnMap() const;
+    /// The map's name for a Map.dbc id.
+    std::string MapLabel(uint32_t id) const;
+    /// Ids, teleports without a trigger or into a missing map, arrivals inside another teleport, instances without a way out.
+    void CheckTriggers(std::vector<Problem>& problems) const;
 
     // populate: creature waypoint paths (AppPaths.cpp)
     CreaturePath PathOf() { return { m_creatures, m_waypoints, m_addons }; }
@@ -417,6 +437,11 @@ private:
     char m_blueprintName[96] = {}, m_blueprintNotes[512] = {};
     std::optional<size_t> m_blueprintToDelete;
     static constexpr int kBlueprintTab = -1, kCreatureTab = -2, kGameobjectTab = -3;
+    static constexpr int kPortalTab = -5;
+    /// Catalog > Portal effects (Triggers tool): Blizzard's instance portal models; a click puts one at the selected trigger.
+    void DrawPortalCatalog();
+    /// A map doodad of `model` at the selected trigger's own position (caves included), facing the camera; one undo step.
+    void PlacePortalEffect(const std::string& model);
     /// The Creatures / Gameobjects tabs: every template of the world database with a picture of its model.
     void DrawUnitCatalog(SpawnKind kind);
     std::vector<SpawnAdapter::Template> m_unitTemplates[2];   // creature_template, gameobject_template (read on first view)
@@ -500,6 +525,33 @@ private:
     std::optional<MapJob> m_mapJob;
     uint32_t m_spawnModelVersion[2] = { ~0u, ~0u };      // adapter version each kind's model tile was built from
     TableRowsAdapter m_waypoints{ m_store, "waypoint_data", "id", "point" }, m_addons{ m_store, "creature_addon", "guid" };
+    AreaTriggerAdapter m_triggers{ m_mpq, m_store };      // AreaTrigger.dbc: what the client fires
+    MapRowsAdapter m_mapRows{ m_mpq, m_store };           // Map.dbc corpse entrance
+    TableRowsAdapter m_triggerRows{ m_store, "areatrigger", "entry" }, m_teleports{ m_store, "areatrigger_teleport", "ID" },
+                     m_instances{ m_store, "instance_template", "map" };
+    uint32_t m_triggerSel = 0;                            // selected trigger id (0 = none)
+    std::optional<uint32_t> m_triggerHover;
+    enum class TriggerPick { None, Place, Move, Target, Corpse };
+    TriggerPick m_triggerPick = TriggerPick::None;        // what the next click on the ground sets
+    Trigger m_triggerShape{ 0, 0, 0, 0, 0, 5 };           // shape of new triggers
+    bool m_triggerNewTeleport = true;
+    uint32_t m_triggerEditId = 0;                         // the trigger m_triggerEdit was read from
+    uint64_t m_triggerEditRevision = ~0ull;
+    Trigger m_triggerEdit;
+    std::optional<Teleport> m_teleportEdit;
+    std::string m_triggerFilter;
+    uint32_t m_entranceMap = ~0u;                         // Entrance tab: the map edited (~0 = the open map)
+    mutable std::map<uint32_t, Teleport> m_teleportView;
+    mutable uint64_t m_teleportViewRevision = ~0ull;
+    mutable bool m_teleportViewDb = false;                // the view was read with the database connected
+    mutable std::vector<Trigger> m_triggerView;           // triggers of the open map
+    mutable std::pair<uint32_t, uint64_t> m_triggerViewKey{ ~0u, ~0ull };   // map + AreaTrigger version it was made for
+    std::string m_entranceKey;                            // map + revision + connection m_entranceInstance was read for
+    std::vector<nlohmann::json> m_entranceInstance;       // instance_template row of the Entrance tab's map
+    float m_portalScale = 1;                              // Catalog > Portal effects: scale of the next one placed
+    std::vector<std::string> m_portalModels;              // Catalog > Portal effects: the models offered
+    size_t m_portalModelsKey = ~size_t(0);                // catalog doodad count they were found for
+    uint32_t m_triggerTabId = 0;                          // the trigger selected last frame (another one brings its tab forward)
     struct PathEdit
     {
         uint32_t guid = 0;

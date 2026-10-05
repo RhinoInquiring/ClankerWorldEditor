@@ -32,6 +32,9 @@ public:
 
     /// The current rows of a key: the project's if it touched the key, else the database's.
     std::vector<nlohmann::json> Rows(uint32_t key) const;
+    /// Every key's current rows (the database's, then the project's over them; keys with no rows left out). Reads the whole table:
+    /// for small ones (areatrigger_teleport).
+    std::map<uint32_t, std::vector<nlohmann::json>> All() const;
     /// One change replacing a key's rows (the caller applies it, or commits it in a batch after Apply).
     Change MakeChange(uint32_t key, const std::vector<nlohmann::json>& before, const std::vector<nlohmann::json>& after, const std::string& label) const;
 

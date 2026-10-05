@@ -207,10 +207,18 @@ bool App::Init(HWND hwnd, ID3D11Device* device, ID3D11DeviceContext* context, bo
     m_store.Register(m_wmoAreas);
     m_store.Register(m_worldMaps);
     m_store.Register(m_mapOverlays);
+    m_store.Register(m_triggers);
+    m_store.Register(m_mapRows);
+    m_store.Register(m_triggerRows);
+    m_store.Register(m_teleports);
+    m_store.Register(m_instances);
     m_creatures.SetDb(&m_db);
     m_gameobjects.SetDb(&m_db);
     m_waypoints.SetDb(&m_db);
     m_addons.SetDb(&m_db);
+    m_triggerRows.SetDb(&m_db);
+    m_teleports.SetDb(&m_db);
+    m_instances.SetDb(&m_db);
 
     char user[64] = {};
     DWORD size = sizeof user;
@@ -234,6 +242,7 @@ bool App::Init(HWND hwnd, ID3D11Device* device, ID3D11DeviceContext* context, bo
         { "Tool: Copy", "C", [this] { m_tool = Tool::Copy; }, always },
         { "Tool: Holes", "H", [this] { m_tool = Tool::Holes; }, always },
         { "Tool: Zones (paint area ids)", "Z", [this] { m_tool = Tool::Zones; }, always },
+        { "Tool: Triggers (area triggers, teleports, entrances)", "K", [this] { m_tool = Tool::Triggers; }, always },
         { "Group: Terrain", "F1", [this] { SetGroup(Group::Terrain); }, always },
         { "Group: Objects", "F2", [this] { SetGroup(Group::Objects); }, always },
         { "Group: Units", "F3", [this] { SetGroup(Group::Units); }, always },
@@ -425,6 +434,11 @@ void App::CloseProject()
     m_worldMaps.Reset();
     m_mapOverlays.Reset();
     m_mapJob.reset();
+    m_triggers.Reset();
+    m_mapRows.Reset();
+    m_triggerSel = 0;
+    m_triggerPick = TriggerPick::None;
+    m_teleportViewRevision = ~0ull;
     m_wmoKeys.clear();
     m_maps.clear();
     m_mapIndex = -1;
@@ -480,12 +494,12 @@ void App::Export(bool playTest)
         else if (size_t a, c, d; spawns->Counts(a, c, d), a + c + d)
             Log("Spawns: out/server/%s_spawns.sql (+%zu, ~%zu, -%zu) and %s_spawns_revert.sql.", spawns->Table(), a, c, d, spawns->Table());
     }
-    for (const TableRowsAdapter* table : { &m_waypoints, &m_addons })
+    for (const TableRowsAdapter* table : { &m_waypoints, &m_addons, &m_triggerRows, &m_teleports, &m_instances })
     {
         if (!table->ExportSql(m_project->dir / "out" / "server", error)) Log("%s", error.c_str());
-        else if (const size_t n = table->Count()) Log("Paths: out/server/%s.sql (%zu changed) and %s_revert.sql.", table->Table().c_str(), n, table->Table().c_str());
+        else if (const size_t n = table->Count()) Log("out/server/%s.sql (%zu changed) and %s_revert.sql.", table->Table().c_str(), n, table->Table().c_str());
     }
-    for (const DbcTable* table : std::initializer_list<const DbcTable*>{ &m_areas, &m_wmoAreas, &m_worldMaps, &m_mapOverlays })
+    for (const DbcTable* table : std::initializer_list<const DbcTable*>{ &m_areas, &m_wmoAreas, &m_worldMaps, &m_mapOverlays, &m_triggers, &m_mapRows })
     {
         if (!table->Export({ out / "DBFilesClient", m_project->dir / "out" / "server" / "dbc" }, m_project->dir / "out" / "dbc", error))
             Log("%s", error.c_str());
@@ -815,7 +829,7 @@ void App::DrawCatalog()
     struct Tab { K kind; const char* name; };
     const Tab tabs[] = { { K::Doodad, "Doodads" }, { K::Wmo, "Buildings" }, { K::GroundTexture, "Ground textures" }, { K::Texture, "Other textures" },
                          { K::Count, "All files" } };
-    // Each tool group shows the tabs it places from (Regions has none of its own yet: every tab).
+    // Each tool group shows the tabs it places from (Zones has none of its own: every tab but the portals).
     const Group group = GroupOf(m_tool);
     auto shown = [&](int tab) {
         switch (group)
@@ -823,11 +837,12 @@ void App::DrawCatalog()
         case Group::Terrain: return tab == int(K::GroundTexture) || tab == kBlueprintTab || tab == kDifferencesTab;
         case Group::Objects: return tab == int(K::Doodad) || tab == int(K::Wmo) || tab == int(K::Texture) || tab == int(K::Count);
         case Group::Units: return tab == kCreatureTab || tab == kGameobjectTab;
-        default: return true;
+        default: return m_tool == Tool::Triggers ? tab == kPortalTab : tab != kPortalTab;
         }
     };
     if (!shown(m_catalogTab))   // the group changed: its first tab until the tab bar picks one
-        m_catalogTab = group == Group::Terrain ? int(K::GroundTexture) : group == Group::Objects ? int(K::Doodad) : kCreatureTab;
+        m_catalogTab = group == Group::Terrain ? int(K::GroundTexture) : group == Group::Objects ? int(K::Doodad)
+                     : m_tool == Tool::Triggers ? kPortalTab : group == Group::Regions ? int(K::Doodad) : kCreatureTab;
     if (ImGui::BeginTabBar("##catalogTabs"))
     {
         char blueprintLabel[64];
@@ -850,7 +865,7 @@ void App::DrawCatalog()
                 ImGui::EndTabItem();
             }
         }
-        for (const auto& [tab, name] : { std::pair{ kCreatureTab, "Creatures" }, std::pair{ kGameobjectTab, "Gameobjects" } })
+        for (const auto& [tab, name] : { std::pair{ kCreatureTab, "Creatures" }, std::pair{ kGameobjectTab, "Gameobjects" }, std::pair{ kPortalTab, "Portal effects" } })
         {
             if (!shown(tab)) continue;
             const bool bringForward = m_catalogShowTab == tab;
@@ -878,6 +893,7 @@ void App::DrawCatalog()
     }
     if (m_catalogTab == kBlueprintTab) { DrawBlueprints(); ImGui::End(); return; }
     if (m_catalogTab == kDifferencesTab) { DrawDifferences(); ImGui::End(); return; }
+    if (m_catalogTab == kPortalTab) { DrawPortalCatalog(); ImGui::End(); return; }
     if (m_catalogTab == kCreatureTab || m_catalogTab == kGameobjectTab)
     {
         DrawUnitCatalog(m_catalogTab == kCreatureTab ? SpawnKind::Creature : SpawnKind::GameObject);
@@ -909,10 +925,10 @@ void App::DrawCatalog()
         {
             ImGui::SameLine();
             ImGui::SetNextItemWidth(90);
-            ImGui::DragFloat("##scale", &m_placeScale, 0.01f, 0.1f, 10.0f, "scale %.2f");
+            ImGui::SliderFloat("##scale", &m_placeScale, 0.1f, 10.0f, "scale %.2f", ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_AlwaysClamp);
             ImGui::SameLine();
             ImGui::SetNextItemWidth(90);
-            ImGui::DragFloat("##jitter", &m_placeScaleJitter, 0.01f, 0.0f, 0.9f, "+/- %.2f");
+            ImGui::SliderFloat("##jitter", &m_placeScaleJitter, 0.0f, 0.9f, "+/- %.2f", ImGuiSliderFlags_AlwaysClamp);
             ImGui::SetItemTooltip("Random scale variation per placement, as a fraction");
         }
         ImGui::SameLine();
@@ -1817,13 +1833,13 @@ void App::DrawObjectPanel()
     ImGui::SetItemTooltip("Hold Ctrl while dragging a handle to flip this");
     ImGui::SameLine();
     ImGui::SetNextItemWidth((pw - ImGui::GetCursorPosX()) / 3 - 4);
-    ImGui::DragFloat("##snapMove", &m_snapMove, 0.1f, 0.1f, 100.0f, "%.1f yd");
+    ImGui::SliderFloat("##snapMove", &m_snapMove, 0.1f, 100.0f, "%.1f yd", ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_AlwaysClamp);
     ImGui::SameLine();
     ImGui::SetNextItemWidth((pw - ImGui::GetCursorPosX()) / 2 - 4);
-    ImGui::DragFloat("##snapRotate", &m_snapRotate, 1.0f, 1.0f, 90.0f, "%.0f deg");
+    ImGui::SliderFloat("##snapRotate", &m_snapRotate, 1.0f, 90.0f, "%.0f deg", ImGuiSliderFlags_AlwaysClamp);
     ImGui::SameLine();
     ImGui::SetNextItemWidth(pw - ImGui::GetCursorPosX());
-    ImGui::DragFloat("##snapScale", &m_snapScale, 0.01f, 0.01f, 1.0f, "x%.2f");
+    ImGui::SliderFloat("##snapScale", &m_snapScale, 0.01f, 1.0f, "x%.2f", ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_AlwaysClamp);
     ImGui::Separator();
 
     if (m_objSel.empty())
@@ -1889,12 +1905,12 @@ void App::DrawObjectPanel()
     ImGui::SetNextItemWidth(w - 70);
     field(ImGui::DragFloat3("Position", pos, 0.1f, 0, 0, "%.2f"), [&](float* p, float*, float*) { std::copy(pos, pos + 3, p); });
     ImGui::SetNextItemWidth(w - 70);
-    field(ImGui::DragFloat3("Rotation", rot, 0.5f, -360, 360, "%.1f"), [&](float*, float* r, float*) { std::copy(rot, rot + 3, r); });
+    field(ImGui::SliderFloat3("Rotation", rot, -360, 360, "%.1f", ImGuiSliderFlags_AlwaysClamp), [&](float*, float* r, float*) { std::copy(rot, rot + 3, r); });
     ImGui::SetItemTooltip("Degrees as stored: tilt, turn (yaw), roll");
     if (!ref.wmo)
     {
         ImGui::SetNextItemWidth(w - 70);
-        field(ImGui::DragFloat("Scale", &scale, 0.01f, 1.0f / 1024.0f, 63.0f, "%.3f", ImGuiSliderFlags_AlwaysClamp),
+        field(ImGui::SliderFloat("Scale", &scale, 1.0f / 1024.0f, 63.0f, "%.3f", ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_AlwaysClamp),
               [&](float*, float*, float* s) { if (s) *s = scale; });
     }
     ImGui::Spacing();
@@ -2084,6 +2100,7 @@ void App::Frame(float dt)
         if (g == Group::Objects) m_catalogShowTab = int(Catalog::Kind::Doodad);
         if (g == Group::Units) m_catalogShowTab = m_tool == Tool::Gameobjects ? kGameobjectTab : kCreatureTab;
     }
+    if (m_tool == Tool::Triggers && m_lastTool != Tool::Triggers) m_catalogShowTab = kPortalTab;
     m_groupTool[int(GroupOf(m_tool))] = m_tool;
     m_lastTool = m_tool;
 
@@ -2217,6 +2234,9 @@ void App::HandleShortcuts()
     if (ImGui::IsKeyPressed(ImGuiKey_N, false)) m_tool = Tool::Creatures;
     if (ImGui::IsKeyPressed(ImGuiKey_I, false)) m_tool = Tool::Gameobjects;
     if (ImGui::IsKeyPressed(ImGuiKey_Z, false)) m_tool = Tool::Zones;
+    if (ImGui::IsKeyPressed(ImGuiKey_K, false)) m_tool = Tool::Triggers;
+    if (m_tool == Tool::Triggers && m_triggerSel && ImGui::IsKeyPressed(ImGuiKey_Delete, false))
+        CommitTrigger(m_triggerSel, std::nullopt, std::nullopt, "Delete trigger " + std::to_string(m_triggerSel));
     for (int g = 0; g < 4; ++g)   // F1..F4: tool groups
         if (ImGui::IsKeyPressed(ImGuiKey(ImGuiKey_F1 + g), false)) SetGroup(Group(g));
     const bool pathMode = m_path && m_tool == Tool::Creatures;
@@ -2282,6 +2302,8 @@ void App::HandleShortcuts()
     if (ImGui::IsKeyPressed(ImGuiKey_Escape, false) && !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId))
     {
         if (m_armed) m_armed.reset();                 // stop placing a catalog model
+        else if (m_triggerPick != TriggerPick::None) m_triggerPick = TriggerPick::None;   // a pending trigger pick
+        else if (m_tool == Tool::Triggers && m_triggerSel) m_triggerSel = 0;
         else if (m_comparing) StopCompare();          // the map comes back as it is
         else if (!m_diffPending.empty()) { EndNewTiles(); m_diffPending.clear(); m_diffActive.clear(); }   // a review still on its way
         else if (m_pin) CancelPin();                  // first Esc: unpin, terrain goes back
@@ -2516,6 +2538,11 @@ void App::BuildOverlay(std::vector<LineVertex>& lines) const
 {
     BuildSpawnOverlay(lines);
     BuildPathOverlay(lines);
+    if (m_tool == Tool::Triggers)
+    {
+        BuildTriggerOverlay(lines);
+        return;
+    }
     auto chunkOutline = [&](ChunkRef ref, XMFLOAT4 color, float lift = 0.3f) {
         const AdtChunk* c = ShownChunk(ref);
         if (!c) return;
@@ -2780,6 +2807,10 @@ void App::DrawViewport(float dt)
     {
         ZonesViewport();
     }
+    else if (m_tool == Tool::Triggers)
+    {
+        TriggersViewport(origin, size, viewProj);
+    }
     else if (m_tool == Tool::Objects)
     {
         // Objects: click picks, dragging draws a box; Shift adds, Ctrl removes. The handles move, turn and scale.
@@ -2955,12 +2986,13 @@ void App::DrawViewport(float dt)
 
     DrawSpawnLabels(dl, origin, size, viewProj);
     DrawPathLabels(dl, origin, size, viewProj);
+    if (m_tool == Tool::Triggers) DrawTriggerLabels(dl, origin, size, viewProj);
 
     // Corner caption and empty state.
     const ImVec2 pad{ origin.x + 12, origin.y + 10 };
     if (!m_terrain.Map().empty())
     {
-        const char* tools[] = { "Select", "Sculpt", "Copy", "Holes", "Objects", "Paint", "Creatures", "Gameobjects", "Zones" };
+        const char* tools[] = { "Select", "Sculpt", "Copy", "Holes", "Objects", "Paint", "Creatures", "Gameobjects", "Zones", "Triggers" };
         const char* modes[] = { "Raise", "Lower", "Flatten", "Smooth" };
         char caption[200];
         if (m_tool == Tool::Sculpt)
@@ -2974,6 +3006,14 @@ void App::DrawViewport(float dt)
         else if (m_tool == Tool::Zones)
             snprintf(caption, sizeof caption, "%s   World > Zones > Paint %s   Alt+click: pick   Ctrl+wheel: radius", m_terrain.Map().c_str(),
                      m_activeArea ? AreaLabel(m_activeArea).c_str() : "(no area)");
+        else if (m_tool == Tool::Triggers)
+        {
+            const char* picks[] = { "click: select   Alt+click: move the selected one here   Del: delete",
+                                    "click the ground: place a new trigger   Shift+click: place and keep going   Esc: stop",
+                                    "click the ground: move the trigger there   Esc: stop", "click the ground: the teleport's arrival point   Esc: stop",
+                                    "click the ground: where dead players' spirits appear   Esc: stop" };
+            snprintf(caption, sizeof caption, "%s   World > Triggers   %s", m_terrain.Map().c_str(), picks[int(m_triggerPick)]);
+        }
         else if (m_tool == Tool::Objects && m_armed)
             snprintf(caption, sizeof caption, "%s   World > Objects > Place %s   click: place   Shift+click: place and keep going   Esc: stop",
                      m_terrain.Map().c_str(), FileOf(m_armed->path).c_str());
@@ -3073,13 +3113,14 @@ void App::DrawToolsPanel()
         break;
     case Group::Objects: Segmented("tool", m_tool, { { Tool::Objects, "Place and edit  O" } }, w); break;
     case Group::Units: Segmented("tool", m_tool, { { Tool::Creatures, "Creatures N" }, { Tool::Gameobjects, "Gameobjects I" } }, w); break;
-    case Group::Regions: Segmented("tool", m_tool, { { Tool::Zones, "Zones Z" } }, w); break;
+    case Group::Regions: Segmented("tool", m_tool, { { Tool::Zones, "Zones Z" }, { Tool::Triggers, "Triggers K" } }, w); break;
     }
     ImGui::Spacing();
 
     // The tool's sections, one tab each; View is the last tab of every tool.
     BeginSections("##sections" + std::to_string(int(m_tool)));
     if (m_tool == Tool::Zones) DrawZonesPanel(w);
+    if (m_tool == Tool::Triggers) DrawTriggersPanel(w);
     if (SpawnTool()) DrawSpawnsPanel(w);
     if (m_tool == Tool::Objects && Section("Objects"))
     {
@@ -3234,7 +3275,7 @@ void App::DrawToolsPanel()
                                   "Slope: also tilted to the incline under it; the copy keeps all its detail.\n"
                                   "Lowest: its lowest point sits on the lowest ground under it.\nAbsolute: original heights.");
             ImGui::SetNextItemWidth(w - 150);
-            ImGui::DragFloat("Fine offset", &m_pasteOffset, 0.05f, -50.0f, 50.0f, "%+.1f yd", ImGuiSliderFlags_AlwaysClamp);
+            ImGui::SliderFloat("Fine offset", &m_pasteOffset, -50.0f, 50.0f, "%+.1f yd", ImGuiSliderFlags_AlwaysClamp);
             ImGui::SameLine();
             if (ImGui::SmallButton("Reset")) m_pasteOffset = 0;
             ImGui::EndDisabled();

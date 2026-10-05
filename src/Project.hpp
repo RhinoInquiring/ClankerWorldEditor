@@ -23,7 +23,8 @@ struct Project
     std::map<std::string, IdRange> idRanges = { { "creature.guid", { 9000000, 9099999 } }, { "gameobject.guid", { 9000000, 9099999 } },
                                                 { "area.id", { 20000, 20999 } },        // AreaTable; creature.zoneId is 16-bit
                                                 { "wmoarea.id", { 700000, 709999 } },     // WMOAreaTable (client max 665483)
-                                                { "worldmaparea.id", { 9000, 9099 } }, { "worldmapoverlay.id", { 90000, 90999 } } };
+                                                { "worldmaparea.id", { 9000, 9099 } }, { "worldmapoverlay.id", { 90000, 90999 } },
+                                                { "areatrigger.id", { 60000, 60999 } } };   // AreaTrigger.dbc + areatrigger (client max ~5900)
     IdRange Range(const std::string& kind) const { auto it = idRanges.find(kind); return it == idRanges.end() ? IdRange{} : it->second; }
     bool Owns(const std::string& kind, uint32_t id) const { const IdRange r = Range(kind); return id >= r.first && id <= r.last && r.first; }
     std::string serverProfile;   // name of the user's ServerProfile (Server.hpp); credentials never live here
