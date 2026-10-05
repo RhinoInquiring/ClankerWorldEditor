@@ -167,26 +167,7 @@ bool TerrainAdapter::LoadTile(int x, int y, TileStats& stats, std::string& error
 TileStats TerrainAdapter::FinishTile(int x, int y, std::vector<uint8_t> bytes, Adt adt)
 {
     LoadedTile tile = LoadedTile::Make(x, y, std::move(bytes), std::move(adt));
-
-    // Re-apply the project's edits to this tile, in order.
-    for (const Change& c : m_store.Done())
-    {
-        if (c.domain != Domain() || c.data.at("map").get<std::string>() != m_map) continue;
-        for (const auto& e : c.data.at("edits"))
-            if (e[0] == x && e[1] == y)
-            {
-                const size_t ci = e[2], vi = e[3];
-                if (ci < tile.adt.chunks.size() && vi < 145) tile.adt.chunks[ci].heights[vi] = e[5];
-            }
-        for (const auto& e : c.data.value("layers", nlohmann::json::array()))
-            if (e[0] == x && e[1] == y && size_t(e[2]) < tile.adt.chunks.size())
-                SetLayerState(tile, tile.adt.chunks[size_t(e[2])], e[4]);
-        for (const auto& e : c.data.value("holes", nlohmann::json::array()))
-            if (e[0] == x && e[1] == y && size_t(e[2]) < tile.adt.chunks.size()) tile.adt.chunks[size_t(e[2])].holes = e[4];
-        for (const auto& e : c.data.value("areas", nlohmann::json::array()))
-            if (e[0] == x && e[1] == y && size_t(e[2]) < tile.adt.chunks.size()) tile.adt.chunks[size_t(e[2])].areaId = e[4];
-        SetObjects(tile, c.data.value("objects", nlohmann::json::array()), true);
-    }
+    if (ReplayEdits(tile, m_map, m_store.Done())) m_objectsChanged.insert(tile.Key());   // the project's edits, in order
 
     const TileStats stats = m_renderer.LoadTile(tile.Key(), tile.adt, m_mpq);
     tile.maxHeight = stats.maxHeight;
@@ -376,6 +357,142 @@ void TerrainAdapter::SetLayerState(LoadedTile& tile, AdtChunk& c, const nlohmann
         for (size_t ch = 0; ch < 3; ++ch) c.alpha[i * 4 + ch] = rgb[i * 3 + ch];
 }
 
+namespace
+{
+    bool LiquidOf(const AdtLiquid& l, const AdtChunk& c)
+    {
+        return std::fabs(l.cornerX - c.baseX) < 1.0f && std::fabs(l.cornerZ - c.baseZ) < 1.0f;
+    }
+}
+
+nlohmann::json TerrainAdapter::LiquidState(const Adt& adt, const AdtChunk& c)
+{
+    nlohmann::json out = nlohmann::json::array();
+    for (const AdtLiquid& l : adt.liquids)
+    {
+        if (!LiquidOf(l, c)) continue;
+        std::vector<uint8_t> exists(l.exists.begin(), l.exists.end());
+        out.push_back({ { "type", l.type }, { "format", l.format }, { "x", l.x }, { "y", l.y }, { "w", l.w }, { "h", l.h }, { "heights", l.heights },
+                        { "exists", Base64Encode(exists.data(), exists.size()) }, { "extra", Base64Encode(l.extra.data(), l.extra.size()) },
+                        { "fishable", l.fishable }, { "deep", l.deep } });
+    }
+    return out;
+}
+
+void TerrainAdapter::SetLiquidState(Adt& adt, const AdtChunk& c, const nlohmann::json& state)
+{
+    std::erase_if(adt.liquids, [&](const AdtLiquid& l) { return LiquidOf(l, c); });
+    for (const auto& j : state)
+    {
+        AdtLiquid l;
+        l.type = j.at("type");
+        l.format = j.at("format");
+        l.x = j.at("x"); l.y = j.at("y"); l.w = j.at("w"); l.h = j.at("h");
+        l.cornerX = c.baseX;
+        l.cornerZ = c.baseZ;
+        l.heights = j.at("heights").get<std::vector<float>>();
+        if (!l.w || !l.h || l.x + l.w > 8 || l.y + l.h > 8 || l.heights.size() != size_t(l.w + 1) * (l.h + 1)) continue;
+        for (uint8_t b : Base64Decode(j.value("exists", std::string()))) l.exists.push_back(b != 0);
+        l.exists.resize(size_t(l.w) * l.h, true);
+        l.extra = Base64Decode(j.value("extra", std::string()));
+        l.fishable = j.value("fishable", ~0ull);
+        l.deep = j.value("deep", 0ull);
+        adt.liquids.push_back(std::move(l));
+    }
+}
+
+nlohmann::json TerrainAdapter::RotateLiquidState(const nlohmann::json& state)
+{
+    // Chunk vertex (row, col) goes to (col, 8 - row) and cell (row, col) to (col, 7 - row), as for heights. An
+    // instance's rows become its columns: it starts at x' = 8 - y - h, y' = x and is h wide, w deep.
+    nlohmann::json out = nlohmann::json::array();
+    for (nlohmann::json j : state)
+    {
+        const int x = j.at("x"), y = j.at("y"), w = j.at("w"), h = j.at("h");
+        auto turn = [](const std::vector<uint8_t>& in, int cols, int rows, size_t size) {   // rows x cols elements of `size` bytes
+            std::vector<uint8_t> o(in.size());
+            for (int r = 0; r < rows; ++r)
+                for (int c = 0; c < cols; ++c)
+                    for (size_t b = 0; b < size; ++b)
+                        if ((size_t(r * cols + c) + 1) * size <= in.size())
+                            o[size_t(c * rows + (rows - 1 - r)) * size + b] = in[size_t(r * cols + c) * size + b];
+            return o;
+        };
+        const std::vector<float> hs = j.at("heights").get<std::vector<float>>();
+        std::vector<uint8_t> hb(hs.size() * 4);
+        std::memcpy(hb.data(), hs.data(), hb.size());
+        hb = turn(hb, w + 1, h + 1, 4);
+        std::vector<float> turned(hs.size());
+        std::memcpy(turned.data(), hb.data(), hb.size());
+        j["heights"] = turned;
+        const std::vector<uint8_t> exists = turn(Base64Decode(j.value("exists", std::string())), w, h, 1);
+        j["exists"] = Base64Encode(exists.data(), exists.size());
+        // Extra: per-vertex arrays one after another (uv of 4 bytes, depth of 1).
+        const uint16_t format = j.at("format");
+        const std::vector<size_t> parts = format == 1 ? std::vector<size_t>{ 4 } : format == 3 ? std::vector<size_t>{ 4, 1 } : std::vector<size_t>{ 1 };
+        const std::vector<uint8_t> extra = Base64Decode(j.value("extra", std::string()));
+        std::vector<uint8_t> turnedExtra;
+        const size_t verts = size_t(w + 1) * (h + 1);
+        size_t at = 0;
+        for (size_t part : parts)
+        {
+            if (at + verts * part > extra.size()) break;
+            const std::vector<uint8_t> seg(extra.begin() + std::ptrdiff_t(at), extra.begin() + std::ptrdiff_t(at + verts * part));
+            const std::vector<uint8_t> t = turn(seg, w + 1, h + 1, part);
+            turnedExtra.insert(turnedExtra.end(), t.begin(), t.end());
+            at += verts * part;
+        }
+        j["extra"] = Base64Encode(turnedExtra.data(), turnedExtra.size());
+        for (const char* mask : { "fishable", "deep" })   // 8 x 8 cell bits, row-major
+        {
+            const uint64_t m = j.value(mask, 0ull);
+            uint64_t t = 0;
+            for (int r = 0; r < 8; ++r)
+                for (int c = 0; c < 8; ++c)
+                    if (m >> (r * 8 + c) & 1) t |= 1ull << (c * 8 + (7 - r));
+            j[mask] = t;
+        }
+        j["x"] = 8 - y - h;
+        j["y"] = x;
+        j["w"] = h;
+        j["h"] = w;
+        out.push_back(std::move(j));
+    }
+    return out;
+}
+
+bool TerrainAdapter::ReplayEdits(LoadedTile& tile, const std::string& map, const std::vector<Change>& done)
+{
+    const int x = tile.x, y = tile.y;
+    bool objects = false;
+    for (const Change& c : done)
+    {
+        if (c.domain != "terrain.heights" || c.data.at("map").get<std::string>() != map) continue;
+        for (const auto& e : c.data.at("edits"))
+            if (e[0] == x && e[1] == y)
+            {
+                const size_t ci = e[2], vi = e[3];
+                if (ci < tile.adt.chunks.size() && vi < 145) tile.adt.chunks[ci].heights[vi] = e[5];
+            }
+        for (const auto& e : c.data.value("layers", nlohmann::json::array()))
+            if (e[0] == x && e[1] == y && size_t(e[2]) < tile.adt.chunks.size())
+                SetLayerState(tile, tile.adt.chunks[size_t(e[2])], e[4]);
+        for (const auto& e : c.data.value("holes", nlohmann::json::array()))
+            if (e[0] == x && e[1] == y && size_t(e[2]) < tile.adt.chunks.size()) tile.adt.chunks[size_t(e[2])].holes = e[4];
+        for (const auto& e : c.data.value("areas", nlohmann::json::array()))
+            if (e[0] == x && e[1] == y && size_t(e[2]) < tile.adt.chunks.size()) tile.adt.chunks[size_t(e[2])].areaId = e[4];
+        for (const auto& e : c.data.value("liquids", nlohmann::json::array()))
+            if (e[0] == x && e[1] == y && size_t(e[2]) < tile.adt.chunks.size()) SetLiquidState(tile.adt, tile.adt.chunks[size_t(e[2])], e[4]);
+        for (const auto& e : c.data.value("objects", nlohmann::json::array()))
+            if (e[0] == x && e[1] == y)
+            {
+                ApplyObjectEntry(tile.adt, e, true);
+                objects = true;
+            }
+    }
+    return objects;
+}
+
 void TerrainAdapter::RefreshTextures(int key, size_t chunk)
 {
     const LoadedTile& tile = m_tiles.at(key);
@@ -419,6 +536,16 @@ void TerrainAdapter::Set(const Change& change, bool after)
         auto it = m_tiles.find(TileKey(e[0], e[1]));
         if (it != m_tiles.end() && size_t(e[2]) < it->second.adt.chunks.size()) it->second.adt.chunks[size_t(e[2])].areaId = e[after ? 4 : 3];
     }
+
+    std::set<int> water;
+    for (const auto& e : change.data.value("liquids", nlohmann::json::array()))
+    {
+        auto it = m_tiles.find(TileKey(e[0], e[1]));
+        if (it == m_tiles.end() || size_t(e[2]) >= it->second.adt.chunks.size()) continue;
+        SetLiquidState(it->second.adt, it->second.adt.chunks[size_t(e[2])], e[after ? 4 : 3]);
+        water.insert(it->first);
+    }
+    for (int key : water) m_renderer.UpdateWater(key, m_tiles.at(key).adt.liquids, m_mpq);
 
     const auto objects = change.data.value("objects", nlohmann::json::array());
     for (auto& [key, tile] : m_tiles) SetObjects(tile, objects, after);
@@ -475,6 +602,35 @@ void TerrainAdapter::FitWmoExtents(WmoPlacement& w) const
     }
     w.extMin[0] = lo.x; w.extMin[1] = lo.y; w.extMin[2] = lo.z;
     w.extMax[0] = hi.x; w.extMax[1] = hi.y; w.extMax[2] = hi.z;
+}
+
+std::set<ObjectRef> TerrainAdapter::DoodadsInside(const std::set<ObjectRef>& objects) const
+{
+    std::set<ObjectRef> inside;
+    for (const ObjectRef& r : objects)
+    {
+        if (!r.wmo) continue;
+        WmoPlacement w;
+        if (auto found = FindWmo(r.uid)) w = *found;
+        else continue;
+        FitWmoExtents(w);   // reads the root's bounds into m_wmoBounds
+        const auto& b = m_wmoBounds[w.model];
+        if (!b) continue;
+        // The root's box in the WMO's own frame (editor axes), a little larger so furniture on the edge counts.
+        const XMFLOAT3 c0 = FromWowAxes((*b)[0], (*b)[1], (*b)[2]), c1 = FromWowAxes((*b)[3], (*b)[4], (*b)[5]);
+        const XMFLOAT3 lo{ std::min(c0.x, c1.x) - 0.5f, std::min(c0.y, c1.y) - 0.5f, std::min(c0.z, c1.z) - 0.5f };
+        const XMFLOAT3 hi{ std::max(c0.x, c1.x) + 0.5f, std::max(c0.y, c1.y) + 0.5f, std::max(c0.z, c1.z) + 0.5f };
+        const XMMATRIX toLocal = XMMatrixInverse(nullptr, PlacementMatrix(w.pos, w.rot, 1.0f));
+        for (const auto& [key, tile] : m_tiles)
+            for (const DoodadPlacement& d : tile.adt.doodads)
+            {
+                if (objects.count({ false, d.uniqueId })) continue;
+                XMFLOAT3 p;
+                XMStoreFloat3(&p, XMVector3TransformCoord(XMVectorSet(d.pos[0], d.pos[1], d.pos[2], 1), toLocal));
+                if (p.x >= lo.x && p.x <= hi.x && p.y >= lo.y && p.y <= hi.y && p.z >= lo.z && p.z <= hi.z) inside.insert({ false, d.uniqueId });
+            }
+    }
+    return inside;
 }
 
 void TerrainAdapter::BeginObjectEdit(const std::set<ObjectRef>& objects)
@@ -601,7 +757,7 @@ uint32_t TerrainAdapter::NextUniqueId() const
 }
 
 Change TerrainAdapter::MakeChange(const Edits& edits, const nlohmann::json& layers, const std::string& label, const nlohmann::json& holes,
-                                  const nlohmann::json& objects, const nlohmann::json& areas) const
+                                  const nlohmann::json& objects, const nlohmann::json& areas, const nlohmann::json& liquids) const
 {
     nlohmann::json list = nlohmann::json::array();
     std::set<int> tiles;
@@ -616,6 +772,7 @@ Change TerrainAdapter::MakeChange(const Edits& edits, const nlohmann::json& laye
     for (const auto& e : holes) tiles.insert(TileKey(e[0], e[1]));
     for (const auto& e : objects) tiles.insert(TileKey(e[0], e[1]));
     for (const auto& e : areas) tiles.insert(TileKey(e[0], e[1]));
+    for (const auto& e : liquids) tiles.insert(TileKey(e[0], e[1]));
     Change c;
     c.domain = Domain();
     c.label = label;
@@ -626,6 +783,7 @@ Change TerrainAdapter::MakeChange(const Edits& edits, const nlohmann::json& laye
     if (!holes.empty()) c.data["holes"] = holes;
     if (!objects.empty()) c.data["objects"] = objects;
     if (!areas.empty()) c.data["areas"] = areas;
+    if (!liquids.empty()) c.data["liquids"] = liquids;
     return c;
 }
 
@@ -992,6 +1150,7 @@ TerrainClipboard TerrainAdapter::CopyFrom(const std::map<int, LoadedTile>& tiles
         for (size_t j = 0; j < 145; ++j) e.heights[j] = c.baseY + c.heights[j];
         e.layers = LayerState(it->second, c);
         e.holes = c.holes;
+        e.liquids = LiquidState(it->second.adt, c);
         clip.chunks.push_back(std::move(e));
     }
 
@@ -1025,7 +1184,7 @@ nlohmann::json TerrainClipboard::ToJson() const
     for (const Entry& e : chunks)
         chunksJson.push_back({ { "dx", e.dx }, { "dz", e.dz },
                                { "heights", Base64Encode(reinterpret_cast<const uint8_t*>(e.heights.data()), e.heights.size() * sizeof(float)) },
-                               { "layers", e.layers }, { "holes", e.holes } });
+                               { "layers", e.layers }, { "holes", e.holes }, { "liquids", e.liquids } });
     for (const auto& d : doodads) doodadsJson.push_back(::ToJson(d));
     for (const auto& w : wmos) wmosJson.push_back(::ToJson(w));
     return { { "origin", { originX, originZ } }, { "chunks", chunksJson }, { "doodads", doodadsJson }, { "wmos", wmosJson } };
@@ -1043,6 +1202,7 @@ TerrainClipboard TerrainClipboard::FromJson(const nlohmann::json& j)
         std::memcpy(e.heights.data(), bytes.data(), std::min(bytes.size(), e.heights.size() * sizeof(float)));
         e.layers = c.value("layers", nlohmann::json());
         e.holes = c.value("holes", 0);
+        e.liquids = c.value("liquids", nlohmann::json());   // blueprints saved before water was copied: leave water alone
         clip.chunks.push_back(std::move(e));
     }
     for (const auto& d : j.value("doodads", nlohmann::json::array())) clip.doodads.push_back(DoodadFrom(d));
@@ -1065,6 +1225,7 @@ Adt TerrainClipboard::ToAdt() const
         c.holes = e.holes;
         if (!e.layers.is_null()) TerrainAdapter::SetLayerState(scratch, c, e.layers);
         else c.alpha.assign(64 * 64 * 4, 0);
+        if (!e.liquids.is_null()) TerrainAdapter::SetLiquidState(scratch.adt, c, e.liquids);
         scratch.adt.chunks.push_back(std::move(c));
     }
     for (DoodadPlacement d : doodads)
@@ -1120,6 +1281,7 @@ void TerrainClipboard::RotateClockwise()
             for (int c = 0; c < 4; ++c)
                 if (e.holes & (1u << (r * 4 + c))) holes |= uint16_t(1u << (c * 4 + (3 - r)));
         e.holes = holes;
+        if (!e.liquids.is_null()) e.liquids = TerrainAdapter::RotateLiquidState(e.liquids);
 
         if (e.layers.is_null()) continue;
         const std::vector<uint8_t> in = Base64Decode(e.layers.at("alpha").get<std::string>());
@@ -1287,6 +1449,15 @@ PastePlan TerrainAdapter::PlanPaste(const TerrainClipboard& clip, int gx, int gz
         const float z = float(e.dz * 8) + (inner ? float(row) + 0.5f : float(row));
         return e.heights[j] + offset + o.slopeX * x + o.slopeZ * z;
     };
+    // Water: the copy's instances replace the chunk's (none removes its water), raised with the paste.
+    auto pastedWater = [&](const TerrainClipboard::Entry& e) {
+        if (!o.water || e.liquids.is_null()) return nlohmann::json();
+        const float lift = offset + o.slopeX * float(e.dx * 8 + 4) + o.slopeZ * float(e.dz * 8 + 4);
+        nlohmann::json w = e.liquids;
+        for (auto& l : w)
+            for (auto& h : l.at("heights")) h = h.get<float>() + lift;
+        return w;
+    };
     std::map<std::pair<int, int>, const TerrainClipboard::Entry*> pasted;   // grid cell -> clipboard chunk
     for (const auto& e : clip.chunks)
         if (auto ref = ChunkAtGrid(gx + e.dx, gz + e.dz))
@@ -1334,6 +1505,7 @@ PastePlan TerrainAdapter::PlanPaste(const TerrainClipboard& clip, int gx, int gz
             }
             if (o.textures && !e->layers.is_null()) pc.layers = e->layers;
             if (o.holes) pc.holes = e->holes;
+            pc.liquids = pastedWater(*e);
             plan.chunks.push_back(std::move(pc));
         }
         if (!o.heights) return plan;
@@ -1481,7 +1653,8 @@ PastePlan TerrainAdapter::PlanPaste(const TerrainClipboard& clip, int gx, int gz
                 pc.layers = tMin >= 1.0f ? it->second->layers : BlendLayers(LayerState(m_tiles.at(ref->tile), c), it->second->layers, t.data());
             }
             if (o.holes && inside) pc.holes = it->second->holes;
-            if (pc.setHeights || !pc.layers.is_null() || pc.holes) plan.chunks.push_back(std::move(pc));
+            if (inside) pc.liquids = pastedWater(*it->second);
+            if (pc.setHeights || !pc.layers.is_null() || pc.holes || !pc.liquids.is_null()) plan.chunks.push_back(std::move(pc));
         }
     return plan;
 }
@@ -1490,8 +1663,9 @@ std::optional<Change> TerrainAdapter::ApplyPlan(const PastePlan& plan, const std
 {
     PreviewPlan(nullptr);
     Edits edits;
-    nlohmann::json layers = nlohmann::json::array(), holes = nlohmann::json::array();
+    nlohmann::json layers = nlohmann::json::array(), holes = nlohmann::json::array(), liquids = nlohmann::json::array();
     std::set<std::pair<int, int>> touched;
+    std::set<int> water;
     for (const auto& pc : plan.chunks)
     {
         auto it = m_tiles.find(pc.ref.tile);
@@ -1517,15 +1691,25 @@ std::optional<Change> TerrainAdapter::ApplyPlan(const PastePlan& plan, const std
             c.holes = *pc.holes;
             m_renderer.SetChunkHoles(pc.ref.tile, size_t(pc.ref.chunk), c.holes);
         }
+        if (!pc.liquids.is_null())
+            if (nlohmann::json before = LiquidState(tile.adt, c); before != pc.liquids)
+            {
+                SetLiquidState(tile.adt, c, pc.liquids);
+                liquids.push_back({ tile.x, tile.y, pc.ref.chunk, std::move(before), pc.liquids });
+                water.insert(pc.ref.tile);
+            }
         touched.insert({ pc.ref.tile, pc.ref.chunk });
     }
+    for (int key : water) m_renderer.UpdateWater(key, m_tiles.at(key).adt.liquids, m_mpq);
     for (const auto& [key, ci] : touched) m_renderer.UpdateChunk(key, size_t(ci), m_tiles.at(key).adt.chunks[size_t(ci)]);
 
     const nlohmann::json objects = AddObjects(plan.doodads, plan.wmos, nullptr);
 
     if (touched.empty() && objects.empty()) return std::nullopt;
-    Change c = MakeChange(edits, layers, label, holes, objects);
-    if (c.data["edits"].empty() && !c.data.contains("layers") && !c.data.contains("holes") && !c.data.contains("objects")) return std::nullopt;
+    Change c = MakeChange(edits, layers, label, holes, objects, nlohmann::json::array(), liquids);
+    if (c.data["edits"].empty() && !c.data.contains("layers") && !c.data.contains("holes") && !c.data.contains("objects") &&
+        !c.data.contains("liquids"))
+        return std::nullopt;
     return c;
 }
 
@@ -1549,7 +1733,24 @@ void TerrainAdapter::PreviewPlan(const PastePlan* plan)
             RefreshTextures(ref.tile, size_t(ref.chunk));
         }
     m_previewed.clear();
+    for (int key : m_previewedWater)
+        if (auto it = m_tiles.find(key); it != m_tiles.end()) m_renderer.UpdateWater(key, it->second.adt.liquids, m_mpq);
+    m_previewedWater.clear();
     if (!plan) return;
+    std::map<int, Adt> water;   // tiles whose water the plan changes, with their liquids as it leaves them
+    for (const auto& pc : plan->chunks)
+        if (!pc.liquids.is_null())
+            if (auto it = m_tiles.find(pc.ref.tile); it != m_tiles.end())
+            {
+                auto [w, added] = water.try_emplace(pc.ref.tile);
+                if (added) w->second.liquids = it->second.adt.liquids;
+                SetLiquidState(w->second, it->second.adt.chunks[size_t(pc.ref.chunk)], pc.liquids);
+            }
+    for (const auto& [key, adt] : water)
+    {
+        m_renderer.UpdateWater(key, adt.liquids, m_mpq);
+        m_previewedWater.insert(key);
+    }
     for (const auto& pc : plan->chunks)
     {
         auto it = m_tiles.find(pc.ref.tile);
@@ -1687,6 +1888,7 @@ std::set<int> TerrainAdapter::EditedTiles(const std::string& map) const
             for (const auto& e : c.data.value("areas", nlohmann::json::array())) tiles.insert(TileKey(e[0], e[1]));
             for (const auto& e : c.data.value("layers", nlohmann::json::array())) tiles.insert(TileKey(e[0], e[1]));
             for (const auto& e : c.data.value("objects", nlohmann::json::array())) tiles.insert(TileKey(e[0], e[1]));
+            for (const auto& e : c.data.value("liquids", nlohmann::json::array())) tiles.insert(TileKey(e[0], e[1]));
         }
     return tiles;
 }
@@ -1783,6 +1985,7 @@ size_t TerrainAdapter::Export(const fs::path& outDir, std::string& error, std::v
         std::map<size_t, nlohmann::json> layers;
         std::map<size_t, uint16_t> holes;
         std::map<size_t, uint32_t> areas;
+        std::map<size_t, nlohmann::json> liquids;
         nlohmann::json objects = nlohmann::json::array();
     };
     std::map<std::pair<std::string, int>, TileEdits> tiles;
@@ -1795,6 +1998,7 @@ size_t TerrainAdapter::Export(const fs::path& outDir, std::string& error, std::v
         for (const auto& e : c.data.value("holes", nlohmann::json::array())) tiles[{ map, TileKey(e[0], e[1]) }].holes[size_t(e[2])] = e[4];
         for (const auto& e : c.data.value("areas", nlohmann::json::array())) tiles[{ map, TileKey(e[0], e[1]) }].areas[size_t(e[2])] = e[4];
         for (const auto& e : c.data.value("objects", nlohmann::json::array())) tiles[{ map, TileKey(e[0], e[1]) }].objects.push_back(e);
+        for (const auto& e : c.data.value("liquids", nlohmann::json::array())) tiles[{ map, TileKey(e[0], e[1]) }].liquids[size_t(e[2])] = e[4];
     }
 
     // Final heights of any tile (edited or not), for normals that look across tile borders.
@@ -1907,7 +2111,7 @@ size_t TerrainAdapter::Export(const fs::path& outDir, std::string& error, std::v
                 adt->chunks[ci].areaId = area;
             }
 
-        if (!edits.layers.empty() || !edits.objects.empty())
+        if (!edits.layers.empty() || !edits.objects.empty() || !edits.liquids.empty())
         {
             LoadedTile tile{ key % 64, key / 64, {}, std::move(*adt) };
             std::set<size_t> changed;
@@ -1918,6 +2122,8 @@ size_t TerrainAdapter::Export(const fs::path& outDir, std::string& error, std::v
                     changed.insert(ci);
                 }
             for (const auto& e : edits.objects) ApplyObjectEntry(tile.adt, e, true);
+            for (const auto& [ci, state] : edits.liquids)
+                if (ci < tile.adt.chunks.size()) SetLiquidState(tile.adt, tile.adt.chunks[ci], state);
             // Ground effects the client has no GroundEffectTexture row for crash it when the player comes near
             // (other clients' maps can carry ids, or 65535, this client lacks): those layers get none.
             for (size_t ci : changed)

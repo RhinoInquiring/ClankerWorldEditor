@@ -226,8 +226,17 @@ void ModelRenderer::AddModel(int tileKey, const ModelLook& look, FXMMATRIX world
     const bool wmo = Lower(look.model).ends_with(".wmo");   // a few gameobjects (transports) are buildings
     GpuMesh* mesh = Mesh(wmo ? look.model : M2Name(look.model), wmo, mpq);
     if (!mesh) return;
-    const std::string lookKey = look.Key();
-    std::unique_ptr<Look>& slot = m_looks[lookKey];
+    const Look* resolved = ResolveLook(look, mpq);
+    XMFLOAT4X4 w;
+    XMStoreFloat4x4(&w, world);
+    char key[160];
+    snprintf(key, sizeof key, "%dl%u:%d:%d:%d:%p", layer, uid, int(w._41 * 4), int(w._42 * 4), int(w._43 * 4), static_cast<const void*>(resolved));
+    AddInstance(tileKey, key, mesh, world, scale, uid, layer, resolved);
+}
+
+const ModelRenderer::Look* ModelRenderer::ResolveLook(const ModelLook& look, const MpqChain& mpq)
+{
+    std::unique_ptr<Look>& slot = m_looks[look.Key()];
     if (!slot)
     {
         slot = std::make_unique<Look>();
@@ -236,11 +245,7 @@ void ModelRenderer::AddModel(int tileKey, const ModelLook& look, FXMMATRIX world
         slot->geosets = look.geosets;
         std::sort(slot->geosets.begin(), slot->geosets.end());
     }
-    XMFLOAT4X4 w;
-    XMStoreFloat4x4(&w, world);
-    char key[160];
-    snprintf(key, sizeof key, "%dl%u:%d:%d:%d:%p", layer, uid, int(w._41 * 4), int(w._42 * 4), int(w._43 * 4), static_cast<const void*>(slot.get()));
-    AddInstance(tileKey, key, mesh, world, scale, uid, layer, slot.get());
+    return slot.get();
 }
 
 void ModelRenderer::AddInstance(int tile, const std::string& key, GpuMesh* mesh, FXMMATRIX world, float scale, uint32_t uid, int layer, const Look* look)
@@ -401,7 +406,32 @@ ID3D11ShaderResourceView* ModelRenderer::Thumbnail(const std::string& name, bool
     Thumb& thumb = m_thumbs[key];
     GpuMesh* mesh = Mesh(wmo ? name : M2Name(name), wmo, mpq);
     if (!mesh) { thumb.failed = true; return nullptr; }
+    XMFLOAT4X4 identity;
+    XMStoreFloat4x4(&identity, XMMatrixIdentity());
+    RenderThumb(thumb, { { mesh, identity, nullptr } });
+    return thumb.srv.Get();
+}
 
+ID3D11ShaderResourceView* ModelRenderer::LookThumbnail(const std::string& name, const std::vector<std::pair<ModelLook, XMFLOAT4X4>>& parts,
+                                                       const MpqChain& mpq, bool render)
+{
+    const std::string key = "look:" + name;
+    if (auto it = m_thumbs.find(key); it != m_thumbs.end() || !render) return it != m_thumbs.end() ? it->second.srv.Get() : nullptr;
+    Thumb& thumb = m_thumbs[key];
+    std::vector<std::tuple<GpuMesh*, XMFLOAT4X4, const Look*>> meshes;
+    for (const auto& [look, world] : parts)
+    {
+        const bool wmo = Lower(look.model).ends_with(".wmo");
+        if (GpuMesh* mesh = Mesh(wmo ? look.model : M2Name(look.model), wmo, mpq)) meshes.emplace_back(mesh, world, ResolveLook(look, mpq));
+        else if (meshes.empty()) break;   // no body: nothing to frame
+    }
+    if (meshes.empty()) { thumb.failed = true; return nullptr; }
+    RenderThumb(thumb, meshes);
+    return thumb.srv.Get();
+}
+
+void ModelRenderer::RenderThumb(Thumb& thumb, const std::vector<std::tuple<GpuMesh*, XMFLOAT4X4, const Look*>>& parts)
+{
     constexpr UINT kSize = 128;
     D3D11_TEXTURE2D_DESC d{};
     d.Width = d.Height = kSize;
@@ -413,7 +443,7 @@ ID3D11ShaderResourceView* ModelRenderer::Thumbnail(const std::string& name, bool
     Com<ID3D11RenderTargetView> rtv;
     if (FAILED(m_device->CreateTexture2D(&d, nullptr, &color)) || FAILED(m_device->CreateRenderTargetView(color.Get(), nullptr, &rtv)) ||
         FAILED(m_device->CreateShaderResourceView(color.Get(), nullptr, &thumb.srv)))
-    { thumb.failed = true; return nullptr; }
+    { thumb.failed = true; return; }
     if (!m_thumbDepth)
     {
         d.Format = DXGI_FORMAT_D32_FLOAT;
@@ -445,22 +475,28 @@ ID3D11ShaderResourceView* ModelRenderer::Thumbnail(const std::string& name, bool
     if (m_thumbDepth) m_context->ClearDepthStencilView(m_thumbDepth.Get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
 
     // Three-quarter view from the front-right and a little above, framed on the model's bounding sphere.
-    const XMVECTOR center = XMLoadFloat3(&mesh->center);
-    const float radius = std::max(mesh->radius, 0.1f);
+    const auto& [body, bodyWorld, bodyLook] = parts.front();
+    const XMMATRIX bw = XMLoadFloat4x4(&bodyWorld);
+    const XMVECTOR center = XMVector3TransformCoord(XMLoadFloat3(&body->center), bw);
+    const float radius = std::max(body->radius * XMVectorGetX(XMVector3Length(bw.r[0])), 0.1f);
     const XMVECTOR eye = XMVectorAdd(center, XMVectorScale(XMVector3Normalize(XMVectorSet(1.0f, 0.65f, 1.0f, 0)), radius * 2.1f));
     const XMMATRIX viewProj = XMMatrixLookAtRH(eye, center, XMVectorSet(0, 1, 0, 0)) *
                               XMMatrixPerspectiveFovRH(XMConvertToRadians(45.0f), 1.0f, radius * 0.05f, radius * 10.0f);
     D3D11_MAPPED_SUBRESOURCE mapped;
     if (m_instanceBuffer && SUCCEEDED(m_context->Map(m_instanceBuffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
     {
-        XMStoreFloat4x4(static_cast<XMFLOAT4X4*>(mapped.pData), XMMatrixIdentity());
+        std::vector<Run> runs;
+        for (size_t i = 0; i < parts.size() && i < m_instanceCapacity; ++i)
+        {
+            static_cast<XMFLOAT4X4*>(mapped.pData)[i] = std::get<1>(parts[i]);
+            runs.push_back({ std::get<0>(parts[i]), UINT(i), 1, std::get<2>(parts[i]) });
+        }
         m_context->Unmap(m_instanceBuffer.Get(), 0);
-        Submit({ { mesh, 0, 1 } }, viewProj);
+        Submit(runs, viewProj);
     }
 
     m_context->OMSetRenderTargets(1, oldRtv.GetAddressOf(), oldDsv.Get());
     if (viewports) m_context->RSSetViewports(1, &oldVp);
-    return thumb.srv.Get();
 }
 
 bool ModelRenderer::Corners(bool wmo, uint32_t uid, XMFLOAT3 corners[8]) const

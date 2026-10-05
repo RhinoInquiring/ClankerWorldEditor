@@ -82,9 +82,12 @@ public:
     {
         uint32_t entry; std::string name, detail; uint32_t displayId = 0; float size = 1;
         uint32_t weapons[2] = {}, weaponTypes[2] = {};   // creature: equipment set 1
+        uint32_t category = 0;                           // creature_template.type / gameobject_template.type
     };
     /// Template rows whose name contains `text` (or whose entry is `text`), up to 60.
     std::vector<Template> Search(const std::string& text, std::string& error) const;
+    /// Every template row (the catalog), by name.
+    std::vector<Template> All(std::string& error) const { return Templates("1 = 1", 0, error); }
 
     /// The next guid of the range [first, last]: above every guid used there by the project (redo-able ones too) or
     /// the database; null when the range is full or unset. Guids are never reused.
@@ -113,6 +116,8 @@ public:
     const std::string& LastError() const { return m_lastError; }
 
 private:
+    /// Template rows matching an SQL condition on the template table (alias t), by name; limit 0 = all.
+    std::vector<Template> Templates(const std::string& where, size_t limit, std::string& error) const;
     struct RowChange { uint32_t guid; const nlohmann::json* before; const nlohmann::json* after; };
     /// The rows a change touches, in order.
     static std::vector<RowChange> Rows(const nlohmann::json& data);

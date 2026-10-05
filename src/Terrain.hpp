@@ -80,6 +80,7 @@ struct TerrainClipboard
         std::array<float, 145> heights{};   // absolute
         nlohmann::json layers;              // texture names, flags, effects, alpha (see LayerState)
         uint16_t holes = 0;
+        nlohmann::json liquids;             // LiquidState (absolute heights); null = leave the target's water alone
     };
     std::vector<Entry> chunks;
     // Objects standing on the copied chunks: x and z relative to the first chunk's corner, y absolute.
@@ -102,7 +103,7 @@ struct TerrainClipboard
 
 struct PasteOptions
 {
-    bool heights = true, textures = true, holes = true, objects = true;
+    bool heights = true, textures = true, holes = true, objects = true, water = true;
     float slopeX = 0, slopeZ = 0;   // tilt added to the copy, yards per vertex step from its first chunk's corner
     bool blend = true;          // blend the seam into the ground around the paste
     float widthYards = 0;       // blend band per side; 0 = automatic from the height mismatch
@@ -118,6 +119,7 @@ struct PastePlan
         std::array<float, 145> heights{};   // MCVT values (relative to the chunk's base)
         nlohmann::json layers;              // LayerState; null = textures unchanged
         std::optional<uint16_t> holes;      // hole mask; none = unchanged
+        nlohmann::json liquids;             // LiquidState; null = water unchanged, [] = no water
     };
     std::vector<Chunk> chunks;      // every chunk the paste changes, the blend band included
     std::vector<ChunkRef> footprint;
@@ -224,6 +226,10 @@ public:
     std::optional<DoodadPlacement> FindDoodad(uint32_t uid) const;
     std::optional<WmoPlacement> FindWmo(uint32_t uid) const;
 
+    /// Doodads placed on the map (MDDF) that stand inside these WMOs' own bounding boxes, tested in each WMO's frame so
+    /// a turned building does not catch what is only near it: furniture that belongs to the building but is not part of the WMO.
+    std::set<ObjectRef> DoodadsInside(const std::set<ObjectRef>& objects) const;
+
     /// Object edit: snapshot the objects, show transforms of that snapshot live, then commit or cancel.
     /// The transforms always start from the snapshot, so a drag is one change however long it runs.
     void BeginObjectEdit(const std::set<ObjectRef>& objects);
@@ -258,6 +264,16 @@ public:
     static nlohmann::json LayerState(const LoadedTile& tile, const AdtChunk& chunk);
     /// Sets a chunk's layers from LayerState JSON (adding texture names to the tile's list as needed).
     static void SetLayerState(LoadedTile& tile, AdtChunk& chunk, const nlohmann::json& state);
+    /// A chunk's liquid instances as JSON (absolute heights, base64 exists/extra), [] when it has none.
+    static nlohmann::json LiquidState(const Adt& adt, const AdtChunk& chunk);
+    /// Replaces a chunk's liquid instances with LiquidState JSON ([] removes its water).
+    static void SetLiquidState(Adt& adt, const AdtChunk& chunk, const nlohmann::json& state);
+    /// LiquidState turned a quarter clockwise within its chunk, the way TerrainClipboard::RotateClockwise turns heights.
+    static nlohmann::json RotateLiquidState(const nlohmann::json& state);
+
+    /// Applies the project's terrain changes for `map` (heights, layers, holes, areas, water, objects) to a tile read
+    /// from the client, in order; true when objects changed. Static and self-contained: safe on a worker thread.
+    static bool ReplayEdits(LoadedTile& tile, const std::string& map, const std::vector<Change>& done);
 
     /// Tiles of `map` that the project's applied changes touch.
     std::set<int> EditedTiles(const std::string& map) const;
@@ -272,7 +288,7 @@ private:
     TileStats FinishTile(int x, int y, std::vector<uint8_t> bytes, Adt adt);
     Change MakeChange(const Edits& edits, const nlohmann::json& layers, const std::string& label,
                       const nlohmann::json& holes = nlohmann::json::array(), const nlohmann::json& objects = nlohmann::json::array(),
-                      const nlohmann::json& areas = nlohmann::json::array()) const;
+                      const nlohmann::json& areas = nlohmann::json::array(), const nlohmann::json& liquids = nlohmann::json::array()) const;
     /// Adds (after) or removes (before) a change's objects on a loaded tile.
     void SetObjects(LoadedTile& tile, const nlohmann::json& objects, bool after);
     /// A WMO's world bounding box from its root file's bounds and the placement (unchanged if unreadable).
@@ -296,6 +312,7 @@ private:
     float m_flattenHeight = 0;
     Edits m_stroke;
     std::vector<ChunkRef> m_previewed;   // chunks the renderer currently shows from a plan
+    std::set<int> m_previewedWater;      // tiles whose water the renderer currently shows from a plan
     bool m_holing = false;
     std::map<std::pair<int, int>, std::pair<uint16_t, uint16_t>> m_holeStroke;   // (tile, chunk) -> holes before, after
     bool m_areaing = false;

@@ -246,6 +246,58 @@ ID3D11ShaderResourceView* Renderer::Texture(const std::string& name, const MpqCh
     return srv ? srv.Get() : m_white.Get();
 }
 
+void Renderer::BuildWater(TileGpu& tile, const std::vector<AdtLiquid>& liquids, const MpqChain& mpq)
+{
+    tile.water.Reset();
+    tile.waterVertexCount = 0;
+    tile.waterRuns.clear();
+    // Liquids: two triangles per existing cell, grouped by LiquidType (each type draws with its own animated
+    // texture), tinted by kind.
+    // ponytail: kind from the stock 3.3.5 LiquidType ids; read LiquidType.dbc's type column when custom liquids appear.
+    std::map<uint16_t, std::vector<LineVertex>> byType;
+    for (const AdtLiquid& l : liquids)
+    {
+        const uint16_t t = l.type;
+        const bool magma = t == 3 || t == 7 || t == 11 || t == 19 || t == 121 || t == 141;
+        const bool slime = t == 4 || t == 8 || t == 12 || t == 20 || t == 21 || t == 181;
+        const bool ocean = l.format == 2 || t == 2 || t == 6 || t == 10 || t == 14;
+        const XMFLOAT4 col = magma ? XMFLOAT4{ 1.0f, 1.0f, 1.0f, 1.0f } : slime ? XMFLOAT4{ 1.0f, 1.0f, 1.0f, 0.9f }
+                           : ocean ? XMFLOAT4{ 0.12f, 0.27f, 0.42f, 0.8f } : XMFLOAT4{ 0.2f, 0.38f, 0.46f, 0.72f };   // Elwynn-like lake and open-sea blues
+        LiquidFrames(t, mpq);   // load its frames now, not in the middle of a draw
+        std::vector<LineVertex>& water = byType[t];
+        auto vertex = [&](int r, int c) {
+            return LineVertex{ { l.cornerX + (l.x + c) * kUnitSize, l.heights[size_t(r) * (l.w + 1) + c], l.cornerZ + (l.y + r) * kUnitSize }, col };
+        };
+        for (int r = 0; r < l.h; ++r)
+            for (int c = 0; c < l.w; ++c)
+            {
+                if (!l.exists[size_t(r) * l.w + c]) continue;
+                const LineVertex a = vertex(r, c), b = vertex(r, c + 1), d = vertex(r + 1, c), e = vertex(r + 1, c + 1);
+                water.insert(water.end(), { a, b, e, a, e, d });
+            }
+    }
+    std::vector<LineVertex> water;
+    for (auto& [type, vertices] : byType)
+    {
+        if (vertices.empty()) continue;
+        tile.waterRuns.push_back({ type, UINT(water.size()), UINT(vertices.size()) });
+        water.insert(water.end(), vertices.begin(), vertices.end());
+    }
+    if (!water.empty())   // ghost tiles too: DrawWater shows only the layer on screen (the map, or the soloed ghost)
+    {
+        D3D11_BUFFER_DESC wb{ UINT(water.size() * sizeof(LineVertex)), D3D11_USAGE_IMMUTABLE, D3D11_BIND_VERTEX_BUFFER };
+        D3D11_SUBRESOURCE_DATA wd{ water.data() };
+        m_device->CreateBuffer(&wb, &wd, &tile.water);
+        tile.waterVertexCount = UINT(water.size());
+    }
+
+}
+
+void Renderer::UpdateWater(int key, const std::vector<AdtLiquid>& liquids, const MpqChain& mpq)
+{
+    if (auto it = m_tiles.find(key); it != m_tiles.end()) BuildWater(it->second, liquids, mpq);
+}
+
 TileStats Renderer::LoadTile(int key, const Adt& adt, const MpqChain& mpq, int layer)
 {
     TileStats stats;
@@ -303,45 +355,7 @@ TileStats Renderer::LoadTile(int key, const Adt& adt, const MpqChain& mpq, int l
         tile.lineVertexCount = UINT(lines.size());
     }
 
-    // Liquids: two triangles per existing cell, grouped by LiquidType (each type draws with its own animated
-    // texture), tinted by kind.
-    // ponytail: kind from the stock 3.3.5 LiquidType ids; read LiquidType.dbc's type column when custom liquids appear.
-    std::map<uint16_t, std::vector<LineVertex>> byType;
-    for (const AdtLiquid& l : adt.liquids)
-    {
-        const uint16_t t = l.type;
-        const bool magma = t == 3 || t == 7 || t == 11 || t == 19 || t == 121 || t == 141;
-        const bool slime = t == 4 || t == 8 || t == 12 || t == 20 || t == 21 || t == 181;
-        const bool ocean = l.format == 2 || t == 2 || t == 6 || t == 10 || t == 14;
-        const XMFLOAT4 col = magma ? XMFLOAT4{ 1.0f, 1.0f, 1.0f, 1.0f } : slime ? XMFLOAT4{ 1.0f, 1.0f, 1.0f, 0.9f }
-                           : ocean ? XMFLOAT4{ 0.12f, 0.27f, 0.42f, 0.8f } : XMFLOAT4{ 0.2f, 0.38f, 0.46f, 0.72f };   // Elwynn-like lake and open-sea blues
-        LiquidFrames(t, mpq);   // load its frames now, not in the middle of a draw
-        std::vector<LineVertex>& water = byType[t];
-        auto vertex = [&](int r, int c) {
-            return LineVertex{ { l.cornerX + (l.x + c) * kUnitSize, l.heights[size_t(r) * (l.w + 1) + c], l.cornerZ + (l.y + r) * kUnitSize }, col };
-        };
-        for (int r = 0; r < l.h; ++r)
-            for (int c = 0; c < l.w; ++c)
-            {
-                if (!l.exists[size_t(r) * l.w + c]) continue;
-                const LineVertex a = vertex(r, c), b = vertex(r, c + 1), d = vertex(r + 1, c), e = vertex(r + 1, c + 1);
-                water.insert(water.end(), { a, b, e, a, e, d });
-            }
-    }
-    std::vector<LineVertex> water;
-    for (auto& [type, vertices] : byType)
-    {
-        if (vertices.empty()) continue;
-        tile.waterRuns.push_back({ type, UINT(water.size()), UINT(vertices.size()) });
-        water.insert(water.end(), vertices.begin(), vertices.end());
-    }
-    if (!water.empty())   // ghost tiles too: DrawWater shows only the layer on screen (the map, or the soloed ghost)
-    {
-        D3D11_BUFFER_DESC wb{ UINT(water.size() * sizeof(LineVertex)), D3D11_USAGE_IMMUTABLE, D3D11_BIND_VERTEX_BUFFER };
-        D3D11_SUBRESOURCE_DATA wd{ water.data() };
-        m_device->CreateBuffer(&wb, &wd, &tile.water);
-        tile.waterVertexCount = UINT(water.size());
-    }
+    BuildWater(tile, adt.liquids, mpq);
 
     if (!adt.chunks.empty())
     {
@@ -1033,7 +1047,7 @@ const std::vector<ID3D11ShaderResourceView*>& Renderer::LiquidFrames(uint16_t ty
     if (!m_liquidTypesRead)
     {
         m_liquidTypesRead = true;
-        m_liquidTypes.Load(mpq.Read("DBFilesClient\LiquidType.dbc").value_or(std::vector<uint8_t>{}));
+        m_liquidTypes.Load(mpq.Read("DBFilesClient\\LiquidType.dbc").value_or(std::vector<uint8_t>{}));
     }
     std::vector<ID3D11ShaderResourceView*>& frames = m_liquidFrames[type];
     const auto row = m_liquidTypes.Find(type);

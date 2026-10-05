@@ -59,7 +59,14 @@ struct AdtLiquid
     std::vector<float> heights;      // (w + 1) * (h + 1), row-major
     std::vector<bool> exists;        // w * h cells
     bool fromMclq = false;           // read from an old MCLQ chunk (type then 1 water, 2 ocean, 3 magma, 4 slime)
+    /// Per-vertex data after the heights, as MH2O stores it: depth bytes (formats 0 and 2), uv pairs of uint16 (1),
+    /// uv then depth (3). MCLQ water is read as format 0, MCLQ magma and slime as format 1.
+    std::vector<uint8_t> extra;
+    uint64_t fishable = ~0ull, deep = 0;   // the chunk's MH2O attribute masks (8 x 8 cells), kept with each instance
 };
+
+/// Bytes of AdtLiquid::extra per vertex for an MH2O vertex format (0 for unknown formats).
+size_t LiquidExtraPerVertex(uint16_t format);
 
 struct Adt
 {
@@ -70,6 +77,10 @@ struct Adt
     std::vector<AdtLiquid> liquids;
 };
 std::optional<Adt> ParseAdt(const std::vector<uint8_t>& data, bool bigAlpha);
+
+/// A whole MH2O chunk body (header table, attributes, instances, existence bits, vertex data) for adt's liquids,
+/// each assigned to the chunk whose corner it carries. MCLQ-read liquids are written as MH2O too.
+std::vector<uint8_t> WriteMh2o(const Adt& adt);
 
 /// MPHD flags say whether the map's alpha maps are 8-bit (big alpha) or 4-bit.
 bool WdtBigAlpha(const std::vector<uint8_t>& wdt);
@@ -90,6 +101,8 @@ std::vector<MapEntry> ParseMapDbc(const std::vector<uint8_t>& dbc);
 /// Objects: when adt's doodad/WMO lists differ from the original file's (added, moved, deleted; matched by
 /// unique id), MMDX/MMID/MDDF and MWMO/MWID/MODF are rebuilt and every chunk whose MCRF changes gets a new one:
 /// untouched objects keep their original chunk references, moved and new ones are referenced where they stand.
+/// Liquids: when adt.liquids differ from the original's, MH2O is written afresh (WriteMh2o; inserted before the
+/// first MCNK when the file had none). The client then ignores the old MCLQ liquid of every chunk.
 /// Returns an empty vector when the input has no MHDR or MCIN (or lacks object chunks it needs).
 std::vector<uint8_t> RewriteAdt(const std::vector<uint8_t>& original, const Adt& adt, const std::set<size_t>& chunks, bool bigAlpha);
 
@@ -133,6 +146,9 @@ std::vector<std::vector<int16_t>> ParseWdl(const std::vector<uint8_t>& wdl);
 /// height: land green (sea level) -> brown (350 yd) -> pale rock (1400 yd), water (below 0) bright blue at the shore fading to dark in the deep;
 /// tiles without terrain are transparent.
 std::vector<uint8_t> MapPreview(const std::vector<std::vector<int16_t>>& wdl, int pixels);
+
+/// An uncompressed BLP2 (ARGB8888, 8-bit alpha, no mipmaps; the client ships such files) from RGBA rows.
+std::vector<uint8_t> WriteBlp(uint32_t width, uint32_t height, const uint8_t* rgba);
 
 std::string Base64Encode(const uint8_t* data, size_t size);
 std::vector<uint8_t> Base64Decode(const std::string& text);

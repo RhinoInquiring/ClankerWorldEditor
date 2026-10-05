@@ -104,6 +104,10 @@ std::optional<ModelMesh> LoadM2(const std::string& m2Name, const FileReader& rea
 std::optional<ModelMesh> ParseWmo(const std::vector<uint8_t>& root, const std::vector<std::vector<uint8_t>>& groups);
 /// Number of groups and the root bounding box (WoW axes, min then max) from a WMO root.
 bool WmoRootInfo(const std::vector<uint8_t>& root, uint32_t& groups, float bounds[6]);
+/// What WMOAreaTable keys a WMO by: the root's WMOID (MOHD) and each group's id (MOGP) with its name (MOGN).
+struct WmoAreaKeys { uint32_t wmoId = 0; std::vector<std::pair<uint32_t, std::string>> groups; };
+/// `read` gets a file by name; missing groups are skipped. None when the root has no MOHD.
+std::optional<WmoAreaKeys> ReadWmoAreaKeys(const std::string& rootName, const std::function<std::optional<std::vector<uint8_t>>(const std::string&)>& read);
 
 /// "World\\Foo\\Bar.mdx" -> "World\\Foo\\Bar.m2"; the skin is "World\\Foo\\Bar00.skin".
 std::string M2Name(const std::string& placementName);

@@ -42,6 +42,15 @@ reverting never needs the base files.
 
 Known gap: MCNR normals are not rewritten yet, so the client lights edited terrain with the old normals.
 
+## Terrain water
+
+- Terrain changes may carry `"liquids": [[tileX, tileY, chunk, before, after], ...]`, each side the chunk's whole
+  LiquidState: an array of MH2O instances (`type`, `format`, `x`, `y`, `w`, `h`, absolute `heights`, base64 `exists`
+  bytes and `extra` per-vertex data, `fishable` / `deep` masks); `[]` = no water. Pastes write one entry per pasted
+  chunk whose water changes.
+- Export rebuilds the tile's MH2O from its liquids (inserting one when the file had none); the client then ignores
+  MCLQ for that tile. Like areas, the server sees water through its extracted maps: re-run the extractor.
+
 ## Zones (AreaTable + chunk area ids)
 
 - Terrain changes may carry `"areas": [[tileX, tileY, chunk, before, after], ...]`; export writes the MCNK header
@@ -51,3 +60,13 @@ Known gap: MCNR normals are not rewritten yet, so the client lights edited terra
   row). New ids come from the project's `area.id` range; a new AreaBit is the lowest unused one below 4096.
 - Export writes `out/client/DBFilesClient/AreaTable.dbc` and `out/server/dbc/AreaTable.dbc` (client rows + the
   project's) and `out/dbc/AreaTable.json` (mod-dbc-patch add/modify). The client reads DBCs only at start.
+- `dbc.WMOAreaTable` changes have the same shape (`DbcTable` serves both). Rows are keyed by (WMOID from the root's
+  MOHD, the placement's MODF name set, the group's MOGP id at +0x38); AzerothCore looks groups up one by one (never
+  the -1 row) and reads the name set as int8, so "whole building" writes a row per group and name sets stop at 127.
+  New ids come from `wmoarea.id`. Giving a placement its own name set is an object edit; the server needs its vmaps
+  extracted again for that, while row changes only need a restart.
+- World map: `dbc.WorldMapArea` (a zone's picture and its world rectangle; editor x = zero - LocLeft side, z = zero -
+  LocTop side, view 1002 x 668 of a 1024 x 768 canvas in 4 x 3 tiles) and `dbc.WorldMapOverlay` (pieces shown once
+  AreaID[0..3] is explored). Pictures are rendered top-down from the loaded terrain into `<project>/assets/` (not
+  changes: rendering needs the tiles loaded) and export copies `assets/` into `out/client/`. Overlay tiles follow
+  WorldMapFrame.lua: 256 px, the last column / row a power of two of at least 16.

@@ -32,6 +32,7 @@ void Loader::Stop()
     if (m_thread.joinable()) m_thread.join();
     std::lock_guard lock(m_lock);
     m_wanted.clear();
+    m_wantedModels.clear();
     m_working.clear();
     m_ready.clear();
     m_seen.clear();
@@ -55,6 +56,16 @@ void Loader::Want(const std::string& map, bool bigAlpha, std::vector<int> keys)
         std::erase_if(keys, [&](int k) { return m_working.count(k) != 0; });
         m_wanted = std::move(keys);
         m_pending = m_wanted.size() + m_working.size();
+    }
+    m_wake.notify_one();
+}
+
+void Loader::WantModels(std::vector<std::pair<std::string, bool>> models)
+{
+    {
+        std::lock_guard lock(m_lock);
+        std::erase_if(models, [&](const auto& m) { return m_seen.count("model:" + Lower(m.first)) != 0; });
+        m_wantedModels = std::move(models);
     }
     m_wake.notify_one();
 }
@@ -147,8 +158,16 @@ void Loader::Run()
         bool bigAlpha = false;
         {
             std::unique_lock lock(m_lock);
-            m_wake.wait(lock, [&] { return m_stop || !m_wanted.empty(); });
+            m_wake.wait(lock, [&] { return m_stop || !m_wanted.empty() || !m_wantedModels.empty(); });
             if (m_stop) return;
+            if (m_wanted.empty())   // tiles first; then one model per turn, so new tiles never wait long
+            {
+                const auto [name, wmo] = m_wantedModels.front();
+                m_wantedModels.erase(m_wantedModels.begin());
+                lock.unlock();
+                PrepareModel(name, wmo);
+                continue;
+            }
             tile.map = m_map;
             tile.key = m_wanted.front();
             m_wanted.erase(m_wanted.begin());

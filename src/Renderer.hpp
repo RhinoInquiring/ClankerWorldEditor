@@ -61,6 +61,8 @@ public:
     void UpdateChunk(int key, size_t index, const AdtChunk& chunk);
     /// Changes one chunk's hole mask and rebuilds that tile's triangles.
     void SetChunkHoles(int key, size_t index, uint16_t holes);
+    /// Rebuilds a tile's liquid surfaces (after a paste changed them, or to preview a paste's).
+    void UpdateWater(int key, const std::vector<AdtLiquid>& liquids, const MpqChain& mpq);
     /// Rebinds one chunk's texture layers and alpha map after a texture edit.
     void UpdateChunkTextures(int key, size_t index, const AdtChunk& chunk, const std::vector<std::string>& textures, const MpqChain& mpq);
 
@@ -128,6 +130,7 @@ private:
         Com<ID3D11RenderTargetView> bakedRtv;
         bool bakeDirty = true;
     };
+    void BuildWater(TileGpu& tile, const std::vector<AdtLiquid>& liquids, const MpqChain& mpq);
     /// Renders a tile's terrain from above into its baked texture (restores the caller's render target).
     void BakeTile(TileGpu& tile, const DrawOptions& options);
     Com<ID3D11VertexShader> m_bakedVs;

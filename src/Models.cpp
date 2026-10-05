@@ -449,6 +449,35 @@ bool WmoRootInfo(const std::vector<uint8_t>& root, uint32_t& groups, float bound
     return found;
 }
 
+std::optional<WmoAreaKeys> ReadWmoAreaKeys(const std::string& rootName, const std::function<std::optional<std::vector<uint8_t>>(const std::string&)>& read)
+{
+    const auto root = read(rootName);
+    if (!root) return std::nullopt;
+    WmoAreaKeys keys;
+    uint32_t groups = 0;
+    size_t mognOff = 0, mognSize = 0;
+    bool found = false;
+    ForEachChunk(*root, 0, root->size(), [&](uint32_t magic, size_t off, size_t size) {
+        if (magic == Tag("MOGN")) { mognOff = off; mognSize = size; }
+        if (magic != Tag("MOHD") || size < 64) return;
+        ReadAt(*root, off + 4, groups);
+        ReadAt(*root, off + 0x20, keys.wmoId);
+        found = true;
+    });
+    if (!found) return std::nullopt;
+    for (uint32_t i = 0; i < groups && i < 512; ++i)
+    {
+        const auto g = read(WmoGroupName(rootName, i));
+        if (!g) continue;
+        // MVER (4 bytes), then MOGP: name offset into the root's MOGN at +0, the WMOAreaTable group id at +0x38. Only the
+        // header is read, so a MOGP that states a size past the end of the file (some shipped groups do) still counts.
+        uint32_t magic = 0, name = 0, id = 0;
+        if (!ReadAt(*g, 12, magic) || magic != Tag("MOGP") || !ReadAt(*g, 20, name) || !ReadAt(*g, 20 + 0x38, id)) continue;
+        keys.groups.push_back({ id, CString(*root, mognOff, mognSize, name) });
+    }
+    return keys;
+}
+
 std::optional<ModelMesh> ParseWmo(const std::vector<uint8_t>& root, const std::vector<std::vector<uint8_t>>& groups)
 {
     size_t motxOff = 0, motxSize = 0, modnOff = 0, modnSize = 0, modsOff = 0, modsSize = 0, moddOff = 0, moddSize = 0;

@@ -203,6 +203,9 @@ bool App::Init(HWND hwnd, ID3D11Device* device, ID3D11DeviceContext* context, bo
     m_store.Register(m_waypoints);
     m_store.Register(m_addons);
     m_store.Register(m_areas);
+    m_store.Register(m_wmoAreas);
+    m_store.Register(m_worldMaps);
+    m_store.Register(m_mapOverlays);
     m_creatures.SetDb(&m_db);
     m_gameobjects.SetDb(&m_db);
     m_waypoints.SetDb(&m_db);
@@ -228,6 +231,10 @@ bool App::Init(HWND hwnd, ID3D11Device* device, ID3D11DeviceContext* context, bo
         { "Tool: Copy", "C", [this] { m_tool = Tool::Copy; }, always },
         { "Tool: Holes", "H", [this] { m_tool = Tool::Holes; }, always },
         { "Tool: Zones (paint area ids)", "Z", [this] { m_tool = Tool::Zones; }, always },
+        { "Group: Terrain", "F1", [this] { SetGroup(Group::Terrain); }, always },
+        { "Group: Objects", "F2", [this] { SetGroup(Group::Objects); }, always },
+        { "Group: Units", "F3", [this] { SetGroup(Group::Units); }, always },
+        { "Group: Regions", "F4", [this] { SetGroup(Group::Regions); }, always },
         { "Copy selected chunks", "Ctrl+C", [this] { CopySelection(); }, [this] { return !m_selection.empty(); } },
         { "Paste at cursor", "Ctrl+V", [this] { PasteAtCursor(); }, [this] { return !m_clipboard.Empty(); } },
         { "Start / stop placing the clipboard", "P", [this] { m_tool = Tool::Copy; m_placing = !m_placing; m_pin.reset(); }, [this] { return !m_clipboard.Empty(); } },
@@ -357,9 +364,17 @@ void App::CloseProject()
     m_catalogKey.clear();
     m_catalogItems.clear();
     m_armed.reset();
+    m_diffs.Cancel();   // its worker reads the archives about to close
+    m_diffs.Clear();
+    m_diffThumbs.clear();
+    m_diffNoThumb.clear();
+    m_diffPending.clear();
+    m_diffTarget = {};
     m_mpq.SetFallbacks({});
     m_ghosts = Ghosts{};
     m_soloLayer = m_copyLayer = 0;
+    m_compare.clear();   // its layers went with the ghosts
+    m_comparing = false;
     m_blueprints.clear();
     m_blueprintThumbs.clear();
     m_versions.clear();
@@ -388,6 +403,12 @@ void App::CloseProject()
     m_models.RemoveTile(-4);
     m_models.RemoveTile(-5);
     m_areas.Reset();
+    m_wmoAreas.Reset();
+    m_unitTemplatesRead[0] = m_unitTemplatesRead[1] = false;
+    m_worldMaps.Reset();
+    m_mapOverlays.Reset();
+    m_mapJob.reset();
+    m_wmoKeys.clear();
     m_maps.clear();
     m_mapIndex = -1;
     m_mapTiles.clear();
@@ -440,11 +461,25 @@ void App::Export(bool playTest)
         if (!table->ExportSql(m_project->dir / "out" / "server", error)) Log("%s", error.c_str());
         else if (const size_t n = table->Count()) Log("Paths: out/server/%s.sql (%zu changed) and %s_revert.sql.", table->Table().c_str(), n, table->Table().c_str());
     }
-    if (!m_areas.Export({ out / "DBFilesClient", m_project->dir / "out" / "server" / "dbc" }, m_project->dir / "out" / "dbc" / "AreaTable.json", error))
-        Log("%s", error.c_str());
-    else if (m_areas.Count())
-        Log("Areas: %zu row(s) in DBFilesClient/AreaTable.dbc, out/server/dbc/AreaTable.dbc and out/dbc/AreaTable.json (mod-dbc-patch); "
-            "the client reads DBCs at start, so restart it.", m_areas.Count());
+    for (const DbcTable* table : std::initializer_list<const DbcTable*>{ &m_areas, &m_wmoAreas, &m_worldMaps, &m_mapOverlays })
+    {
+        if (!table->Export({ out / "DBFilesClient", m_project->dir / "out" / "server" / "dbc" }, m_project->dir / "out" / "dbc", error))
+            Log("%s", error.c_str());
+        else if (table->Count())
+            Log("%s: %zu row(s) in DBFilesClient/%s.dbc, out/server/dbc and out/dbc/%s.json (mod-dbc-patch); client and worldserver read DBCs "
+                "only at start, so restart them.", table->Name().c_str(), table->Count(), table->Name().c_str(), table->Name().c_str());
+    }
+    // Generated pictures (world maps) go in as they are.
+    size_t generated = 0;
+    std::error_code assetsEc;
+    for (const auto& entry : fs::recursive_directory_iterator(m_project->AssetsDir(), assetsEc))
+        if (entry.is_regular_file())
+        {
+            const fs::path target = out / fs::relative(entry.path(), m_project->AssetsDir(), assetsEc);
+            fs::create_directories(target.parent_path(), assetsEc);
+            generated += fs::copy_file(entry.path(), target, fs::copy_options::overwrite_existing, assetsEc);
+        }
+    if (generated) Log("Copied %zu generated file(s) from assets/.", generated);
     if (AreasPainted())
         Log("Area ids were painted: extract the server's maps again from the exported tiles, or the server keeps the old areas.");
     for (const auto& m : assets.missing)
@@ -497,6 +532,7 @@ void App::GoToTile(const std::string& map, int x, int y)
 {
     if (map != m_terrain.Map())
     {
+        StopCompare();   // its versions are of the old map
         std::string error;
         if (!m_terrain.SetMap(map, error)) { Log("%s", error.c_str()); return; }
         const auto wdl = m_mpq.Read("World\\Maps\\" + map + "\\" + map + ".wdl");
@@ -575,6 +611,7 @@ void App::PasteAtCursor()
 void App::CommitPlacement()
 {
     if (!m_pin || m_clipboard.Empty()) return;
+    m_compareCycledAt = -1e9;   // a compare commits the blended plan, never the quick one shown while cycling
     // A paste over tiles still loading would silently skip them; they are pinned, so this is a short wait.
     if (const size_t missing = m_terrain.MissingTiles(PasteTiles()))
     {
@@ -707,17 +744,55 @@ void App::DrawCatalog()
     struct Tab { K kind; const char* name; };
     const Tab tabs[] = { { K::Doodad, "Doodads" }, { K::Wmo, "Buildings" }, { K::GroundTexture, "Ground textures" }, { K::Texture, "Other textures" },
                          { K::Count, "All files" } };
+    // Each tool group shows the tabs it places from (Regions has none of its own yet: every tab).
+    const Group group = GroupOf(m_tool);
+    auto shown = [&](int tab) {
+        switch (group)
+        {
+        case Group::Terrain: return tab == int(K::GroundTexture) || tab == kBlueprintTab || tab == kDifferencesTab;
+        case Group::Objects: return tab == int(K::Doodad) || tab == int(K::Wmo) || tab == int(K::Texture) || tab == int(K::Count);
+        case Group::Units: return tab == kCreatureTab || tab == kGameobjectTab;
+        default: return true;
+        }
+    };
+    if (!shown(m_catalogTab))   // the group changed: its first tab until the tab bar picks one
+        m_catalogTab = group == Group::Terrain ? int(K::GroundTexture) : group == Group::Objects ? int(K::Doodad) : kCreatureTab;
     if (ImGui::BeginTabBar("##catalogTabs"))
     {
         char blueprintLabel[64];
         snprintf(blueprintLabel, sizeof blueprintLabel, "Blueprints  %zu###Blueprints", m_blueprints.size());
-        if (ImGui::BeginTabItem(blueprintLabel))
+        if (shown(kBlueprintTab) && ImGui::BeginTabItem(blueprintLabel))
         {
             m_catalogTab = kBlueprintTab;
             ImGui::EndTabItem();
         }
+        {
+            size_t pending = 0;
+            for (const auto& r : m_diffs.Regions()) pending += r.status == Differences::Status::Pending;
+            char label[64];
+            snprintf(label, sizeof label, "Differences  %zu###Differences", pending);
+            const bool bringForward = m_catalogShowTab == kDifferencesTab;
+            if (shown(kDifferencesTab) && ImGui::BeginTabItem(label, nullptr, bringForward ? ImGuiTabItemFlags_SetSelected : 0))
+            {
+                if (bringForward) m_catalogShowTab.reset();
+                m_catalogTab = kDifferencesTab;
+                ImGui::EndTabItem();
+            }
+        }
+        for (const auto& [tab, name] : { std::pair{ kCreatureTab, "Creatures" }, std::pair{ kGameobjectTab, "Gameobjects" } })
+        {
+            if (!shown(tab)) continue;
+            const bool bringForward = m_catalogShowTab == tab;
+            if (ImGui::BeginTabItem(name, nullptr, bringForward ? ImGuiTabItemFlags_SetSelected : 0))
+            {
+                if (bringForward) m_catalogShowTab.reset();
+                m_catalogTab = tab;
+                ImGui::EndTabItem();
+            }
+        }
         for (const Tab& t : tabs)
         {
+            if (!shown(int(t.kind))) continue;
             char label[64];
             snprintf(label, sizeof label, "%s  %zu###%s", t.name, t.kind == K::Count ? m_catalog.Tree(K::Count).count : m_catalog.Count(t.kind), t.name);
             const bool bringForward = m_catalogShowTab == int(t.kind);
@@ -731,6 +806,13 @@ void App::DrawCatalog()
         ImGui::EndTabBar();
     }
     if (m_catalogTab == kBlueprintTab) { DrawBlueprints(); ImGui::End(); return; }
+    if (m_catalogTab == kDifferencesTab) { DrawDifferences(); ImGui::End(); return; }
+    if (m_catalogTab == kCreatureTab || m_catalogTab == kGameobjectTab)
+    {
+        DrawUnitCatalog(m_catalogTab == kCreatureTab ? SpawnKind::Creature : SpawnKind::GameObject);
+        ImGui::End();
+        return;
+    }
     const K kind = K(m_catalogTab);
     const bool models = kind == K::Doodad || kind == K::Wmo;
 
@@ -811,7 +893,9 @@ void App::DrawCatalog()
     ImGui::SameLine();
 
     auto activate = [&](const Catalog::Item& item) {
-        if (item.kind == K::Doodad || item.kind == K::Wmo)
+        if ((item.kind == K::Doodad || item.kind == K::Wmo) && m_armed && m_armed->path == item.path)
+            m_armed.reset();   // clicking the model being placed again stops placing it
+        else if (item.kind == K::Doodad || item.kind == K::Wmo)
         {
             m_armed = Armed{ item.path, item.kind == K::Wmo };
             m_tool = Tool::Objects;
@@ -919,10 +1003,170 @@ void App::DrawCatalog()
     ImGui::End();
 }
 
+void App::DrawUnitCatalog(SpawnKind kind)
+{
+    const int k = kind == SpawnKind::Creature ? 0 : 1;
+    SpawnAdapter& adapter = kind == SpawnKind::Creature ? m_creatures : m_gameobjects;
+    const char* table = kind == SpawnKind::Creature ? "creature_template" : "gameobject_template";
+    if (!adapter.Connected())
+    {
+        ImGui::TextColored(kQuiet, "Connect the world database (File > Server setup) to list %s.", table);
+        return;
+    }
+    if (!m_unitTemplatesRead[k])
+    {
+        m_unitTemplatesRead[k] = true;
+        std::string error;
+        const auto start = std::chrono::steady_clock::now();
+        m_unitTemplates[k] = adapter.All(error);
+        if (!error.empty()) Log("%s: %s", table, error.c_str());
+        else Log("Catalog: %zu %s rows in %.0f ms.", m_unitTemplates[k].size(), table,
+                 std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - start).count());
+    }
+    // Folders: creature types (CreatureType in AzerothCore SharedDefines.h), gameobject types.
+    static const char* const kCreatureTypes[] = { "None", "Beast", "Dragonkin", "Demon", "Elemental", "Giant", "Undead", "Humanoid",
+                                                  "Critter", "Mechanical", "Not specified", "Totem", "Non-combat pet", "Gas cloud" };
+    auto categoryName = [&](uint32_t c) -> std::string {
+        if (kind == SpawnKind::GameObject) return GameObjectTypeName(c);
+        return c < std::size(kCreatureTypes) ? kCreatureTypes[c] : "Type " + std::to_string(c);
+    };
+    std::map<uint32_t, size_t> counts;
+    for (const auto& t : m_unitTemplates[k]) ++counts[t.category];
+    std::map<uint32_t, int> nearby;   // entry -> spawns around the camera
+    for (const Spawn& s : m_spawnView)
+        if (s.kind == kind) ++nearby[s.entry];
+
+    ImGui::SetNextItemWidth(260);
+    ImGui::InputTextWithHint("##unitsearch", "Search: name or entry", m_catalogQuery, sizeof m_catalogQuery);
+    ImGui::SameLine();
+    ImGui::Checkbox("Used nearby", &m_catalogNearby);
+    ImGui::SetItemTooltip("Only templates spawned around the camera; the count shows on each");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(120);
+    ImGui::SliderFloat("##size", &m_thumbSize, 48, 192, "size %.0f");
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Reload")) { m_unitTemplatesRead[k] = false; return; }
+    ImGui::SetItemTooltip("Read %s again (after editing it elsewhere)", table);
+    if (m_spawnArmed && m_spawnKind == kind)
+    {
+        ImGui::SameLine(0, 20);
+        ImGui::TextColored(kAccent, "Placing %s", m_spawnArmed->name.c_str());
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Stop  Esc")) m_spawnArmed.reset();
+    }
+
+    if (ImGui::BeginChild("##unitfolders", { 240, 0 }, ImGuiChildFlags_Borders | ImGuiChildFlags_ResizeX))
+    {
+        if (ImGui::Selectable(("Everything  (" + std::to_string(m_unitTemplates[k].size()) + ")").c_str(), m_unitCategory[k] == ~0u)) m_unitCategory[k] = ~0u;
+        for (const auto& [c, n] : counts)
+            if (ImGui::Selectable((categoryName(c) + "  (" + std::to_string(n) + ")##" + std::to_string(c)).c_str(), m_unitCategory[k] == c))
+                m_unitCategory[k] = c;
+    }
+    ImGui::EndChild();
+    ImGui::SameLine();
+
+    std::string query = m_catalogQuery;
+    std::transform(query.begin(), query.end(), query.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+    std::vector<const SpawnAdapter::Template*> items;
+    for (const auto& t : m_unitTemplates[k])
+    {
+        if (m_unitCategory[k] != ~0u && t.category != m_unitCategory[k]) continue;
+        if (m_catalogNearby && !nearby.count(t.entry)) continue;
+        if (!query.empty())
+        {
+            std::string name = t.name;
+            std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+            if (name.find(query) == std::string::npos && std::to_string(t.entry) != query) continue;
+        }
+        items.push_back(&t);
+    }
+
+    if (ImGui::BeginChild("##unititems", { 0, 0 }, ImGuiChildFlags_Borders))
+    {
+        if (items.empty()) ImGui::TextColored(kQuiet, "Nothing matches.");
+        const auto start = std::chrono::steady_clock::now();
+        auto budgetLeft = [&] { return std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - start).count() < 8.0f; };
+        const ImGuiStyle& style = ImGui::GetStyle();
+        const float thumb = m_thumbSize, cellW = thumb + style.FramePadding.x * 2 + style.ItemSpacing.x;
+        const int cols = std::max(1, int((ImGui::GetContentRegionAvail().x + style.ItemSpacing.x) / cellW));
+        const int rows = int((items.size() + cols - 1) / cols);
+        ImGuiListClipper clip;
+        clip.Begin(rows, thumb + style.FramePadding.y * 2 + ImGui::GetTextLineHeightWithSpacing() + style.ItemSpacing.y);
+        while (clip.Step())
+            for (int row = clip.DisplayStart; row < clip.DisplayEnd; ++row)
+                for (int col = 0; col < cols; ++col)
+                {
+                    const size_t i = size_t(row) * cols + col;
+                    if (i >= items.size()) break;
+                    const SpawnAdapter::Template& t = *items[i];
+                    // The model as it spawns: skin, hair, armour and weapons, scaled like the spawn, seen from the front.
+                    const std::string thumbKey = (kind == SpawnKind::Creature ? "c" : "g") + std::to_string(t.entry);
+                    ID3D11ShaderResourceView* tex = m_models.LookThumbnail(thumbKey, {}, m_mpq, false);
+                    if (!tex && !m_models.ThumbnailFailed("look:" + thumbKey) && budgetLeft())
+                    {
+                        Spawn s;
+                        s.kind = kind;
+                        s.entry = t.entry;
+                        s.displayId = t.displayId;
+                        s.size = t.size;
+                        std::copy(std::begin(t.weapons), std::end(t.weapons), s.weapons);
+                        std::copy(std::begin(t.weaponTypes), std::end(t.weaponTypes), s.weaponTypes);
+                        std::vector<std::pair<ModelLook, XMFLOAT4X4>> parts;
+                        if (const auto model = m_looks.SpawnLook(s))
+                        {
+                            const XMMATRIX world = XMMatrixScaling(model->scale, model->scale, model->scale);
+                            XMFLOAT4X4 m;
+                            XMStoreFloat4x4(&m, world);
+                            parts.push_back({ model->look, m });
+                            for (const auto& item : model->items)
+                                if (const auto at = m_models.AttachmentMatrix(model->look.model, item.attachment, m_mpq))
+                                {
+                                    XMStoreFloat4x4(&m, XMLoadFloat4x4(&*at) * world);
+                                    parts.push_back({ item.look, m });
+                                }
+                        }
+                        tex = m_models.LookThumbnail(thumbKey, parts, m_mpq, true);
+                    }
+                    ImGui::PushID(int(i));
+                    ImGui::BeginGroup();
+                    const bool picked = m_spawnArmed && m_spawnKind == kind && m_spawnArmed->entry == t.entry;
+                    if (picked) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.85f, 0.55f, 0.15f, 1));
+                    const bool clicked = tex ? ImGui::ImageButton("##thumb", ImTextureID(intptr_t(tex)), { thumb, thumb })
+                                             : ImGui::Button(m_models.ThumbnailFailed("look:" + thumbKey) ? "no model" : "...",
+                                                             { thumb + style.FramePadding.x * 2, thumb + style.FramePadding.y * 2 });
+                    if (picked) ImGui::PopStyleColor();
+                    if (ImGui::BeginItemTooltip())
+                    {
+                        ImGui::Text("%s  #%u", t.name.c_str(), t.entry);
+                        ImGui::TextColored(kQuiet, "%s   %s   display %u", t.detail.c_str(), categoryName(t.category).c_str(), t.displayId);
+                        if (const auto n = nearby.find(t.entry); n != nearby.end()) ImGui::TextColored(kQuiet, "%d spawned around the camera", n->second);
+                        ImGui::TextColored(kQuiet, "Click to place it");
+                        ImGui::EndTooltip();
+                    }
+                    if (clicked && picked) m_spawnArmed.reset();   // clicking the one being placed again stops placing it
+                    else if (clicked)
+                    {
+                        m_spawnKind = kind;
+                        m_tool = kind == SpawnKind::Creature ? Tool::Creatures : Tool::Gameobjects;
+                        m_spawnArmed = t;
+                    }
+                    std::string name = t.name;
+                    if (const auto n = nearby.find(t.entry); n != nearby.end()) name = std::to_string(n->second) + "x " + name;
+                    ImGui::TextUnformatted(Fit(name, thumb + style.FramePadding.x * 2).c_str());
+                    ImGui::EndGroup();
+                    ImGui::PopID();
+                    if (col + 1 < cols) ImGui::SameLine();
+                }
+    }
+    ImGui::EndChild();
+}
+
 void App::UpdateFallbacks()
 {
     std::vector<const MpqChain*> chains;
     for (size_t i = 1; i < m_ghosts.Sources().size(); ++i) chains.push_back(m_ghosts.Sources()[i].mpq);
+    m_diffs.Cancel();  // so is the differences scan's (its results stay; Rescan finishes it from the saved ones)
+    if (m_diffTarget.source) { m_diffs.Clear(); m_diffTarget = {}; }   // its source may be the one removed
     m_loader.Stop();   // the fallback list is read by the loader's thread: change it while that is idle
     m_mpq.SetFallbacks(std::move(chains));
     if (m_project) m_loader.Start(&m_mpq);
@@ -1003,9 +1247,22 @@ std::vector<uint8_t> App::RenderAreaThumbnail(const TerrainClipboard& clip, UINT
     const Adt adt = clip.ToAdt();
     m_renderer.LoadTile(kKey, adt, m_mpq, kLayer);
     m_models.AddTile(kKey, adt, m_mpq, kLayer);
+    float top = -1e9f;
+    for (const auto& e : clip.chunks) top = std::max(top, *std::max_element(e.heights.begin(), e.heights.end()));
+    const float spanX = clip.Width() * kChunkSize, spanZ = clip.Depth() * kChunkSize, span = std::max(spanX, spanZ);
+    const float cx = clip.originX * kChunkSize + spanX / 2, cz = clip.originZ * kChunkSize + spanZ / 2;
+    rgba = RenderOrtho(cx - span / 2, cz - span / 2, span, span, top, size, size, kLayer);
+    m_renderer.UnloadTile(kKey);
+    m_models.RemoveTile(kKey);
+    return rgba;
+}
 
+std::vector<uint8_t> App::RenderOrtho(float x0, float z0, float spanX, float spanZ, float top, UINT width, UINT height, int layer)
+{
+    std::vector<uint8_t> rgba;
     D3D11_TEXTURE2D_DESC d{};
-    d.Width = d.Height = size;
+    d.Width = width;
+    d.Height = height;
     d.MipLevels = d.ArraySize = 1;
     d.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
     d.SampleDesc.Count = 1;
@@ -1032,42 +1289,40 @@ std::vector<uint8_t> App::RenderAreaThumbnail(const TerrainClipboard& clip, UINT
         UINT viewports = 1;
         D3D11_VIEWPORT oldVp{};
         m_context->RSGetViewports(&viewports, &oldVp);
-
-        float top = -1e9f;
-        for (const auto& e : clip.chunks) top = std::max(top, *std::max_element(e.heights.begin(), e.heights.end()));
-        const float spanX = clip.Width() * kChunkSize, spanZ = clip.Depth() * kChunkSize, span = std::max(spanX, spanZ);
-        const float cx = clip.originX * kChunkSize + spanX / 2, cz = clip.originZ * kChunkSize + spanZ / 2;
+        const float cx = x0 + spanX / 2, cz = z0 + spanZ / 2;
         const XMFLOAT3 eye{ cx, top + 1000.0f, cz };
         const XMMATRIX viewProj = XMMatrixLookAtRH(XMLoadFloat3(&eye), XMVectorSet(cx, top, cz, 1), XMVectorSet(0, 0, -1, 0)) *
-                                  XMMatrixOrthographicRH(span, span, 1.0f, 4000.0f);
+                                  XMMatrixOrthographicRH(spanX, spanZ, 1.0f, 4000.0f);
         const float background[4] = { 0.16f, 0.17f, 0.20f, 1 };
         m_context->OMSetRenderTargets(1, rtv.GetAddressOf(), dsv.Get());
-        const D3D11_VIEWPORT vp{ 0, 0, float(size), float(size), 0, 1 };
+        const D3D11_VIEWPORT vp{ 0, 0, float(width), float(height), 0, 1 };
         m_context->RSSetViewports(1, &vp);
         m_context->ClearRenderTargetView(rtv.Get(), background);
         m_context->ClearDepthStencilView(dsv.Get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
+        // Only `layer`: ghost layers are hidden for this draw (the frame sets their styles again).
+        if (layer == 0)
+            for (const auto& l : m_ghosts.Layers()) m_renderer.SetLayerStyle(l.id, l.tint, false);
         DrawOptions options = m_drawOptions;
-        options.solo = kLayer;
+        options.solo = layer;
         options.wireframe = false;
-        options.lod = false;   // a thumbnail is seen whole, at full detail
+        options.lod = false;   // seen whole, at full detail
         m_renderer.Draw(viewProj, options);
         ModelRenderer::DrawSettings models = m_modelSettings;
-        models.layer = kLayer;
+        models.layer = layer;
         models.distance = 100000.0f;
         m_models.Draw(viewProj, eye, models);
         m_context->CopyResource(staging.Get(), color.Get());
         D3D11_MAPPED_SUBRESOURCE m{};
         if (SUCCEEDED(m_context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &m)))
         {
-            rgba.resize(size_t(size) * size * 4);
-            for (UINT y = 0; y < size; ++y) memcpy(rgba.data() + size_t(y) * size * 4, static_cast<const uint8_t*>(m.pData) + size_t(y) * m.RowPitch, size * 4);
+            rgba.resize(size_t(width) * height * 4);
+            for (UINT y = 0; y < height; ++y)
+                memcpy(rgba.data() + size_t(y) * width * 4, static_cast<const uint8_t*>(m.pData) + size_t(y) * m.RowPitch, size_t(width) * 4);
             m_context->Unmap(staging.Get(), 0);
         }
         m_context->OMSetRenderTargets(1, oldRtv.GetAddressOf(), oldDsv.Get());
         if (viewports) m_context->RSSetViewports(1, &oldVp);
     }
-    m_renderer.UnloadTile(kKey);
-    m_models.RemoveTile(kKey);
     return rgba;
 }
 
@@ -1224,6 +1479,13 @@ void App::DrawVersions()
 {
     if (!ImGui::Begin("Versions")) { ImGui::End(); return; }
     if (!m_project) { ImGui::TextColored(kQuiet, "Open a project first."); ImGui::End(); return; }
+    DrawCompare();
+    if (ImGui::Button("Find differences with another version..."))
+    {
+        SetGroup(Group::Terrain);
+        m_catalogShowTab = kDifferencesTab;
+    }
+    ImGui::SetItemTooltip("Scans a whole other version of this map and lists every edited area as a card (Catalog > Differences)");
 
     // Sources: the project's client plus other clients to compare against.
     ImGui::SeparatorText("Sources");
@@ -1458,7 +1720,11 @@ bool App::UpdateObjectGizmo(const ImVec2& origin, const ImVec2& size)
     if (dragging && !m_gizmoActive)
     {
         m_gizmoStart = before;
-        m_terrain.BeginObjectEdit(m_objSel);
+        // Furniture placed on the map inside a selected building moves with it (it is not part of the WMO file).
+        m_gizmoRiders = m_carryInside ? m_terrain.DoodadsInside(m_objSel) : std::set<ObjectRef>{};
+        std::set<ObjectRef> moving = m_objSel;
+        moving.insert(m_gizmoRiders.begin(), m_gizmoRiders.end());
+        m_terrain.BeginObjectEdit(moving);
     }
     if (dragging)
     {
@@ -1472,7 +1738,8 @@ bool App::UpdateObjectGizmo(const ImVec2& origin, const ImVec2& size)
     }
     if (!dragging && m_gizmoActive)
         EndObjectEdit(std::string(m_gizmo == Gizmo::Move ? "Move " : m_gizmo == Gizmo::Rotate ? "Rotate " : "Scale ") +
-                      std::to_string(m_objSel.size()) + " object(s)");
+                      std::to_string(m_objSel.size()) + " object(s)" +
+                      (m_gizmoRiders.empty() ? "" : " with " + std::to_string(m_gizmoRiders.size()) + " inside"));
     m_gizmoActive = dragging;
     return dragging || ImGuizmo::IsOver();
 }
@@ -1637,19 +1904,34 @@ void App::UpdatePlacement()
     options.heights = m_pasteHeights;
     options.textures = m_pasteTextures;
     options.holes = m_pasteHoles;
+    options.water = m_pasteWater;
     options.objects = m_pasteObjects;
     options.blend = m_pin && m_blend;   // the floating ghost stays cheap; pinning shows the full blend
+    if (m_comparing && ImGui::GetTime() - m_compareCycledAt < kCompareSettle) options.blend = false;   // flicking through versions
+    // A compare clip is known by what it was built from, so its plans can be kept and found again.
+    const bool compareClip = m_comparing && m_clipVersion == m_compareClipVersion;
+    const size_t clipId = compareClip ? std::hash<std::string>{}(m_compareClipTag) : size_t(m_clipVersion);
     options.widthYards = m_blendAuto ? 0.0f : m_blendWidth;
     PasteSlopeAt(gx, gz, options);
 
-    char key[220];
-    snprintf(key, sizeof key, "%d %d %.2f %.4f %.4f %d %d %d %d %d %.1f %d %zu", gx, gz, offset, options.slopeX, options.slopeZ, m_clipVersion,
-             int(m_pasteHeights), int(m_pasteTextures) | int(m_pasteHoles) << 1 | int(m_pasteObjects) << 2, int(m_pin.has_value()), int(options.blend), options.widthYards,
+    char key[240];
+    snprintf(key, sizeof key, "%d %d %.2f %.4f %.4f %zu %d %d %d %d %.1f %d %zu", gx, gz, offset, options.slopeX, options.slopeZ, clipId,
+             int(m_pasteHeights), int(m_pasteTextures) | int(m_pasteHoles) << 1 | int(m_pasteObjects) << 2 | int(m_pasteWater) << 3, int(m_pin.has_value()), int(options.blend), options.widthYards,
              int(m_ghostPreview), m_terrain.MissingTiles(PasteTiles()));   // replan as the footprint's tiles arrive
     if (m_planKey == key) return;
     m_planKey = key;
 
-    m_plan = m_terrain.PlanPaste(m_clipboard, gx, gz, offset, options);
+    if (auto hit = compareClip ? m_planCache.find(key) : m_planCache.end(); hit != m_planCache.end())
+        m_plan = hit->second;
+    else
+    {
+        m_plan = m_terrain.PlanPaste(m_clipboard, gx, gz, offset, options);
+        if (compareClip)
+        {
+            if (m_planCache.size() >= 24) m_planCache.clear();   // ponytail: whole-cache reset; an LRU if it thrashes
+            m_planCache[key] = m_plan;
+        }
+    }
     if (m_pin)
     {
         m_renderer.UnloadTile(-1);
@@ -1767,12 +2049,27 @@ void App::Frame(float dt)
         GuardUnsaved([this] { m_quit = true; });
     }
 
+    // A tool of another group (button or shortcut): that group's panels come forward; each group remembers its tool.
+    if (const Group g = GroupOf(m_tool); g != GroupOf(m_lastTool))
+    {
+        const std::vector<const char*> panels[4] = { { "Inspector", "Catalog" }, { "Object", "Catalog" }, { "Inspector", "Catalog" }, { "Inspector", "Problems" } };
+        for (const char* name : panels[int(g)]) ImGui::SetWindowFocus(name);
+        ImGui::SetWindowFocus("Tools");
+        if (g == Group::Terrain) m_catalogShowTab = int(Catalog::Kind::GroundTexture);
+        if (g == Group::Objects) m_catalogShowTab = int(Catalog::Kind::Doodad);
+        if (g == Group::Units) m_catalogShowTab = m_tool == Tool::Gameobjects ? kGameobjectTab : kCreatureTab;
+    }
+    m_groupTool[int(GroupOf(m_tool))] = m_tool;
+    m_lastTool = m_tool;
+
     UpdateSpawnView();   // cached: queries the database only when the camera changes tile or the project changes
     UpdateSpawnModels();
 
     // Selected chunks and the clipboard's footprint stay loaded wherever the camera goes.
     std::set<int> pinned = PasteTiles();
     for (ChunkRef r : m_selection) pinned.insert(r.tile);
+    for (const auto& [gx, gz] : m_diffPending) pinned.insert(TileKey(gx / 16, gz / 16));   // a difference about to be reviewed
+    if (m_mapJob) pinned.insert(m_mapJob->tiles.begin(), m_mapJob->tiles.end());   // a world map waiting to be rendered
     m_terrain.SetPinned(std::move(pinned));
 
     // Tiles stream in around the camera: prepared in the background, uploaded here within one shared budget per
@@ -1828,6 +2125,7 @@ void App::Frame(float dt)
             m_models.AddTile(key, tile.adt, m_mpq);
             if (streamMs() > 8.0f) break;
         }
+    RunMapJob();
 
     ImGuizmo::BeginFrame();
     HandleShortcuts();
@@ -1844,8 +2142,6 @@ void App::Frame(float dt)
     // The Object window docks with the Inspector the first time it appears and comes forward with the Objects tool.
     if (ImGuiWindow* inspector = ImGui::FindWindowByName("Inspector"); inspector && inspector->DockId)
         ImGui::SetNextWindowDockID(inspector->DockId, ImGuiCond_FirstUseEver);
-    if (m_tool == Tool::Objects && m_lastTool != Tool::Objects) ImGui::SetNextWindowFocus();
-    m_lastTool = m_tool;
     if (ImGui::Begin("Object")) DrawObjectPanel();
     ImGui::End();
     if (ImGuiWindow* log = ImGui::FindWindowByName("Log"); log && log->DockId) ImGui::SetNextWindowDockID(log->DockId, ImGuiCond_FirstUseEver);
@@ -1894,6 +2190,8 @@ void App::HandleShortcuts()
     if (ImGui::IsKeyPressed(ImGuiKey_N, false)) m_tool = Tool::Creatures;
     if (ImGui::IsKeyPressed(ImGuiKey_I, false)) m_tool = Tool::Gameobjects;
     if (ImGui::IsKeyPressed(ImGuiKey_Z, false)) m_tool = Tool::Zones;
+    for (int g = 0; g < 4; ++g)   // F1..F4: tool groups
+        if (ImGui::IsKeyPressed(ImGuiKey(ImGuiKey_F1 + g), false)) SetGroup(Group(g));
     const bool pathMode = m_path && m_tool == Tool::Creatures;
     if (SpawnTool() && ImGui::IsKeyPressed(ImGuiKey_Delete, false)) pathMode ? DeletePathPoint() : DeleteSpawns();
     if (pathMode && (ImGui::IsKeyPressed(ImGuiKey_Enter, false) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false))) SavePathEdit();
@@ -1931,6 +2229,20 @@ void App::HandleShortcuts()
     else if (m_tool != Tool::Objects && ImGui::IsKeyPressed(ImGuiKey_R, false)) RotateClipboard(ImGui::GetIO().KeyShift ? 3 : 1);
     if (ImGui::IsKeyPressed(ImGuiKey_F, false)) FocusTile();
     if (ImGui::IsKeyPressed(ImGuiKey_P, false) && !m_clipboard.Empty()) { m_tool = Tool::Copy; m_placing = !m_placing; m_pin.reset(); }
+    // Compare: [ and ] start it on the selection and cycle the versions; Enter pastes the shown one and ends it.
+    if (ImGui::IsKeyPressed(ImGuiKey_LeftBracket, false) || ImGui::IsKeyPressed(ImGuiKey_RightBracket, false))
+    {
+        const int step = ImGui::IsKeyPressed(ImGuiKey_LeftBracket, false) ? -1 : 1;
+        if (m_comparing) CycleCompare(step);
+        else
+        {
+            StartCompare();
+            if (step < 0) CycleCompare(-1);
+        }
+    }
+    if (m_comparing && m_tool == Tool::Copy && m_pin && (ImGui::IsKeyPressed(ImGuiKey_Enter, false) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false)))
+        CommitCompare();
+    if (m_comparing && !m_diffActive.empty() && ImGui::IsKeyPressed(ImGuiKey_Delete, false)) RejectDifference();
     if (m_tool == Tool::Copy && m_pin)
     {
         if (ImGui::IsKeyPressed(ImGuiKey_Enter, false) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false)) CommitPlacement();
@@ -1942,11 +2254,13 @@ void App::HandleShortcuts()
     if (ImGui::IsKeyPressed(ImGuiKey_Escape, false) && !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId))
     {
         if (m_armed) m_armed.reset();                 // stop placing a catalog model
+        else if (m_comparing) StopCompare();          // the map comes back as it is
+        else if (!m_diffPending.empty()) { m_diffPending.clear(); m_diffActive.clear(); }   // a review still on its way
         else if (m_pin) CancelPin();                  // first Esc: unpin, terrain goes back
         else if (m_placing) m_placing = false;        // second: stop placing
         else if (m_tool == Tool::Objects && !m_objSel.empty()) m_objSel.clear();
         else if (pathMode) CancelPathEdit();          // leave path editing, nothing saved
-        else if (SpawnTool() && m_spawnArmed) m_spawnArmed.reset();
+        else if (m_spawnArmed) m_spawnArmed.reset();
         else if (SpawnTool() && !m_spawnSel.empty()) m_spawnSel.clear();
         else m_selection.clear();                     // then: clear the selection
     }
@@ -2011,20 +2325,29 @@ void App::DrawToolbar()
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, { 10, 5 });
     if (ImGui::BeginViewportSideBar("##Toolbar", ImGui::GetMainViewport(), ImGuiDir_Up, height, flags))
     {
-        struct Mode { const char* name; const char* tip; bool ready; };
-        const Mode modes[] = { { "World", "Terrain, textures, holes, water, objects", true },
-                               { "Populate", "Creatures, gameobjects, paths, zones (M3)", false },
-                               { "Atmosphere", "Lights, fog, weather, minimaps (M2)", false },
-                               { "Logic", "AI, quests, dialogue, conditions (M3)", false },
-                               { "Data", "Spells, items, loot, races and classes (M3)", false } };
-        for (const Mode& m : modes)
+        // Tool groups: each has its own tools and brings its panels forward.
+        const char* tips[] = { "Sculpt, paint, holes, copy and paste", "Doodads and WMOs: place from the Catalog, move, turn, scale",
+                               "Creatures, gameobjects and their paths", "Zones and areas, buildings, the world map" };
+        for (int g = 0; g < 4; ++g)
         {
-            ImGui::BeginDisabled(!m.ready);
-            if (m.ready) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.22f, 0.42f, 0.70f, 1));
+            const bool on = int(GroupOf(m_tool)) == g;
+            if (on) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.22f, 0.42f, 0.70f, 1));
+            if (ImGui::Button((std::string(kGroupNames[g]) + "  F" + std::to_string(g + 1)).c_str())) SetGroup(Group(g));
+            if (on) ImGui::PopStyleColor();
+            ImGui::SetItemTooltip("%s", tips[g]);
+            ImGui::SameLine();
+        }
+        ImGui::TextColored(kQuiet, "|");
+        ImGui::SameLine();
+        struct Mode { const char* name; const char* tip; };
+        const Mode later[] = { { "Atmosphere", "Lights, fog, weather, minimaps" }, { "Logic", "AI, quests, dialogue, conditions" },
+                               { "Data", "Spells, items, loot, races and classes" } };
+        for (const Mode& m : later)
+        {
+            ImGui::BeginDisabled();
             ImGui::Button(m.name);
-            if (m.ready) ImGui::PopStyleColor();
             ImGui::EndDisabled();
-            ImGui::SetItemTooltip("%s%s", m.tip, m.ready ? "" : " - not built yet");
+            ImGui::SetItemTooltip("%s - not built yet", m.tip);
             ImGui::SameLine();
         }
 
@@ -2073,6 +2396,15 @@ void App::DrawStatusBar()
             {
                 ImGui::SameLine(0, 24);
                 ImGui::TextColored(kAccent, "%zu chunk(s) selected", m_selection.size());
+            }
+            if (const Differences::Progress p = m_diffs.GetProgress(); p.running && p.total)
+            {
+                ImGui::SameLine(0, 24);
+                ImGui::TextColored(kQuiet, "Differences vs %s", m_diffs.OtherLabel().c_str());
+                ImGui::SameLine();
+                char overlay[48];
+                snprintf(overlay, sizeof overlay, "%zu / %zu tiles", p.done, p.total);
+                ImGui::ProgressBar(float(p.done) / float(p.total), { 160, ImGui::GetTextLineHeight() }, overlay);
             }
             if (m_hover)
                 if (const AdtChunk* c = m_terrain.Chunk(m_hover->chunk))
@@ -2208,6 +2540,8 @@ void App::BuildOverlay(std::vector<LineVertex>& lines) const
             for (const auto& e : edges) { lines.push_back({ c[e[0]], color }); lines.push_back({ c[e[1]], color }); }
         };
         for (const ObjectRef& r : m_objSel) box(r, { 1, 0.75f, 0.2f, 1 });
+        if (m_carryInside)   // what moves along with a selected building
+            for (const ObjectRef& r : m_gizmoActive ? m_gizmoRiders : m_terrain.DoodadsInside(m_objSel)) box(r, { 1, 0.75f, 0.2f, 0.35f });
         if (m_objHover && !m_objSel.count(*m_objHover)) box(*m_objHover, { 1, 1, 1, 0.6f });
         return;
     }
@@ -2280,6 +2614,12 @@ void App::DrawViewport(float dt)
 
     // Camera: right drag looks, WASD/QE move while the viewport has the mouse or focus.
     if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) m_looking = true;
+    // A right click that did not turn the camera stops placing (like Esc).
+    if (m_looking && ImGui::IsMouseReleased(ImGuiMouseButton_Right) && io.MouseDragMaxDistanceSqr[ImGuiMouseButton_Right] < 16)
+    {
+        if (m_armed) { m_armed.reset(); Log("Stopped placing."); }
+        else if (m_spawnArmed && SpawnTool()) { m_spawnArmed.reset(); Log("Stopped placing."); }
+    }
     if (!ImGui::IsMouseDown(ImGuiMouseButton_Right)) m_looking = false;
     if (m_looking)
     {
@@ -2335,7 +2675,7 @@ void App::DrawViewport(float dt)
                     m_hover = TerrainHit{ hit->pos, *ref };
         }
         m_objHover.reset();
-        if (m_tool == Tool::Objects && !gizmoHot)
+        if ((m_tool == Tool::Objects && !gizmoHot) || (m_tool == Tool::Zones && io.KeyShift))
         {
             const float ground = m_hover ? XMVectorGetX(XMVector3Length(XMVectorSubtract(XMLoadFloat3(&m_hover->pos), p0))) : 6000.0f;
             if (const auto hit = m_models.Pick(p0, dir, ground, m_modelSettings)) m_objHover = ObjectRef{ hit->wmo, hit->uid };
@@ -2466,7 +2806,7 @@ void App::DrawViewport(float dt)
         const bool leftHeld = ImGui::IsItemActive() && ImGui::IsMouseDown(ImGuiMouseButton_Left);
         if (leftHeld && std::fabs(io.MousePos.x - m_boxStart[0]) + std::fabs(io.MousePos.y - m_boxStart[1]) > 5) m_boxing = true;
 
-        if (m_tool == Tool::Copy && m_placing && !m_clipboard.Empty() && !m_boxing && ImGui::IsItemDeactivated() &&
+        if (m_tool == Tool::Copy && m_placing && !m_comparing && !m_clipboard.Empty() && !m_boxing && ImGui::IsItemDeactivated() &&
             ImGui::IsMouseReleased(ImGuiMouseButton_Left))
         {
             if (m_hover) m_pin = m_terrain.GridOf(m_hover->chunk);   // pin (or move the pin) here
@@ -2536,6 +2876,8 @@ void App::DrawViewport(float dt)
         }
     }
 
+    UpdateDifferences();
+    UpdateCompare();
     UpdatePlacement();
 
     // Render the scene into the viewport texture.
@@ -2610,6 +2952,11 @@ void App::DrawViewport(float dt)
                              : "Placing: click to pin, Esc to stop");
         dl->AddRectFilled({ pad.x - 6, pad.y - 4 }, { pad.x + ImGui::CalcTextSize(caption).x + 6, pad.y + ImGui::GetTextLineHeight() + 4 },
                           IM_COL32(0, 0, 0, 120), 4);
+        if (std::string text = caption; text.find("World > ") != std::string::npos)   // the tool's group leads the path
+        {
+            text.replace(text.find("World > "), 8, std::string(kGroupNames[int(GroupOf(m_tool))]) + " > ");
+            snprintf(caption, sizeof caption, "%s", text.c_str());
+        }
         dl->AddText(pad, IM_COL32(235, 238, 242, 255), caption);
         if (const Ghosts::Layer* solo = m_soloLayer ? m_ghosts.Find(m_soloLayer) : nullptr)
         {
@@ -2618,6 +2965,25 @@ void App::DrawViewport(float dt)
             dl->AddRectFilled({ at.x - 6, at.y - 4 }, { at.x + ImGui::CalcTextSize(line.c_str()).x + 6, at.y + ImGui::GetTextLineHeight() + 4 },
                               IM_COL32(150, 70, 0, 200), 4);
             dl->AddText(at, IM_COL32(255, 240, 220, 255), line.c_str());
+        }
+        if (m_comparing && m_compareAt < m_compare.size())
+        {
+            const CompareEntry& e = m_compare[m_compareAt];
+            char line[400];
+            if (!m_compareAt)
+                snprintf(line, sizeof line, "COMPARE %zu/%zu: %s   [ ] cycle   Esc stop", m_compareAt, m_compare.size() - 1, e.label.c_str());
+            else if (!e.diff.cells)
+                snprintf(line, sizeof line, "COMPARE %zu/%zu: %s   %s   [ ] cycle   Esc stop", m_compareAt, m_compare.size() - 1, e.label.c_str(),
+                         e.ready ? "does not cover the selection" : "loading...");
+            else
+                snprintf(line, sizeof line, "COMPARE %zu/%zu: %s   %zu/%zu chunks differ   height %.1f/%.1f yd   edge %.1f yd   water %zu   objects +%zu -%zu%s   [ ] cycle   Enter paste   Esc stop",
+                         m_compareAt, m_compare.size() - 1, e.label.c_str(), e.diff.changed, e.diff.cells, e.diff.meanHeight, e.diff.maxHeight,
+                         e.diff.maxEdge, e.diff.water, e.diff.newDoodads.size() + e.diff.newWmos.size(), e.diff.goneDoodads + e.diff.goneWmos,
+                         e.assetsMissing ? ("   " + std::to_string(e.assetsMissing) + " asset(s) missing").c_str() : "");
+            const ImVec2 at{ pad.x, pad.y + 2 * (ImGui::GetTextLineHeight() + 10) };
+            dl->AddRectFilled({ at.x - 6, at.y - 4 }, { at.x + ImGui::CalcTextSize(line).x + 6, at.y + ImGui::GetTextLineHeight() + 4 },
+                              IM_COL32(20, 70, 140, 210), 4);
+            dl->AddText(at, IM_COL32(230, 240, 255, 255), line);
         }
     }
     else
@@ -2634,23 +3000,62 @@ void App::DrawViewport(float dt)
 
 // ---------------------------------------------------------------------------------------------- side panels
 
+void App::BeginSections(const std::string& id)
+{
+    m_sectionTab = false;
+    m_sectionBar = ImGui::BeginTabBar(id.c_str(), ImGuiTabBarFlags_FittingPolicyShrink);
+}
+
+bool App::Section(const char* label, bool select)
+{
+    if (m_sectionTab) ImGui::EndTabItem();
+    m_sectionTab = m_sectionBar && ImGui::BeginTabItem(label, nullptr, select ? ImGuiTabItemFlags_SetSelected : 0);
+    return m_sectionTab;
+}
+
+void App::EndSections()
+{
+    if (m_sectionTab) ImGui::EndTabItem();
+    if (m_sectionBar) ImGui::EndTabBar();
+    m_sectionBar = m_sectionTab = false;
+}
+
 void App::DrawToolsPanel()
 {
     if (!ImGui::Begin("Tools")) { ImGui::End(); return; }
     const float w = ImGui::GetContentRegionAvail().x;
 
-    ImGui::SeparatorText("Tool");
-    Segmented("tool", m_tool, { { Tool::Select, "Select V" }, { Tool::Sculpt, "Sculpt B" }, { Tool::Paint, "Paint T" }, { Tool::Copy, "Copy C" },
-                                { Tool::Holes, "Holes H" }, { Tool::Objects, "Objects O" }, { Tool::Creatures, "Creatures N" },
-                                { Tool::Gameobjects, "Gameobjects I" }, { Tool::Zones, "Zones Z" } }, w);
+    ImGui::SeparatorText(kGroupNames[int(GroupOf(m_tool))]);
+    switch (GroupOf(m_tool))
+    {
+    case Group::Terrain:
+        Segmented("tool", m_tool, { { Tool::Select, "Select V" }, { Tool::Sculpt, "Sculpt B" }, { Tool::Paint, "Paint T" }, { Tool::Holes, "Holes H" },
+                                    { Tool::Copy, "Copy C" } }, w);
+        break;
+    case Group::Objects: Segmented("tool", m_tool, { { Tool::Objects, "Place and edit  O" } }, w); break;
+    case Group::Units: Segmented("tool", m_tool, { { Tool::Creatures, "Creatures N" }, { Tool::Gameobjects, "Gameobjects I" } }, w); break;
+    case Group::Regions: Segmented("tool", m_tool, { { Tool::Zones, "Zones Z" } }, w); break;
+    }
+    ImGui::Spacing();
+
+    // The tool's sections, one tab each; View is the last tab of every tool.
+    BeginSections("##sections" + std::to_string(int(m_tool)));
     if (m_tool == Tool::Zones) DrawZonesPanel(w);
     if (SpawnTool()) DrawSpawnsPanel(w);
-    if (m_tool == Tool::Objects)
+    if (m_tool == Tool::Objects && Section("Objects"))
     {
-        ImGui::SeparatorText("Objects");
+        if (m_armed)
+        {
+            ImGui::TextColored(kAccent, "Placing %s", FileOf(m_armed->path).c_str());
+            if (ImGui::Button("Stop placing  (Esc / right-click)", { w, 0 })) m_armed.reset();
+            ImGui::Separator();
+        }
         ImGui::TextColored(kQuiet, "Click: select   Shift: add   Ctrl: remove\nDrag empty space: box select\n"
                                    "Handles: arrows move, rings turn, cubes scale\n1 / 2 / 3: move / rotate / scale   X: world / local\n"
                                    "Ctrl while dragging a handle: snap\nG: drop to ground   Del: delete   Esc: deselect\nExact values: Object window");
+        ImGui::Checkbox("Move what stands inside buildings along", &m_carryInside);
+        ImGui::SetItemTooltip("Doodads placed on the map inside a selected WMO (chairs, tables, crates) follow its handles.\n"
+                              "Furniture that is part of the WMO file always follows.");
         ImGui::BeginDisabled(m_objSel.empty());
         if (ImGui::Button("Drop to ground  G", { (w - 8) / 2, 0 }))
             EditObjects("Drop " + std::to_string(m_objSel.size()) + " object(s) to the ground", [&](float* pos, float*, float*) {
@@ -2663,50 +3068,53 @@ void App::DrawToolsPanel()
 
     if (m_tool == Tool::Paint)
     {
-        ImGui::SeparatorText("Texture");
-        if (!m_activeTexture.empty())
+        if (Section("Texture"))
         {
-            ImGui::Image(ImTextureID(intptr_t(m_renderer.TextureFor(m_activeTexture, m_mpq))), { 64, 64 });
-            ImGui::SameLine();
-            ImGui::BeginGroup();
-            ImGui::TextUnformatted(FileOf(m_activeTexture).c_str());
-            ImGui::PushTextWrapPos(w);
-            ImGui::TextColored(kQuiet, "%s", m_activeTexture.c_str());
-            ImGui::PopTextWrapPos();
-            ImGui::EndGroup();
-        }
-        else
-            ImGui::TextColored(kQuiet, "No texture picked yet.");
-        if (ImGui::Button("Pick in the Catalog", { w, 0 })) m_catalogShowTab = int(Catalog::Kind::GroundTexture);
-        if (m_recentTextures.size() > 1)
-        {
-            ImGui::TextColored(kQuiet, "Recent");
-            for (size_t i = 0; i < m_recentTextures.size(); ++i)
+            if (!m_activeTexture.empty())
             {
-                ImGui::PushID(int(i));
-                if (ImGui::ImageButton("##recent", ImTextureID(intptr_t(m_renderer.TextureFor(m_recentTextures[i], m_mpq))), { 32, 32 }))
-                    PickTexture(m_recentTextures[i]);
-                ImGui::SetItemTooltip("%s", m_recentTextures[i].c_str());
-                ImGui::PopID();
-                if ((i + 1) % 6 != 0 && i + 1 < m_recentTextures.size()) ImGui::SameLine();
+                ImGui::Image(ImTextureID(intptr_t(m_renderer.TextureFor(m_activeTexture, m_mpq))), { 64, 64 });
+                ImGui::SameLine();
+                ImGui::BeginGroup();
+                ImGui::TextUnformatted(FileOf(m_activeTexture).c_str());
+                ImGui::PushTextWrapPos(w);
+                ImGui::TextColored(kQuiet, "%s", m_activeTexture.c_str());
+                ImGui::PopTextWrapPos();
+                ImGui::EndGroup();
+            }
+            else
+                ImGui::TextColored(kQuiet, "No texture picked yet.");
+            if (ImGui::Button("Pick in the Catalog", { w, 0 })) m_catalogShowTab = int(Catalog::Kind::GroundTexture);
+            if (m_recentTextures.size() > 1)
+            {
+                ImGui::TextColored(kQuiet, "Recent");
+                for (size_t i = 0; i < m_recentTextures.size(); ++i)
+                {
+                    ImGui::PushID(int(i));
+                    if (ImGui::ImageButton("##recent", ImTextureID(intptr_t(m_renderer.TextureFor(m_recentTextures[i], m_mpq))), { 32, 32 }))
+                        PickTexture(m_recentTextures[i]);
+                    ImGui::SetItemTooltip("%s", m_recentTextures[i].c_str());
+                    ImGui::PopID();
+                    if ((i + 1) % 6 != 0 && i + 1 < m_recentTextures.size()) ImGui::SameLine();
+                }
             }
         }
-        ImGui::SeparatorText("Brush");
-        ImGui::SetNextItemWidth(w - 90);
-        ImGui::SliderFloat("Radius", &m_paint.radius, 1.0f, 150.0f, "%.0f yd", ImGuiSliderFlags_Logarithmic);
-        ImGui::SetNextItemWidth(w - 90);
-        ImGui::SliderFloat("Pressure", &m_paint.pressure, 0.02f, 1.0f, "%.2f");
-        ImGui::SetItemTooltip("How fast the texture builds up while you hold the button");
-        ImGui::SetNextItemWidth(w - 90);
-        ImGui::SliderFloat("Hardness", &m_paint.hardness, 0.0f, 0.95f, "%.2f");
-        ImGui::SetItemTooltip("0: soft edge over the whole radius. Near 1: hard edge (the inner ring).");
-        ImGui::TextColored(kQuiet, "Drag: paint   Ctrl+drag: erase\nAlt+click: pick the texture under the cursor\nCtrl+wheel: radius\n"
-                                   "A chunk holds 4 textures; a 5th replaces\nthe one it shows least of.");
+        if (Section("Brush"))
+        {
+            ImGui::SetNextItemWidth(w - 90);
+            ImGui::SliderFloat("Radius", &m_paint.radius, 1.0f, 150.0f, "%.0f yd", ImGuiSliderFlags_Logarithmic);
+            ImGui::SetNextItemWidth(w - 90);
+            ImGui::SliderFloat("Pressure", &m_paint.pressure, 0.02f, 1.0f, "%.2f");
+            ImGui::SetItemTooltip("How fast the texture builds up while you hold the button");
+            ImGui::SetNextItemWidth(w - 90);
+            ImGui::SliderFloat("Hardness", &m_paint.hardness, 0.0f, 0.95f, "%.2f");
+            ImGui::SetItemTooltip("0: soft edge over the whole radius. Near 1: hard edge (the inner ring).");
+            ImGui::TextColored(kQuiet, "Drag: paint   Ctrl+drag: erase\nAlt+click: pick the texture under the cursor\nCtrl+wheel: radius\n"
+                                       "A chunk holds 4 textures; a 5th replaces\nthe one it shows least of.");
+        }
     }
 
-    if (m_tool == Tool::Sculpt)
+    if (m_tool == Tool::Sculpt && Section("Sculpt"))
     {
-        ImGui::SeparatorText("Sculpt");
         Segmented("mode", m_brush.mode, { { Brush::Mode::Raise, "Raise" }, { Brush::Mode::Lower, "Lower" },
                                           { Brush::Mode::Flatten, "Flatten" }, { Brush::Mode::Smooth, "Smooth" } }, w);
         ImGui::SetNextItemWidth(w - 90);
@@ -2715,34 +3123,33 @@ void App::DrawToolsPanel()
         ImGui::SliderFloat("Strength", &m_brush.strength, 1.0f, 100.0f, "%.0f");
         ImGui::TextColored(kQuiet, "Left drag: sculpt\nCtrl+wheel: radius\n1-4: switch mode");
     }
-    else if (m_tool == Tool::Holes)
+    if (m_tool == Tool::Holes && Section("Holes"))
     {
-        ImGui::SeparatorText("Holes");
         Segmented("holemode", m_holeCut, { { true, "Cut" }, { false, "Fill" } }, w);
         ImGui::SetNextItemWidth(w - 90);
         ImGui::SliderFloat("Radius##holes", &m_holeRadius, 1.0f, 60.0f, "%.0f yd", ImGuiSliderFlags_Logarithmic);
         ImGui::TextColored(kQuiet, "Left drag: cut (or fill)\nCtrl+drag: the opposite\nCtrl+wheel: radius");
         ImGui::TextColored(kQuiet, "A hole cell is 1/16 of a chunk\n(8.3 x 8.3 yd), the finest size the\n3.3.5 client and AzerothCore support.");
     }
-    else if (m_tool == Tool::Zones) {}   // its panel is drawn above
-    else
-    {
-        ImGui::SeparatorText("Selection");
-        ImGui::Text("%zu chunk(s) selected", m_selection.size());
-        ImGui::BeginDisabled(m_selection.empty());
-        if (ImGui::Button("Clear", { (w - 8) / 2, 0 })) m_selection.clear();
-        ImGui::EndDisabled();
-        ImGui::SameLine();
-        ImGui::BeginDisabled(m_terrain.Tiles().empty());
-        if (ImGui::Button("Select loaded", { (w - 8) / 2, 0 }))
-            for (const auto& [key, tile] : m_terrain.Tiles())
-                for (size_t ci = 0; ci < tile.adt.chunks.size(); ++ci) m_selection.insert({ key, int(ci) });
-        ImGui::EndDisabled();
-        ImGui::TextColored(kQuiet, "Click: select   Drag: box select\nShift: add   Ctrl: remove   Esc: clear");
 
-        if (m_tool == Tool::Copy)
+    if (m_tool == Tool::Select || m_tool == Tool::Copy)
+    {
+        if (Section(("Selection (" + std::to_string(m_selection.size()) + ")###selection").c_str()))
         {
-            ImGui::SeparatorText("Clipboard");
+            ImGui::Text("%zu chunk(s) selected", m_selection.size());
+            ImGui::BeginDisabled(m_selection.empty());
+            if (ImGui::Button("Clear", { (w - 8) / 2, 0 })) m_selection.clear();
+            ImGui::EndDisabled();
+            ImGui::SameLine();
+            ImGui::BeginDisabled(m_terrain.Tiles().empty());
+            if (ImGui::Button("Select loaded", { (w - 8) / 2, 0 }))
+                for (const auto& [key, tile] : m_terrain.Tiles())
+                    for (size_t ci = 0; ci < tile.adt.chunks.size(); ++ci) m_selection.insert({ key, int(ci) });
+            ImGui::EndDisabled();
+            ImGui::TextColored(kQuiet, "Click: select   Drag: box select\nShift: add   Ctrl: remove   Esc: clear");
+        }
+        if (m_tool == Tool::Copy && Section("Clipboard"))
+        {
             ImGui::BeginDisabled(m_selection.empty());
             if (ImGui::Button("Copy  Ctrl+C", { (w - 8) / 2, 0 })) CopySelection();
             ImGui::EndDisabled();
@@ -2756,85 +3163,92 @@ void App::DrawToolsPanel()
             ImGui::SetItemTooltip("Keep the selected area (terrain, textures, holes, objects) in the catalog's Blueprints tab");
             if (m_clipboard.Empty()) ImGui::TextColored(kQuiet, "Empty. Select chunks and copy them.");
             else ImGui::TextColored(kAccent, "%zu chunk(s)%s", m_clipboard.chunks.size(), m_pin ? "  pinned" : m_placing ? "  following the cursor" : "");
-
-            if (m_placing && !m_clipboard.Empty())
-            {
-                ImGui::SeparatorText("Placement");
-                ImGui::Checkbox("Heights", &m_pasteHeights);
-                ImGui::SameLine();
-                ImGui::Checkbox("Textures", &m_pasteTextures);
-                ImGui::SetItemTooltip("Texture layers, alpha maps and ground effects");
-                ImGui::SameLine();
-                ImGui::Checkbox("Holes", &m_pasteHoles);
-                ImGui::SameLine();
-                ImGui::Checkbox("Objects", &m_pasteObjects);
-                ImGui::SetItemTooltip("Doodads and WMOs standing on the copied chunks (%zu + %zu)", m_clipboard.doodads.size(), m_clipboard.wmos.size());
-                ImGui::SameLine();
-                ImGui::Checkbox("Ghost", &m_ghostPreview);
-                ImGui::SetItemTooltip("See-through ghost while the copy follows the cursor");
-
-                ImGui::BeginDisabled(!m_pasteHeights);
-                Segmented("height", m_pasteHeightMode, { { PasteHeight::FollowGround, "Ground" }, { PasteHeight::FollowSlope, "Slope" },
-                                                          { PasteHeight::LowestPoint, "Lowest" }, { PasteHeight::Absolute, "Absolute" } }, w);
-                ImGui::SetItemTooltip("Ground: the copy's average height matches the ground under it (default).\n"
-                                      "Slope: also tilted to the incline under it; the copy keeps all its detail.\n"
-                                      "Lowest: its lowest point sits on the lowest ground under it.\nAbsolute: original heights.");
-                ImGui::SetNextItemWidth(w - 150);
-                ImGui::DragFloat("Fine offset", &m_pasteOffset, 0.05f, -50.0f, 50.0f, "%+.1f yd", ImGuiSliderFlags_AlwaysClamp);
-                ImGui::SameLine();
-                if (ImGui::SmallButton("Reset")) m_pasteOffset = 0;
-                ImGui::EndDisabled();
-
-                if (ImGui::Button("Rotate left", { (w - 8) / 2, 0 })) RotateClipboard(3);
-                ImGui::SameLine();
-                if (ImGui::Button("Rotate right", { (w - 8) / 2, 0 })) RotateClipboard(1);
-
-                ImGui::Checkbox("Blend edges", &m_blend);
-                ImGui::SetItemTooltip("Bend the ground around the copy to meet its edge with matching slope;\n"
-                                      "the copy itself is kept exactly. Textures fade over ~17 yd inside the edge.\nShown once the copy is pinned.");
-                ImGui::BeginDisabled(!m_blend);
-                ImGui::SameLine();
-                ImGui::Checkbox("Auto width", &m_blendAuto);
-                ImGui::BeginDisabled(m_blendAuto);
-                ImGui::SetNextItemWidth(w - 110);
-                float shownWidth = m_blendAuto && m_pin && m_plan.widthYards > 0 ? m_plan.widthYards : m_blendWidth;
-                if (ImGui::SliderFloat("Blend width", &shownWidth, 8.0f, 120.0f, "%.0f yd") && !m_blendAuto) m_blendWidth = shownWidth;
-                ImGui::EndDisabled();
-                ImGui::EndDisabled();
-
-                ImGui::BeginDisabled(!m_pin);
-                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.18f, 0.48f, 0.28f, 1));
-                if (ImGui::Button("Commit  Enter", { (w - 8) / 2, 0 })) CommitPlacement();
-                ImGui::PopStyleColor();
-                ImGui::SameLine();
-                if (ImGui::Button("Cancel  Esc", { (w - 8) / 2, 0 })) CancelPin();
-                ImGui::EndDisabled();
-                ImGui::TextColored(kQuiet, m_pin ? "Pinned: the terrain shows the result.\nR / Shift+R rotate   arrows move\nAlt+wheel fine height\nClick elsewhere to move the pin."
-                                                 : "Click to pin the copy here.\nR / Shift+R rotate   Alt+wheel height");
-            }
             ImGui::Separator();
             ImGui::BeginDisabled(m_selection.empty());
             if (ImGui::Button("Rotate selection in place", { w, 0 })) RotateSelectionInPlace();
             ImGui::EndDisabled();
         }
+        // Placement options come forward when placing starts.
+        const bool placing = m_tool == Tool::Copy && m_placing && !m_clipboard.Empty();
+        if (placing && Section("Placement", !m_placementShown))
+        {
+            ImGui::Checkbox("Heights", &m_pasteHeights);
+            ImGui::SameLine();
+            ImGui::Checkbox("Textures", &m_pasteTextures);
+            ImGui::SetItemTooltip("Texture layers, alpha maps and ground effects");
+            ImGui::SameLine();
+            ImGui::Checkbox("Holes", &m_pasteHoles);
+            ImGui::SameLine();
+            ImGui::Checkbox("Water", &m_pasteWater);
+            ImGui::SetItemTooltip("Terrain liquid (MH2O): the copy's water replaces the pasted chunks' own; a dry copy removes it");
+            ImGui::SameLine();
+            ImGui::Checkbox("Objects", &m_pasteObjects);
+            ImGui::SetItemTooltip("Doodads and WMOs standing on the copied chunks (%zu + %zu)", m_clipboard.doodads.size(), m_clipboard.wmos.size());
+            ImGui::SameLine();
+            ImGui::Checkbox("Ghost", &m_ghostPreview);
+            ImGui::SetItemTooltip("See-through ghost while the copy follows the cursor");
+
+            ImGui::BeginDisabled(!m_pasteHeights);
+            Segmented("height", m_pasteHeightMode, { { PasteHeight::FollowGround, "Ground" }, { PasteHeight::FollowSlope, "Slope" },
+                                                      { PasteHeight::LowestPoint, "Lowest" }, { PasteHeight::Absolute, "Absolute" } }, w);
+            ImGui::SetItemTooltip("Ground: the copy's average height matches the ground under it (default).\n"
+                                  "Slope: also tilted to the incline under it; the copy keeps all its detail.\n"
+                                  "Lowest: its lowest point sits on the lowest ground under it.\nAbsolute: original heights.");
+            ImGui::SetNextItemWidth(w - 150);
+            ImGui::DragFloat("Fine offset", &m_pasteOffset, 0.05f, -50.0f, 50.0f, "%+.1f yd", ImGuiSliderFlags_AlwaysClamp);
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Reset")) m_pasteOffset = 0;
+            ImGui::EndDisabled();
+
+            if (ImGui::Button("Rotate left", { (w - 8) / 2, 0 })) RotateClipboard(3);
+            ImGui::SameLine();
+            if (ImGui::Button("Rotate right", { (w - 8) / 2, 0 })) RotateClipboard(1);
+
+            ImGui::Checkbox("Blend edges", &m_blend);
+            ImGui::SetItemTooltip("Bend the ground around the copy to meet its edge with matching slope;\n"
+                                  "the copy itself is kept exactly. Textures fade over ~17 yd inside the edge.\nShown once the copy is pinned.");
+            ImGui::BeginDisabled(!m_blend);
+            ImGui::SameLine();
+            ImGui::Checkbox("Auto width", &m_blendAuto);
+            ImGui::BeginDisabled(m_blendAuto);
+            ImGui::SetNextItemWidth(w - 110);
+            float shownWidth = m_blendAuto && m_pin && m_plan.widthYards > 0 ? m_plan.widthYards : m_blendWidth;
+            if (ImGui::SliderFloat("Blend width", &shownWidth, 8.0f, 120.0f, "%.0f yd") && !m_blendAuto) m_blendWidth = shownWidth;
+            ImGui::EndDisabled();
+            ImGui::EndDisabled();
+
+            ImGui::BeginDisabled(!m_pin);
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.18f, 0.48f, 0.28f, 1));
+            if (ImGui::Button("Commit  Enter", { (w - 8) / 2, 0 })) CommitPlacement();
+            ImGui::PopStyleColor();
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel  Esc", { (w - 8) / 2, 0 })) CancelPin();
+            ImGui::EndDisabled();
+            ImGui::TextColored(kQuiet, m_pin ? "Pinned: the terrain shows the result.\nR / Shift+R rotate   arrows move\nAlt+wheel fine height\nClick elsewhere to move the pin."
+                                             : "Click to pin the copy here.\nR / Shift+R rotate   Alt+wheel height");
+        }
+        m_placementShown = placing;
     }
 
-    ImGui::SeparatorText("View");
-    ImGui::Checkbox("Wireframe", &m_drawOptions.wireframe);
-    ImGui::Checkbox("Object boxes", &m_drawOptions.showObjects);
-    ImGui::SetItemTooltip("Yellow/cyan boxes at each doodad and WMO placement");
-    ImGui::Checkbox("Doodads", &m_modelSettings.doodads);
-    ImGui::SameLine();
-    ImGui::Checkbox("WMOs", &m_modelSettings.wmos);
-    ImGui::SetNextItemWidth(w - 90);
-    ImGui::SliderFloat("Object dist", &m_modelSettings.distance, 100.0f, 3000.0f, "%.0f yd", ImGuiSliderFlags_Logarithmic);
-    ImGui::TextColored(kQuiet, "%zu models, %zu objects, %zu drawn", m_models.ModelCount(), m_models.InstanceCount(), m_models.DrawnLastFrame());
-    ImGui::SetNextItemWidth(w - 90);
-    ImGui::SliderFloat("Cam speed", &m_camera.speed, 10.0f, 1000.0f, "%.0f yd/s", ImGuiSliderFlags_Logarithmic);
-    ImGui::SetNextItemWidth(w - 90);
-    ImGui::SliderInt("Load radius", &m_loadRadius, 1, 8, "%d tiles");
-    ImGui::SetItemTooltip("Tiles loaded around the camera in each direction (%d x %d).", m_loadRadius * 2 + 1, m_loadRadius * 2 + 1);
-    ImGui::TextColored(kQuiet, "Right drag: look\nWASD, Q/E: move   Shift: fast\nWheel: dolly   F: focus tile");
+    if (Section("View"))
+    {
+        ImGui::Checkbox("Wireframe", &m_drawOptions.wireframe);
+        ImGui::Checkbox("Object boxes", &m_drawOptions.showObjects);
+        ImGui::SetItemTooltip("Yellow/cyan boxes at each doodad and WMO placement");
+        ImGui::Checkbox("Doodads", &m_modelSettings.doodads);
+        ImGui::SameLine();
+        ImGui::Checkbox("WMOs", &m_modelSettings.wmos);
+        ImGui::SetNextItemWidth(w - 90);
+        ImGui::SliderFloat("Object dist", &m_modelSettings.distance, 100.0f, 3000.0f, "%.0f yd", ImGuiSliderFlags_Logarithmic);
+        ImGui::TextColored(kQuiet, "%zu models, %zu objects, %zu drawn", m_models.ModelCount(), m_models.InstanceCount(), m_models.DrawnLastFrame());
+        ImGui::SetNextItemWidth(w - 90);
+        ImGui::SliderFloat("Cam speed", &m_camera.speed, 10.0f, 1000.0f, "%.0f yd/s", ImGuiSliderFlags_Logarithmic);
+        ImGui::SetNextItemWidth(w - 90);
+        ImGui::SliderInt("Load radius", &m_loadRadius, 1, 8, "%d tiles");
+        ImGui::SetItemTooltip("Tiles loaded around the camera in each direction (%d x %d).", m_loadRadius * 2 + 1, m_loadRadius * 2 + 1);
+        ImGui::TextColored(kQuiet, "Right drag: look\nWASD, Q/E: move   Shift: fast\nWheel: dolly   F: focus tile");
+    }
+    EndSections();
     ImGui::End();
 }
 
@@ -2920,6 +3334,12 @@ void App::DrawInspector()
 {
     if (!ImGui::Begin("Inspector")) { ImGui::End(); return; }
     if (m_terrain.Tiles().empty()) { ImGui::TextColored(kQuiet, "Nothing loaded."); ImGui::End(); return; }
+    // What the current tool works on: a spawn, an object, an area. Otherwise the terrain chunk.
+    if ((SpawnTool() && InspectSpawn()) || (m_tool == Tool::Objects && InspectObject()) || (m_tool == Tool::Zones && InspectArea()))
+    {
+        ImGui::End();
+        return;
+    }
 
     // Several chunks: a summary. One chunk (selected, else hovered): its details.
     if (m_selection.size() > 1)

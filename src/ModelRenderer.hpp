@@ -70,6 +70,10 @@ public:
     /// model, which can take a while for a big WMO); null until then, or when the model cannot be loaded.
     ID3D11ShaderResourceView* Thumbnail(const std::string& name, bool wmo, const MpqChain& mpq, bool render);
     bool ThumbnailFailed(const std::string& name) const;
+    /// The same for models in looks (a creature with its skin and what it carries), cached under `key`: each part placed by
+    /// its matrix, the view framed on the first.
+    ID3D11ShaderResourceView* LookThumbnail(const std::string& key, const std::vector<std::pair<ModelLook, DirectX::XMFLOAT4X4>>& parts,
+                                            const MpqChain& mpq, bool render);
     /// Forget models and thumbnails that failed to load, so they are tried again (after a source was attached).
     void ForgetFailed()
     {
@@ -131,6 +135,11 @@ private:
     /// World distance along a unit ray to an instance's triangles, within `maxDistance`.
     std::optional<float> HitDistance(const Instance& inst, DirectX::FXMVECTOR origin, DirectX::FXMVECTOR dir, float maxDistance) const;
     GpuMesh* Mesh(const std::string& name, bool wmo, const MpqChain& mpq);
+    /// A look resolved to GPU textures, shared by every user of the same look.
+    const Look* ResolveLook(const ModelLook& look, const MpqChain& mpq);
+    struct Thumb;
+    /// Renders meshes (each with a world matrix and look) into a fresh thumbnail, framed on the first one.
+    void RenderThumb(Thumb& thumb, const std::vector<std::tuple<GpuMesh*, DirectX::XMFLOAT4X4, const Look*>>& parts);
     struct Run { GpuMesh* mesh; UINT first, count; const Look* look = nullptr; };
     /// Draws runs of instances already written to the instance buffer: opaque pass, then blended pass.
     void Submit(const std::vector<Run>& runs, DirectX::FXMMATRIX viewProj);

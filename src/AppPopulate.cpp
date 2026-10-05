@@ -325,48 +325,63 @@ void App::DrawSpawnsPanel(float w)
 {
     const bool creature = m_spawnKind == SpawnKind::Creature;
     const std::string table = Spawns().Table();
-    ImGui::SeparatorText(creature ? "Creatures" : "Gameobjects");
-    ImGui::Checkbox("Show creatures", &m_showSpawns[int(SpawnKind::Creature)]);
-    ImGui::SameLine();
-    ImGui::Checkbox("Show gameobjects", &m_showSpawns[int(SpawnKind::GameObject)]);
     if (!m_db.Connected())
     {
-        ImGui::TextColored(kWarn, "Needs the world database: File > Server setup.");
+        if (Section("Place")) ImGui::TextColored(kWarn, "Needs the world database: File > Server setup.");
         return;
     }
-    ImGui::TextColored(kQuiet, "Pick a %s, click the ground to place it.\nClick a spawn or its model: select   Drag: box select\n"
-                               "Shift: add   Ctrl: remove   Alt+click: move selection there\nDel: delete   Esc: stop / deselect",
-                       creature ? "creature" : "gameobject");
-    ImGui::SetNextItemWidth(w);
-    if (ImGui::InputTextWithHint("##template", ("Search " + table + "_template (name or entry)").c_str(), &m_spawnQuery, ImGuiInputTextFlags_EnterReturnsTrue) ||
-        (ImGui::IsItemDeactivatedAfterEdit() && !m_spawnQuery.empty()))
-    {
-        std::string error;
-        m_spawnResults = Spawns().Search(m_spawnQuery, error);
-        if (!error.empty()) Log("%s search: %s", table.c_str(), error.c_str());
-    }
-    if (ImGui::BeginListBox("##results", { w, std::min(10.0f, float(m_spawnResults.size()) + 0.5f) * ImGui::GetTextLineHeightWithSpacing() }))
-    {
-        for (const auto& t : m_spawnResults)
-        {
-            char line[300];
-            snprintf(line, sizeof line, "%s  %s  #%u", t.name.c_str(), t.detail.c_str(), t.entry);
-            if (ImGui::Selectable(line, m_spawnArmed && m_spawnArmed->entry == t.entry)) m_spawnArmed = t;
-        }
-        ImGui::EndListBox();
-    }
-    if (m_spawnArmed)
-    {
-        ImGui::Text("Placing: %s", m_spawnArmed->name.c_str());
-        if (!m_looks.SpawnLook(ArmedSpawn()))
-            ImGui::TextColored(kWarn, "displayId %u has no model in this client (marker only).", m_spawnArmed->displayId);
-    }
-
     std::vector<const Spawn*> sel;
     for (const auto& s : m_spawnView)
         if (s.kind == m_spawnKind && m_spawnSel.count(s.guid)) sel.push_back(&s);
-    ImGui::SeparatorText(sel.size() > 1 ? (std::to_string(sel.size()) + " selected").c_str() : "Selected");
-    if (sel.empty()) ImGui::TextColored(kQuiet, "None. Click a spawn or drag a box in the viewport.");
+    // A new selection brings its tab forward.
+    const bool select = !sel.empty() && m_spawnSelShown != m_spawnSel;
+    m_spawnSelShown = m_spawnSel;
+
+    if (Section("Place"))
+    {
+        ImGui::Checkbox("Show creatures", &m_showSpawns[int(SpawnKind::Creature)]);
+        ImGui::SameLine();
+        ImGui::Checkbox("Show gameobjects", &m_showSpawns[int(SpawnKind::GameObject)]);
+        ImGui::TextColored(kQuiet, "Pick a %s (here or in the Catalog), click the ground\nto place it. Click a spawn or its model: select\n"
+                                   "Drag: box select   Shift: add   Ctrl: remove\nAlt+click: move selection there   Del: delete   Esc: stop",
+                           creature ? "creature" : "gameobject");
+        ImGui::SetNextItemWidth(w);
+        if (ImGui::InputTextWithHint("##template", ("Search " + table + "_template (name or entry)").c_str(), &m_spawnQuery, ImGuiInputTextFlags_EnterReturnsTrue) ||
+            (ImGui::IsItemDeactivatedAfterEdit() && !m_spawnQuery.empty()))
+        {
+            std::string error;
+            m_spawnResults = Spawns().Search(m_spawnQuery, error);
+            if (!error.empty()) Log("%s search: %s", table.c_str(), error.c_str());
+        }
+        if (ImGui::BeginListBox("##results", { w, std::min(10.0f, float(m_spawnResults.size()) + 0.5f) * ImGui::GetTextLineHeightWithSpacing() }))
+        {
+            for (const auto& t : m_spawnResults)
+            {
+                char line[300];
+                snprintf(line, sizeof line, "%s  %s  #%u", t.name.c_str(), t.detail.c_str(), t.entry);
+                if (ImGui::Selectable(line, m_spawnArmed && m_spawnArmed->entry == t.entry)) m_spawnArmed = t;
+            }
+            ImGui::EndListBox();
+        }
+        if (m_spawnArmed)
+        {
+            ImGui::Text("Placing: %s", m_spawnArmed->name.c_str());
+            if (!m_looks.SpawnLook(ArmedSpawn()))
+                ImGui::TextColored(kWarn, "displayId %u has no model in this client (marker only).", m_spawnArmed->displayId);
+            if (ImGui::Button("Stop placing  (Esc / right-click)", { w, 0 })) m_spawnArmed.reset();
+        }
+        ImGui::Separator();
+        for (const SpawnAdapter* spawns : { &m_creatures, &m_gameobjects })
+        {
+            size_t added, changed, deleted;
+            spawns->Counts(added, changed, deleted);
+            ImGui::TextColored(kQuiet, "%s: %zu added, %zu changed, %zu deleted.", spawns->Table(), added, changed, deleted);
+        }
+        ImGui::TextColored(kQuiet, "The game shows them after a worldserver restart.");
+    }
+
+    if (!Section(("Selected (" + std::to_string(sel.size()) + ")###selected").c_str(), select)) {}
+    else if (sel.empty()) ImGui::TextColored(kQuiet, "None. Click a spawn or drag a box in the viewport.");
     else
     {
         const Spawn& first = *sel.front();
@@ -416,12 +431,4 @@ void App::DrawSpawnsPanel(float w)
         if (ImGui::Button("Delete  Del", { (w - 8) / 2, 0 })) DeleteSpawns();
     }
     if (creature && (m_path || sel.size() == 1)) DrawPathPanel(w);
-    ImGui::Separator();
-    for (const SpawnAdapter* spawns : { &m_creatures, &m_gameobjects })
-    {
-        size_t added, changed, deleted;
-        spawns->Counts(added, changed, deleted);
-        ImGui::TextColored(kQuiet, "%s: %zu added, %zu changed, %zu deleted.", spawns->Table(), added, changed, deleted);
-    }
-    ImGui::TextColored(kQuiet, "The game shows them after a worldserver restart.");
 }

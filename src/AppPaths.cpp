@@ -302,7 +302,8 @@ void App::DrawPathLabels(ImDrawList* dl, const ImVec2& origin, const ImVec2& siz
 
 void App::DrawPathPanel(float w)
 {
-    ImGui::SeparatorText("Path");
+    if (!Section("Path", m_path && !m_pathTabShown)) { m_pathTabShown = m_path.has_value(); return; }
+    m_pathTabShown = m_path.has_value();
     if (!m_path)
     {
         const uint32_t guid = *m_spawnSel.begin();

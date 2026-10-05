@@ -234,18 +234,23 @@ const std::vector<Spawn>& SpawnAdapter::Around(uint32_t map, float minX, float m
 
 std::vector<SpawnAdapter::Template> SpawnAdapter::Search(const std::string& text, std::string& error) const
 {
+    if (!Connected()) { error = "Not connected to the world database."; return {}; }
+    const bool number = !text.empty() && std::all_of(text.begin(), text.end(), [](char c) { return c >= '0' && c <= '9'; });
+    return Templates(number ? "t.entry = " + text : "t.name LIKE " + m_db->Quote("%" + text + "%"), 60, error);
+}
+
+std::vector<SpawnAdapter::Template> SpawnAdapter::Templates(const std::string& where, size_t limit, std::string& error) const
+{
     std::vector<Template> out;
     if (!Connected()) { error = "Not connected to the world database."; return out; }
-    const bool number = !text.empty() && std::all_of(text.begin(), text.end(), [](char c) { return c >= '0' && c <= '9'; });
-    const std::string where = number ? "entry = " + text : "name LIKE " + m_db->Quote("%" + text + "%");
+    const std::string tail = " ORDER BY t.name" + (limit ? " LIMIT " + std::to_string(limit) : std::string());
     if (m_kind == SpawnKind::Creature)
     {
         if (auto rows = m_db->Query("SELECT t.entry, t.name, t.subname, t.minlevel, t.maxlevel, COALESCE(m.CreatureDisplayID, 0), COALESCE(m.DisplayScale, 1), "
-                                    "COALESCE(i1.displayid, 0), COALESCE(i1.InventoryType, 0), COALESCE(i2.displayid, 0), COALESCE(i2.InventoryType, 0) "
+                                    "COALESCE(i1.displayid, 0), COALESCE(i1.InventoryType, 0), COALESCE(i2.displayid, 0), COALESCE(i2.InventoryType, 0), t.type "
                                     "FROM creature_template t LEFT JOIN creature_template_model m ON m.CreatureID = t.entry AND m.Idx = 0 "
                                     "LEFT JOIN creature_equip_template e ON e.CreatureID = t.entry AND e.ID = 1 "
-                                    "LEFT JOIN item_template i1 ON i1.entry = e.ItemID1 LEFT JOIN item_template i2 ON i2.entry = e.ItemID2 WHERE t." + where +
-                                    " ORDER BY t.name LIMIT 60", error))
+                                    "LEFT JOIN item_template i1 ON i1.entry = e.ItemID1 LEFT JOIN item_template i2 ON i2.entry = e.ItemID2 WHERE " + where + tail, error))
             for (const auto& r : *rows)
             {
                 Template t{ uint32_t(std::stoul(r[0])), r[1], (r[2].empty() ? "" : "<" + r[2] + ">  ") + "(" + r[3] + "-" + r[4] + ")",
@@ -255,12 +260,17 @@ std::vector<SpawnAdapter::Template> SpawnAdapter::Search(const std::string& text
                     t.weapons[hand] = uint32_t(std::stoul(r[7 + hand * 2]));
                     t.weaponTypes[hand] = uint32_t(std::stoul(r[8 + hand * 2]));
                 }
+                t.category = uint32_t(std::stoul(r[11]));
                 out.push_back(std::move(t));
             }
     }
-    else if (auto rows = m_db->Query("SELECT entry, name, type, displayId, size FROM gameobject_template WHERE " + where + " ORDER BY name LIMIT 60", error))
+    else if (auto rows = m_db->Query("SELECT t.entry, t.name, t.type, t.displayId, t.size FROM gameobject_template t WHERE " + where + tail, error))
         for (const auto& r : *rows)
-            out.push_back({ uint32_t(std::stoul(r[0])), r[1], GameObjectTypeName(uint32_t(std::stoul(r[2]))), uint32_t(std::stoul(r[3])), std::stof(r[4]) });
+        {
+            Template t{ uint32_t(std::stoul(r[0])), r[1], GameObjectTypeName(uint32_t(std::stoul(r[2]))), uint32_t(std::stoul(r[3])), std::stof(r[4]) };
+            t.category = uint32_t(std::stoul(r[2]));
+            out.push_back(std::move(t));
+        }
     return out;
 }
 

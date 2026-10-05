@@ -180,8 +180,14 @@ namespace
         for (const AdtChunk& c : adt.chunks)
         {
             const size_t header = base + size_t(c.indexY * 16 + c.indexX) * 12;
-            uint32_t ofsInstances = 0, count = 0;
+            uint32_t ofsInstances = 0, count = 0, ofsAttributes = 0;
             if (header + 12 > base + size || !ReadAt(d, header, ofsInstances) || !ReadAt(d, header + 4, count)) continue;
+            uint64_t fishable = ~0ull, deep = 0;
+            if (ReadAt(d, header + 8, ofsAttributes) && ofsAttributes)
+            {
+                ReadAt(d, base + ofsAttributes, fishable);
+                ReadAt(d, base + ofsAttributes + 8, deep);
+            }
             for (uint32_t i = 0; i < count && ofsInstances; ++i)
             {
                 Instance in{};
@@ -196,6 +202,12 @@ namespace
                 l.heights.assign(verts, in.minHeight);
                 if (in.ofsVertices && in.format != 2)   // formats 0, 1, 3 start with heights
                     for (size_t v = 0; v < verts; ++v) ReadAt(d, base + in.ofsVertices + v * 4, l.heights[v]);
+                const size_t heightBytes = in.format != 2 ? verts * 4 : 0, extra = verts * LiquidExtraPerVertex(in.format);
+                if (in.ofsVertices && base + in.ofsVertices + heightBytes + extra <= d.size())
+                    l.extra.assign(d.begin() + std::ptrdiff_t(base + in.ofsVertices + heightBytes),
+                                   d.begin() + std::ptrdiff_t(base + in.ofsVertices + heightBytes + extra));
+                l.fishable = fishable;
+                l.deep = deep;
                 l.exists.assign(size_t(in.w) * in.h, true);
                 if (in.ofsExists)
                     for (size_t b = 0; b < l.exists.size(); ++b)
@@ -278,6 +290,14 @@ namespace
                     l.fromMclq = true;
                     l.heights.resize(81);
                     for (size_t v = 0; v < 81; ++v) ReadAt(d, data + 8 + v * 8 + 4, l.heights[v]);
+                    // The 4 bytes before each height: water {depth, flow, flow, filler}, magma and slime {u16 s, t}.
+                    l.format = l.type >= 3 ? 1 : 0;
+                    for (size_t v = 0; v < 81; ++v)
+                    {
+                        const uint8_t* p = d.data() + data + 8 + v * 8;
+                        if (l.format == 1) l.extra.insert(l.extra.end(), p, p + 4);
+                        else l.extra.push_back(p[0]);
+                    }
                     l.exists.resize(64);
                     for (size_t t = 0; t < 64; ++t) l.exists[t] = (d[data + 8 + 81 * 8 + t] & 0x0F) != 0x0F;
                     adt.liquids.push_back(std::move(l));
@@ -503,6 +523,81 @@ namespace
     }
 }
 
+size_t LiquidExtraPerVertex(uint16_t format)
+{
+    switch (format)
+    {
+    case 0: return 1;   // depth
+    case 1: return 4;   // uv
+    case 2: return 1;   // depth only (no heights)
+    case 3: return 5;   // uv, then depth
+    default: return 0;
+    }
+}
+
+std::vector<uint8_t> WriteMh2o(const Adt& adt)
+{
+    // 256 headers {instances, count, attributes}, then per chunk with liquid: attributes, instances, and each
+    // instance's existence bits and vertex data. Offsets are relative to the start of the body.
+    std::vector<uint8_t> out(256 * 12, 0);
+    auto align = [&] { while (out.size() % 4) out.push_back(0); };
+    for (const AdtChunk& c : adt.chunks)
+    {
+        std::vector<const AdtLiquid*> here;
+        for (const AdtLiquid& l : adt.liquids)
+            if (l.w && l.h && std::fabs(l.cornerX - c.baseX) < 1.0f && std::fabs(l.cornerZ - c.baseZ) < 1.0f) here.push_back(&l);
+        if (here.empty() || c.indexX > 15 || c.indexY > 15) continue;
+        uint64_t fishable = 0, deep = 0;
+        for (const AdtLiquid* l : here) { fishable |= l->fishable; deep |= l->deep; }
+        const uint32_t attributes = uint32_t(out.size());
+        PutU32(out, uint32_t(fishable)); PutU32(out, uint32_t(fishable >> 32));
+        PutU32(out, uint32_t(deep)); PutU32(out, uint32_t(deep >> 32));
+        const size_t instances = out.size();
+        out.resize(out.size() + here.size() * 24);
+        for (size_t i = 0; i < here.size(); ++i)
+        {
+            const AdtLiquid& l = *here[i];
+            const size_t verts = size_t(l.w + 1) * (l.h + 1), cells = size_t(l.w) * l.h;
+            const uint32_t ofsExists = uint32_t(out.size());
+            std::vector<uint8_t> bits((cells + 7) / 8, 0);
+            for (size_t b = 0; b < cells; ++b)
+                if (b >= l.exists.size() || l.exists[b]) bits[b / 8] |= uint8_t(1u << (b % 8));
+            out.insert(out.end(), bits.begin(), bits.end());
+            align();
+            float lo = l.heights.empty() ? 0.0f : l.heights[0], hi = lo;
+            for (float h : l.heights) { lo = std::min(lo, h); hi = std::max(hi, h); }
+            uint32_t ofsVertices = 0;
+            std::vector<uint8_t> extra = l.extra;
+            if (l.format != 2 || !extra.empty()) extra.resize(verts * LiquidExtraPerVertex(l.format), 0);   // flat ocean may have no data at all
+            if (l.format != 2 || !extra.empty())
+            {
+                ofsVertices = uint32_t(out.size());
+                if (l.format != 2)
+                    for (size_t v = 0; v < verts; ++v)
+                    {
+                        const float h = v < l.heights.size() ? l.heights[v] : lo;
+                        out.insert(out.end(), reinterpret_cast<const uint8_t*>(&h), reinterpret_cast<const uint8_t*>(&h) + 4);
+                    }
+                out.insert(out.end(), extra.begin(), extra.end());
+                align();
+            }
+            uint8_t* p = out.data() + instances + i * 24;
+            std::memcpy(p, &l.type, 2);
+            std::memcpy(p + 2, &l.format, 2);
+            std::memcpy(p + 4, &lo, 4);
+            std::memcpy(p + 8, &hi, 4);
+            p[12] = l.x; p[13] = l.y; p[14] = l.w; p[15] = l.h;
+            std::memcpy(p + 16, &ofsExists, 4);
+            std::memcpy(p + 20, &ofsVertices, 4);
+        }
+        const size_t header = size_t(c.indexY * 16 + c.indexX) * 12;
+        SetU32(out, header, uint32_t(instances));
+        SetU32(out, header + 4, uint32_t(here.size()));
+        SetU32(out, header + 8, attributes);
+    }
+    return out;
+}
+
 std::vector<uint8_t> RewriteAdt(const std::vector<uint8_t>& d, const Adt& adt, const std::set<size_t>& chunks, bool bigAlpha)
 {
     // MHDR field index -> the chunk it points at (field 0 is flags).
@@ -617,10 +712,33 @@ std::vector<uint8_t> RewriteAdt(const std::vector<uint8_t>& d, const Adt& adt, c
     const std::map<uint32_t, const std::vector<uint8_t>*> replaced = { { Tag("MMDX"), &mmdx }, { Tag("MMID"), &mmid }, { Tag("MWMO"), &mwmo },
                                                                        { Tag("MWID"), &mwid }, { Tag("MDDF"), &mddf }, { Tag("MODF"), &modf } };
 
+    // Liquids: MH2O written afresh when they differ from the file's.
+    auto sameLiquid = [](const AdtLiquid& a, const AdtLiquid& b) {
+        return a.type == b.type && a.format == b.format && a.cornerX == b.cornerX && a.cornerZ == b.cornerZ && a.x == b.x && a.y == b.y &&
+               a.w == b.w && a.h == b.h && a.heights == b.heights && a.exists == b.exists && a.extra == b.extra && a.fishable == b.fishable &&
+               a.deep == b.deep && a.fromMclq == b.fromMclq;
+    };
+    bool liquids = adt.liquids.size() != original->liquids.size();
+    for (size_t i = 0; !liquids && i < adt.liquids.size(); ++i) liquids = !sameLiquid(adt.liquids[i], original->liquids[i]);
+    const std::vector<uint8_t> mh2o = liquids ? WriteMh2o(adt) : std::vector<uint8_t>{};
+    bool hadMh2o = false;
+    ForEachChunk(d, 0, d.size(), [&](uint32_t magic, size_t, size_t) { hadMh2o |= magic == Tag("MH2O"); });
+
     bool failed = false;
     ForEachChunk(d, 0, d.size(), [&](uint32_t magic, size_t off, size_t size) {
         if (failed) return;
+        if (liquids && !hadMh2o && magic == Tag("MCNK") && !placed.count(Tag("MH2O")))   // a file without MH2O gets one before its chunks
+        {
+            placed.emplace(Tag("MH2O"), out.size());
+            PutChunk(out, Tag("MH2O"), mh2o);
+        }
         const size_t newOff = out.size();
+        if (magic == Tag("MH2O") && liquids)
+        {
+            placed.try_emplace(magic, newOff);
+            PutChunk(out, magic, mh2o);
+            return;
+        }
         placed.try_emplace(magic, newOff);
         if (magic == Tag("MTEX"))
         {
@@ -757,7 +875,8 @@ std::vector<uint8_t> RewriteAdt(const std::vector<uint8_t>& d, const Adt& adt, c
         uint32_t original = 0;
         ReadAt(out, mhdrData + field * 4, original);
         auto it = placed.find(kMhdrFields[field]);
-        if (original != 0 && it != placed.end()) SetU32(out, mhdrData + field * 4, uint32_t(it->second - mhdrData));
+        if ((original != 0 || (liquids && kMhdrFields[field] == Tag("MH2O"))) && it != placed.end())
+            SetU32(out, mhdrData + field * 4, uint32_t(it->second - mhdrData));
     }
 
     // MCIN: 256 x { offset, size, flags, asyncId }, absolute offsets, sizes include the chunk header.
@@ -1134,6 +1253,11 @@ std::vector<uint8_t> Base64Decode(const std::string& text)
 
 bool FormatsSelfTest()
 {
+    {   // BLP writer round trip through the parser
+        const uint8_t px[2 * 2 * 4] = { 10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160 };
+        const auto img = ParseBlp(WriteBlp(2, 2, px));
+        if (!img || img->width != 2 || img->mips.empty() || !std::equal(px, px + 16, img->mips[0].begin())) return false;
+    }
     auto put = [](std::vector<uint8_t>& v, const void* p, size_t n) { v.insert(v.end(), (const uint8_t*)p, (const uint8_t*)p + n); };
     auto chunk = [&](std::vector<uint8_t>& v, uint32_t magic, const std::vector<uint8_t>& body) {
         uint32_t size = uint32_t(body.size());
@@ -1243,4 +1367,30 @@ bool FormatsSelfTest()
     uint32_t mfboMagic = 0;
     ReadAt(rewritten, mhdrData + mfboRel, mfboMagic);
     return magic == Tag("MCNK") && mfboMagic == Tag("MFBO") && Base64Decode(Base64Encode((const uint8_t*)"hello", 5)).size() == 5;
+}
+
+std::vector<uint8_t> WriteBlp(uint32_t width, uint32_t height, const uint8_t* rgba)
+{
+    // Header (148 bytes) and the palette every BLP2 carries (1024, unused here), then mip 0 as BGRA.
+    const size_t pixels = size_t(width) * height, dataAt = 148 + 1024;
+    std::vector<uint8_t> out(dataAt + pixels * 4, 0);
+    std::memcpy(out.data(), "BLP2", 4);
+    const uint32_t type = 1, size = uint32_t(pixels * 4), offset = uint32_t(dataAt);
+    std::memcpy(out.data() + 4, &type, 4);
+    out[8] = 3;    // compression: ARGB8888
+    out[9] = 8;    // alpha depth
+    out[10] = 8;   // alpha type
+    out[11] = 0;   // no mipmaps
+    std::memcpy(out.data() + 12, &width, 4);
+    std::memcpy(out.data() + 16, &height, 4);
+    std::memcpy(out.data() + 20, &offset, 4);        // mipOffsets[0]
+    std::memcpy(out.data() + 20 + 64, &size, 4);     // mipSizes[0]
+    for (size_t p = 0; p < pixels; ++p)
+    {
+        out[dataAt + p * 4 + 0] = rgba[p * 4 + 2];
+        out[dataAt + p * 4 + 1] = rgba[p * 4 + 1];
+        out[dataAt + p * 4 + 2] = rgba[p * 4 + 0];
+        out[dataAt + p * 4 + 3] = rgba[p * 4 + 3];
+    }
+    return out;
 }

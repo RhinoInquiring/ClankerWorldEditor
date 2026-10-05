@@ -42,6 +42,9 @@ public:
     void Want(const std::string& map, bool bigAlpha, std::vector<int> keys);
     /// A tile the worker finished, everything it needs prepared, or none.
     std::optional<Tile> TakeTile();
+    /// Models (name, is WMO) to prepare after the wanted tiles, for objects about to be shown that no streamed tile
+    /// brings (another version's, compared in place). Names prepared before are skipped.
+    void WantModels(std::vector<std::pair<std::string, bool>> models);
     /// Prepared assets by lower-case name, handed out once (none: not prepared, load it yourself).
     std::optional<BlpImage> TakeImage(const std::string& lowerName);
     std::optional<ModelMesh> TakeMesh(const std::string& lowerName);
@@ -62,6 +65,7 @@ private:
     std::string m_map;
     bool m_bigAlpha = false;
     std::vector<int> m_wanted;
+    std::vector<std::pair<std::string, bool>> m_wantedModels;
     std::set<int> m_working;                 // keys being prepared or ready (not wanted again until taken)
     std::vector<Tile> m_ready;
     std::set<std::string> m_seen;            // asset names already prepared once (the renderers cache them)

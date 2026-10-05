@@ -52,6 +52,7 @@ public:
         bool visible = true;
         std::map<int, LoadedTile> tiles;     // by tile key
         std::set<int> missing;               // tiles this version does not have
+        std::set<int> only;                  // keep exactly these tiles loaded wherever the camera is; empty = around the camera
     };
 
     struct StreamResult
@@ -106,3 +107,38 @@ private:
     struct Worker;
     std::unique_ptr<Worker> m_worker;
 };
+
+/// How far another version of some chunks is from the map: what pasting it there would take.
+struct AreaDiff
+{
+    size_t cells = 0;                      // of the compared chunks, how many this version has
+    size_t changed = 0;                    // of those, chunks whose heights (> 0.5 yd), textures, holes or water differ
+    size_t water = 0;                      // of those, chunks whose terrain liquid differs
+    float meanHeight = 0, maxHeight = 0;   // |version - map| over their vertices, yards
+    float meanEdge = 0, maxEdge = 0;       // the same on the area's outer edge only: the step a paste has to blend away
+    std::vector<DoodadPlacement> newDoodads;   // objects standing on the area that the map lacks (world positions)
+    std::vector<WmoPlacement> newWmos;
+    size_t goneDoodads = 0, goneWmos = 0;      // objects of the map the version lacks (a paste leaves them standing)
+    bool Same() const { return cells && !changed && newDoodads.empty() && newWmos.empty() && !goneDoodads && !goneWmos; }
+};
+
+/// How one chunk of another version differs from the map (CompareCells).
+struct CellDiff
+{
+    enum Kind : uint8_t { Heights = 1, Textures = 2, Holes = 4, Water = 8, Objects = 16, NewTerrain = 32 };
+    int gx = 0, gz = 0;               // global chunk cell
+    uint8_t kinds = 0;
+    float maxHeight = 0;              // yards
+    uint16_t newObjects = 0, goneObjects = 0;
+    uint32_t area = 0;                // the map's area id there (the version's for new terrain)
+};
+
+/// Every chunk among `cells` where `version` has something a paste would bring over: heights (> 0.5 yd), textures,
+/// holes, water (fishing/fatigue masks aside), objects the map lacks, or terrain the map lacks altogether. Objects
+/// count on the chunk they stand on; objects only the map has are noted (goneObjects) but alone are no difference.
+std::vector<CellDiff> CompareCells(const std::map<int, LoadedTile>& map, const std::map<int, LoadedTile>& version,
+                                   const std::set<std::pair<int, int>>& cells);
+
+/// Compares the chunks at global grid cells `cells` of `version` against `map` (both by tile key). Objects match by model
+/// and position (1 yd), so a re-saved copy of the same placement is not counted as new.
+AreaDiff CompareArea(const std::map<int, LoadedTile>& map, const std::map<int, LoadedTile>& version, const std::set<std::pair<int, int>>& cells);

@@ -341,6 +341,12 @@ void App::RunChecks()
         m_areas.Check(r.first, r.last, m_problems);
     else
         m_problems.push_back({ Problem::Severity::Error, "IDs", "No area.id range set (File > Project settings)." });
+    for (const auto& [kind, table] : std::initializer_list<std::pair<const char*, const DbcTable*>>{
+             { "wmoarea.id", &m_wmoAreas }, { "worldmaparea.id", &m_worldMaps }, { "worldmapoverlay.id", &m_mapOverlays } })
+        if (const Project::IdRange r = m_project->Range(kind); r.first && r.last >= r.first)
+            table->CheckIds(r.first, r.last, "Zones", m_problems);
+        else
+            m_problems.push_back({ Problem::Severity::Error, "IDs", std::string("No ") + kind + " range set (File > Project settings)." });
     if (AreasPainted())
         m_problems.push_back({ Problem::Severity::Warning, "Zones",
                                "Area ids were painted: the server reads areas from its extracted .map files, so extract them again from the exported tiles." });
@@ -475,12 +481,13 @@ void App::DrawProjectSettingsModal()
             if (!r.first || r.last < r.first) valid = false;
             ImGui::PopID();
         }
-        {   // AreaTable ids live in the client's DBC, not the database
-            Project::IdRange& r = m_settingsRanges["area.id"];
-            ImGui::PushID("area.id");
+        for (const char* kind : { "area.id", "wmoarea.id", "worldmaparea.id", "worldmapoverlay.id" })   // DBC ids live in the client's files, not the database
+        {
+            Project::IdRange& r = m_settingsRanges[kind];
+            ImGui::PushID(kind);
             ImGui::TableNextRow();
             ImGui::TableNextColumn();
-            ImGui::TextUnformatted("area.id");
+            ImGui::TextUnformatted(kind);
             ImGui::TableNextColumn();
             ImGui::SetNextItemWidth(-1);
             ImGui::InputScalar("##first", ImGuiDataType_U32, &r.first);
@@ -491,8 +498,8 @@ void App::DrawProjectSettingsModal()
             ImGui::TextColored(kQuiet, "-");
             ImGui::TableNextColumn();
             ImGui::TextColored(kQuiet, "-");
-            ImGui::SetItemTooltip("Problems > Check now lists client AreaTable rows inside this range.");
-            if (!r.first || r.last < r.first || r.last > 65535) valid = false;
+            ImGui::SetItemTooltip("Problems > Check now lists client DBC rows inside this range.");
+            if (!r.first || r.last < r.first || (std::string(kind) == "area.id" && r.last > 65535)) valid = false;
             ImGui::PopID();
         }
         ImGui::EndTable();

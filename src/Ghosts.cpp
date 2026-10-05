@@ -292,7 +292,9 @@ Ghosts::StreamResult Ghosts::Stream(const std::string& map, float x, float z, in
     for (Layer& l : m_layers)
         for (auto it = l.tiles.begin(); it != l.tiles.end();)
         {
-            if (std::abs(it->second.x - cx) > radius + 1 || std::abs(it->second.y - cz) > radius + 1)
+            const bool away = l.only.empty() ? std::abs(it->second.x - cx) > radius + 1 || std::abs(it->second.y - cz) > radius + 1
+                                             : !l.only.count(it->first);
+            if (away)
             {
                 result.unloaded.push_back({ l.id, it->first });
                 it = l.tiles.erase(it);
@@ -305,6 +307,11 @@ Ghosts::StreamResult Ghosts::Stream(const std::string& map, float x, float z, in
     struct Want { int dist; Layer* layer; int x, y; };
     std::vector<Want> wanted;
     for (Layer& l : m_layers)
+    {
+        for (int key : l.only)
+            if (!l.tiles.count(key) && !l.missing.count(key))
+                wanted.push_back({ (key % 64 - cx) * (key % 64 - cx) + (key / 64 - cz) * (key / 64 - cz), &l, key % 64, key / 64 });
+        if (!l.only.empty()) continue;
         for (int ty = cz - radius; ty <= cz + radius; ++ty)
             for (int tx = cx - radius; tx <= cx + radius; ++tx)
             {
@@ -313,6 +320,7 @@ Ghosts::StreamResult Ghosts::Stream(const std::string& map, float x, float z, in
                 if (l.tiles.count(key) || l.missing.count(key)) continue;
                 wanted.push_back({ (tx - cx) * (tx - cx) + (ty - cz) * (ty - cz), &l, tx, ty });
             }
+    }
     std::stable_sort(wanted.begin(), wanted.end(), [](const Want& a, const Want& b) { return a.dist < b.dist; });
     auto bigAlpha = [&](const Layer& l, const std::string& shown) {
         auto [it, added] = m_bigAlpha.try_emplace({ l.source, shown });
@@ -361,4 +369,163 @@ Ghosts::StreamResult Ghosts::Stream(const std::string& map, float x, float z, in
         result.loaded.push_back({ l->id, d.job.key });
     }
     return result;
+}
+
+namespace
+{
+    std::pair<const LoadedTile*, const AdtChunk*> ChunkAt(const std::map<int, LoadedTile>& tiles, int gx, int gz)
+    {
+        if (gx < 0 || gz < 0) return { nullptr, nullptr };
+        const auto it = tiles.find(TileKey(gx / 16, gz / 16));
+        if (it == tiles.end()) return { nullptr, nullptr };
+        const int16_t i = it->second.byGrid[size_t((gz % 16) * 16 + gx % 16)];
+        return { &it->second, i < 0 ? nullptr : &it->second.adt.chunks[size_t(i)] };
+    }
+
+    std::vector<std::string> TextureNames(const LoadedTile& t, const AdtChunk& c)
+    {
+        std::vector<std::string> names;
+        for (uint32_t l = 0; l < c.layerCount && l < 4; ++l)
+        {
+            std::string n = c.textureIds[l] < t.adt.textures.size() ? t.adt.textures[c.textureIds[l]] : std::string();
+            for (char& ch : n) ch = ch == '/' ? '\\' : char(std::tolower((unsigned char)ch));
+            names.push_back(std::move(n));
+        }
+        return names;
+    }
+
+    /// Water as seen: the fishable / fatigue masks are left out (map editors rewrite them on every save).
+    nlohmann::json SeenWater(const LoadedTile& t, const AdtChunk& c)
+    {
+        nlohmann::json w = TerrainAdapter::LiquidState(t.adt, c);
+        for (auto& l : w) { l.erase("fishable"); l.erase("deep"); }
+        return w;
+    }
+
+    std::string ObjectKey(std::string model, const float pos[3])
+    {
+        for (char& ch : model) ch = ch == '/' ? '\\' : char(std::tolower((unsigned char)ch));
+        if (model.size() > 4 && (model.ends_with(".mdx") || model.ends_with(".mdl"))) model.replace(model.size() - 4, 4, ".m2");
+        return model + "|" + std::to_string(std::lround(pos[0])) + "|" + std::to_string(std::lround(pos[1])) + "|" + std::to_string(std::lround(pos[2]));
+    }
+
+    std::pair<int, int> CellOf(const float pos[3]) { return { int(std::floor(pos[0] / kChunkSize)), int(std::floor(pos[2] / kChunkSize)) }; }
+
+    /// Objects standing on `cells`, once each (an object is listed by every tile it touches), keyed by model and rounded position.
+    struct Objects { std::map<std::string, DoodadPlacement> doodads; std::map<std::string, WmoPlacement> wmos; };
+    Objects GatherObjects(const std::map<int, LoadedTile>& tiles, const std::set<std::pair<int, int>>& cells)
+    {
+        std::set<int> keys;
+        for (const auto& [gx, gz] : cells) keys.insert(TileKey(gx / 16, gz / 16));
+        Objects o;
+        std::set<uint32_t> seenD, seenW;
+        for (int key : keys)
+        {
+            const auto it = tiles.find(key);
+            if (it == tiles.end()) continue;
+            for (const DoodadPlacement& p : it->second.adt.doodads)
+                if (cells.count(CellOf(p.pos)) && seenD.insert(p.uniqueId).second) o.doodads.emplace(ObjectKey(p.model, p.pos), p);
+            for (const WmoPlacement& p : it->second.adt.wmos)
+                if (cells.count(CellOf(p.pos)) && seenW.insert(p.uniqueId).second) o.wmos.emplace(ObjectKey(p.model, p.pos), p);
+        }
+        return o;
+    }
+}
+
+AreaDiff CompareArea(const std::map<int, LoadedTile>& map, const std::map<int, LoadedTile>& version, const std::set<std::pair<int, int>>& cells)
+{
+    AreaDiff d;
+    double sum = 0, edgeSum = 0;
+    size_t count = 0, edgeCount = 0;
+    for (const auto& [gx, gz] : cells)
+    {
+        const auto [mt, a] = ChunkAt(map, gx, gz);
+        const auto [vt, b] = ChunkAt(version, gx, gz);
+        if (!a || !b) continue;
+        ++d.cells;
+        float worst = 0;
+        for (size_t k = 0; k < 145; ++k)
+        {
+            const float diff = std::fabs((b->baseY + b->heights[k]) - (a->baseY + a->heights[k]));
+            sum += diff;
+            worst = std::max(worst, diff);
+        }
+        count += 145;
+        d.maxHeight = std::max(d.maxHeight, worst);
+        const bool wet = SeenWater(*mt, *a) != SeenWater(*vt, *b);
+        d.water += wet;
+        if (worst > 0.5f || wet || a->holes != b->holes || TextureNames(*mt, *a) != TextureNames(*vt, *b)) ++d.changed;
+        // Outer edge: the side's 9 outer vertices where the neighbour is not compared (x sides are columns 8/0, z sides rows 8/0).
+        const struct { int dx, dz; } sides[] = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } };
+        for (const auto& s : sides)
+        {
+            if (cells.count({ gx + s.dx, gz + s.dz })) continue;
+            for (int k = 0; k <= 8; ++k)
+            {
+                const int row = s.dz ? (s.dz > 0 ? 8 : 0) : k, col = s.dx ? (s.dx > 0 ? 8 : 0) : k;
+                const size_t j = size_t(row * 17 + col);
+                const float diff = std::fabs((b->baseY + b->heights[j]) - (a->baseY + a->heights[j]));
+                edgeSum += diff;
+                ++edgeCount;
+                d.maxEdge = std::max(d.maxEdge, diff);
+            }
+        }
+    }
+    if (count) d.meanHeight = float(sum / count);
+    if (edgeCount) d.meanEdge = float(edgeSum / edgeCount);
+
+    const Objects mine = GatherObjects(map, cells), theirs = GatherObjects(version, cells);
+    for (const auto& [k, p] : theirs.doodads)
+        if (!mine.doodads.count(k)) d.newDoodads.push_back(p);
+    for (const auto& [k, p] : theirs.wmos)
+        if (!mine.wmos.count(k)) d.newWmos.push_back(p);
+    for (const auto& [k, p] : mine.doodads) d.goneDoodads += !theirs.doodads.count(k);
+    for (const auto& [k, p] : mine.wmos) d.goneWmos += !theirs.wmos.count(k);
+    return d;
+}
+
+std::vector<CellDiff> CompareCells(const std::map<int, LoadedTile>& map, const std::map<int, LoadedTile>& version,
+                                   const std::set<std::pair<int, int>>& cells)
+{
+    std::map<std::pair<int, int>, CellDiff> out;
+    for (const auto& [gx, gz] : cells)
+    {
+        const auto [mt, a] = ChunkAt(map, gx, gz);
+        const auto [vt, b] = ChunkAt(version, gx, gz);
+        if (!b) continue;   // nothing the version could give (a chunk only the map has stays as it is)
+        CellDiff c{ gx, gz };
+        c.area = a ? a->areaId : b->areaId;
+        if (!a)
+            c.kinds = CellDiff::NewTerrain;
+        else
+        {
+            for (size_t k = 0; k < 145; ++k) c.maxHeight = std::max(c.maxHeight, std::fabs((b->baseY + b->heights[k]) - (a->baseY + a->heights[k])));
+            if (c.maxHeight > 0.5f) c.kinds |= CellDiff::Heights;
+            if (TextureNames(*mt, *a) != TextureNames(*vt, *b)) c.kinds |= CellDiff::Textures;
+            if (a->holes != b->holes) c.kinds |= CellDiff::Holes;
+            if (SeenWater(*mt, *a) != SeenWater(*vt, *b)) c.kinds |= CellDiff::Water;
+        }
+        out[{ gx, gz }] = c;
+    }
+    // Objects: new ones count on the chunk they stand on in the version, gone ones where the map has them.
+    const Objects mine = GatherObjects(map, cells), theirs = GatherObjects(version, cells);
+    auto at = [&](const float pos[3]) -> CellDiff& {
+        const auto [gx, gz] = CellOf(pos);
+        auto [it, added] = out.try_emplace({ gx, gz }, CellDiff{ gx, gz });
+        if (added)
+            if (const auto [t, c] = ChunkAt(map, gx, gz); c) it->second.area = c->areaId;
+        return it->second;
+    };
+    for (const auto& [k, p] : theirs.doodads)
+        if (!mine.doodads.count(k)) { CellDiff& c = at(p.pos); ++c.newObjects; c.kinds |= CellDiff::Objects; }
+    for (const auto& [k, p] : theirs.wmos)
+        if (!mine.wmos.count(k)) { CellDiff& c = at(p.pos); ++c.newObjects; c.kinds |= CellDiff::Objects; }
+    for (const auto& [k, p] : mine.doodads)
+        if (!theirs.doodads.count(k)) ++at(p.pos).goneObjects;
+    for (const auto& [k, p] : mine.wmos)
+        if (!theirs.wmos.count(k)) ++at(p.pos).goneObjects;
+    std::vector<CellDiff> list;
+    for (const auto& [cell, c] : out)
+        if (c.kinds) list.push_back(c);   // only removed objects: a paste cannot take them away, so not an edit to bring over
+    return list;
 }

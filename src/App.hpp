@@ -4,6 +4,7 @@
 #include "Blueprint.hpp"
 #include "Catalog.hpp"
 #include "Changes.hpp"
+#include "Differences.hpp"
 #include "Formats.hpp"
 #include "Ghosts.hpp"
 #include "Loader.hpp"
@@ -49,6 +50,16 @@ public:
 
 private:
     enum class Tool { Select, Sculpt, Copy, Holes, Objects, Paint, Creatures, Gameobjects, Zones };
+    /// Tools come in groups (the toolbar's buttons); a group remembers the tool last used in it.
+    enum class Group { Terrain, Objects, Units, Regions };
+    static constexpr const char* kGroupNames[4] = { "Terrain", "Objects", "Units", "Regions" };
+    static Group GroupOf(Tool t)
+    {
+        return t == Tool::Objects ? Group::Objects : t == Tool::Creatures || t == Tool::Gameobjects ? Group::Units
+             : t == Tool::Zones   ? Group::Regions : Group::Terrain;
+    }
+    void SetGroup(Group g) { m_tool = m_groupTool[int(g)]; }
+    Tool m_groupTool[4] = { Tool::Sculpt, Tool::Objects, Tool::Creatures, Tool::Zones };
 
     struct Camera
     {
@@ -72,10 +83,29 @@ private:
     void BuildDefaultLayout(unsigned int dockspace);
     void DrawViewport(float dt);
     void DrawToolsPanel();
+    /// The Tools panel's sections are tabs, so nothing needs scrolling: BeginSections opens the tab bar (one per tool,
+    /// so each keeps its tab), Section ends the previous tab and starts the next one, true when that one is shown
+    /// (`select` brings it forward), EndSections closes whatever is open. A section can be skipped, and a panel can
+    /// return early: EndSections still closes the bar.
+    void BeginSections(const std::string& id);
+    bool Section(const char* label, bool select = false);
+    void EndSections();
+    bool m_sectionBar = false, m_sectionTab = false;
+    bool m_placementShown = false;   // the Placement tab existed last frame (it comes forward when placing starts)
+    std::set<uint32_t> m_spawnSelShown;   // the spawn selection last frame (a new one brings the Selected tab forward)
+    bool m_pathTabShown = false;          // a path was being edited last frame (starting one brings the Path tab forward)
+    uint32_t m_buildingTabUid = 0;        // the building picked last frame (picking another brings the Building tab forward)
     void DrawMapsPanel();
     /// Rebuilds the Maps panel picture when the selected map's loaded terrain changed (edits, undo, streaming).
     void RefreshMapPreview();
     void DrawInspector();
+    /// Inspector pages for the selected spawn (every column of its row and of its template), object and area; false
+    /// when there is nothing to show (the chunk page shows instead).
+    bool InspectSpawn();
+    bool InspectObject();
+    bool InspectArea();
+    std::string m_inspectKey;                            // spawn + project revision the rows below were read for
+    nlohmann::json m_inspectRow, m_inspectTemplate;
     void DrawChangesPanel();
     void DrawProblemsPanel();
     void DrawLogPanel();
@@ -126,6 +156,14 @@ private:
 
     // zones: area ids painted on chunks, AreaTable rows (AppZones.cpp)
     void DrawZonesPanel(float width);
+    /// The building section: the picked WMO's groups and the areas WMOAreaTable gives them.
+    void DrawBuildingAreas(float width);
+    // world map: zone pictures and exploration overlays rendered from the terrain (AppWorldMap.cpp)
+    void DrawWorldMapSection(float width);
+    /// Queues pictures for a world map: the base (faded, unexplored look) and an overlay per area.
+    void QueueMapJob(uint32_t worldMap, bool base, std::vector<uint32_t> areas);
+    /// Renders the queued job once its tiles and models are loaded: BLPs into the project's assets, overlay rows.
+    void RunMapJob();
     /// Zones tool in the viewport: drag paints the active area, Alt+click picks the area under the cursor.
     void ZonesViewport();
     /// Area borders on the loaded terrain (each chunk edge that meets another area), in each area's colour.
@@ -210,6 +248,9 @@ private:
     void UseBlueprint(const Blueprint& b, bool inPlace);
     /// Top-down picture of an area, rendered offscreen with its textures and objects (RGBA, size x size).
     std::vector<uint8_t> RenderAreaThumbnail(const TerrainClipboard& clip, UINT size);
+    /// One layer's terrain and objects seen from straight above (orthographic): world x0..x0+spanX left to right,
+    /// z0..z0+spanZ top to bottom, `top` the highest ground; RGBA, width x height.
+    std::vector<uint8_t> RenderOrtho(float x0, float z0, float spanX, float spanZ, float top, UINT width, UINT height, int layer);
     /// Shows one ghost layer alone, objects included (0 = the map again).
     void SetSolo(int layer);
     void RemoveGhostLayer(int layer);
@@ -267,6 +308,8 @@ private:
     bool m_gizmoLocal = false, m_gizmoSnap = false;    // Ctrl inverts snapping while dragging a handle
     float m_snapMove = 1.0f, m_snapRotate = 15.0f, m_snapScale = 0.1f;
     bool m_gizmoActive = false;                         // a handle is being dragged (one object edit)
+    bool m_carryInside = true;                          // map doodads inside a moved building move with it
+    std::set<ObjectRef> m_gizmoRiders;                  // those doodads, for the drag in progress
     DirectX::XMFLOAT4X4 m_gizmoMatrix{}, m_gizmoStart{};
     Tool m_lastTool = Tool::Sculpt;
 
@@ -296,12 +339,71 @@ private:
     Ghosts m_ghosts;
     int m_soloLayer = 0, m_copyLayer = 0;          // 0 = the map itself
 
+    // Compare: the selected chunks shown as each other version in turn, pinned in place like a paste ([ and ] cycle,
+    // Enter pastes, Esc stops). The selection stays editable meanwhile.
+    struct CompareEntry
+    {
+        int layer = 0;            // ghost layer; 0 = the map itself
+        bool own = false;         // layer made for the compare (hidden, removed when it ends)
+        std::string label;
+        AreaDiff diff;
+        bool ready = false;       // every selected tile of this version is loaded (or known missing)
+        size_t assetsOther = 0, assetsMissing = 0;   // referenced files only another client has / no source has
+    };
+    bool m_comparing = false;
+    std::vector<CompareEntry> m_compare;
+    size_t m_compareAt = 0;
+    std::string m_compareKey, m_compareStatsKey;   // inputs the shown paste / the table were built from
+    // Cycling stays quick: each version's copy and plan are kept (by what they were built from), and while versions
+    // are flicked through the plan is a hard paste; the blend follows once cycling pauses (kCompareSettle seconds).
+    std::map<std::string, TerrainClipboard> m_compareClips;   // by m_compareKey
+    std::map<std::string, PastePlan> m_planCache;            // by plan key, compare clips only
+    std::string m_compareClipTag;                            // m_compareKey of the clip in m_clipboard
+    int m_compareClipVersion = -1;                           // m_clipVersion when it was put there
+    double m_compareCycledAt = -1e9;                         // ImGui time of the last version switch
+    static constexpr double kCompareSettle = 0.25;
+    struct CompareTarget { size_t source = 0; std::string map, label; };   // one version: a map of a Ghosts source
+    void StartCompare(const CompareTarget* only = nullptr);
+    void StopCompare();
+    void CycleCompare(int step);
+    void UpdateCompare();
+    void DrawCompare();
+    void ShowCompareClip(const std::string& tag, const TerrainClipboard& clip);
+    /// Enter in a compare: paste the shown version; a reviewed difference is marked pasted (its blend band too).
+    void CommitCompare();
+
+    // Differences: another version of the map scanned against this one; each edited area is a catalog card to
+    // review in place, then approve (paste) or reject.
+    struct DiffCandidate { size_t source = 0; std::string map, label; };
+    Differences m_diffs;
+    DiffCandidate m_diffTarget;                        // the version being (or last) scanned
+    std::string m_diffActive;                          // key of the area under review
+    std::vector<std::pair<int, int>> m_diffPending;    // its chunks, selected once their tiles are loaded
+    std::map<std::string, Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>> m_diffThumbs;
+    std::set<std::string> m_diffNoThumb;               // areas too large for a picture
+    int m_diffSort = 0;
+    bool m_diffShowRejected = false, m_diffShowNewTerrain = false;
+    char m_diffQuery[64] = {};
+    static constexpr int kDifferencesTab = -4;
+    std::vector<DiffCandidate> DiffCandidates() const;
+    void StartDifferences(const DiffCandidate& c);
+    void UpdateDifferences();
+    void DrawDifferences();
+    void ReviewDifference(const Differences::Region& r);
+    void RejectDifference();
+    void RenderDifferenceThumb(const Differences::Region& r);
+
     std::vector<Blueprint> m_blueprints;
     std::map<std::string, Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>> m_blueprintThumbs;   // by file
     bool m_saveBlueprintOpen = false;
     char m_blueprintName[96] = {}, m_blueprintNotes[512] = {};
     std::optional<size_t> m_blueprintToDelete;
-    static constexpr int kBlueprintTab = -1;
+    static constexpr int kBlueprintTab = -1, kCreatureTab = -2, kGameobjectTab = -3;
+    /// The Creatures / Gameobjects tabs: every template of the world database with a picture of its model.
+    void DrawUnitCatalog(SpawnKind kind);
+    std::vector<SpawnAdapter::Template> m_unitTemplates[2];   // creature_template, gameobject_template (read on first view)
+    bool m_unitTemplatesRead[2] = {};
+    uint32_t m_unitCategory[2] = { ~0u, ~0u };                // folder picked in the tree (~0 = everything)
     std::vector<Ghosts::Version> m_versions;        // of the tile under the camera
     std::string m_versionsKey;
     std::vector<const Catalog::Item*> m_catalogItems;
@@ -314,7 +416,7 @@ private:
     std::optional<PasteHeight> m_heightBeforeInPlace;   // paste in place switches to Absolute; this puts it back
     PasteHeight m_pasteHeightMode = PasteHeight::FollowGround;
     float m_pasteOffset = 0;
-    bool m_pasteHeights = true, m_pasteTextures = true, m_pasteHoles = true, m_pasteObjects = true;
+    bool m_pasteHeights = true, m_pasteTextures = true, m_pasteHoles = true, m_pasteObjects = true, m_pasteWater = true;
     bool m_holeCut = true;          // Holes tool: cut (true) or fill; Ctrl inverts while dragging
     float m_holeRadius = 1.0f;      // yards; small values hit only the cell under the cursor
     bool m_ghostPreview = true;
@@ -365,11 +467,19 @@ private:
     uint32_t m_activeArea = 0;                           // Zones tool: the area painted
     float m_areaRadius = 1.0f;                           // yards; small values paint only the chunk under the cursor
     std::string m_areaFilter;
+    bool m_areasLoadedOnly = true;                       // Areas tab: what the loaded terrain uses, or every row of the map
     std::string m_newAreaName;
     uint32_t m_newAreaParent = 0, m_newAreaLevel = 1;
     uint32_t m_areaEditId = 0;                           // the row m_areaEdit was read from (re-read when it changes)
     uint64_t m_areaEditVersion = ~0ull;
     nlohmann::json m_areaEdit;                           // the active area's row being edited
+    WmoAreaAdapter m_wmoAreas{ m_mpq, m_store };         // WMOAreaTable.dbc: areas inside buildings
+    std::map<std::string, std::optional<WmoAreaKeys>> m_wmoKeys;   // WMO root name -> its WMOID and group ids (read on first use)
+    WorldMapAreaAdapter m_worldMaps{ m_mpq, m_store };   // WorldMapArea.dbc: zone map pictures and their world rectangles
+    WorldMapOverlayAdapter m_mapOverlays{ m_mpq, m_store };   // WorldMapOverlay.dbc: pieces revealed by exploring
+    /// A world map picture waiting for its tiles: rendered (base and / or overlays) once they and their models are loaded.
+    struct MapJob { uint32_t worldMap = 0; bool base = false; std::vector<uint32_t> areas; std::set<int> tiles; };
+    std::optional<MapJob> m_mapJob;
     uint32_t m_spawnModelVersion[2] = { ~0u, ~0u };      // adapter version each kind's model tile was built from
     TableRowsAdapter m_waypoints{ m_store, "waypoint_data", "id", "point" }, m_addons{ m_store, "creature_addon", "guid" };
     struct PathEdit

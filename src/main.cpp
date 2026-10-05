@@ -546,6 +546,24 @@ namespace
         }
         objectProblems += paintProblems;
 
+        // Furniture placed on the map inside Northshire Abbey moves with the building (same edit, same offset).
+        for (const WmoPlacement& w : terrain.Tiles().at(TileKey(32, 48)).adt.wmos)
+        {
+            if (w.model.find("NSABBEY.WMO") == std::string::npos) continue;
+            const auto riders = terrain.DoodadsInside({ { true, w.uniqueId } });
+            std::set<ObjectRef> moving = riders;
+            moving.insert({ true, w.uniqueId });
+            const auto rider = riders.empty() ? std::nullopt : terrain.FindDoodad(riders.begin()->uid);
+            terrain.BeginObjectEdit(moving);
+            terrain.PreviewObjectEdit([](DoodadPlacement& d) { d.pos[0] += 10; }, [](WmoPlacement& p) { p.pos[0] += 10; });
+            auto carry = terrain.EndObjectEdit("carry check");
+            const auto moved = rider ? terrain.FindDoodad(rider->uniqueId) : std::nullopt;
+            const bool ok = carry && rider && moved && std::fabs(moved->pos[0] - rider->pos[0] - 10) < 0.01f;
+            printf("carry: %zu doodad(s) inside %s, %s\n", riders.size(), w.model.c_str(), ok ? "moved with it" : "FAILED");
+            if (!ok) ++objectProblems;
+            if (carry) { store.Commit(*carry); store.Undo(); }
+            break;
+        }
         return problems || holeProblems || objectProblems || plan.footprint.size() != 4 || plan.chunks.size() <= 4 ? 1 : 0;
     }
 }
@@ -938,6 +956,384 @@ namespace
         return unresolved ? 1 : 0;
     }
 
+    /// `--compare-check <data dir> <map> <x> <y>`: chunk edges of the map meet the way CompareArea reads them, the map
+    /// compared with itself is identical, and every <map>_* copy's version of a 4x4-chunk area and of the whole tile is listed.
+    int CompareCheck()
+    {
+        if (__argc < 6 || !__wargv) return 2;
+        setvbuf(stdout, nullptr, _IONBF, 0);
+        auto arg = [](int i) {
+            char buf[1024] = {};
+            WideCharToMultiByte(CP_ACP, 0, __wargv[i], -1, buf, sizeof buf, nullptr, nullptr);
+            return std::string(buf);
+        };
+        const std::string map = arg(3);
+        const int tx = std::stoi(arg(4)), ty = std::stoi(arg(5));
+        ComPtr<ID3D11Device> device;
+        ComPtr<ID3D11DeviceContext> context;
+        if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &device, nullptr, &context))) return 1;
+        Renderer renderer;
+        std::string error;
+        if (!renderer.Init(device.Get(), context.Get(), error)) return 1;
+        MpqChain mpq;
+        mpq.Open(arg(2));
+        ChangeStore store;
+        TerrainAdapter terrain(mpq, renderer, store);
+        if (!terrain.SetMap(map, error)) { printf("%s\n", error.c_str()); return 1; }
+        for (int i = 0; i < 9; ++i) terrain.Stream((tx + 0.5f) * kTileSize, (ty + 0.5f) * kTileSize, 1, error);
+        const LoadedTile& tile = terrain.Tiles().at(TileKey(tx, ty));
+        int problems = 0;
+
+        // Neighbouring chunks share their edge vertices: x neighbours columns 8/0, z neighbours rows 8/0.
+        float worstX = 0, worstZ = 0;
+        for (int r = 0; r < 16; ++r)
+            for (int c = 0; c < 16; ++c)
+            {
+                const int16_t a = tile.byGrid[size_t(r * 16 + c)];
+                if (a < 0) continue;
+                const AdtChunk& A = tile.adt.chunks[size_t(a)];
+                const int16_t right = c < 15 ? tile.byGrid[size_t(r * 16 + c + 1)] : -1, down = r < 15 ? tile.byGrid[size_t((r + 1) * 16 + c)] : -1;
+                for (int k = 0; k <= 8; ++k)
+                {
+                    if (right >= 0)
+                    {
+                        const AdtChunk& B = tile.adt.chunks[size_t(right)];
+                        worstX = std::max(worstX, std::fabs(A.baseY + A.heights[size_t(k * 17 + 8)] - B.baseY - B.heights[size_t(k * 17)]));
+                    }
+                    if (down >= 0)
+                    {
+                        const AdtChunk& B = tile.adt.chunks[size_t(down)];
+                        worstZ = std::max(worstZ, std::fabs(A.baseY + A.heights[size_t(8 * 17 + k)] - B.baseY - B.heights[size_t(k)]));
+                    }
+                }
+            }
+        printf("edge layout: x neighbours differ by up to %.4f yd, z neighbours by %.4f yd\n", worstX, worstZ);
+        if (worstX > 0.01f || worstZ > 0.01f) ++problems;
+
+        std::set<std::pair<int, int>> area, whole;
+        for (int dz = 0; dz < 4; ++dz)
+            for (int dx = 0; dx < 4; ++dx) area.insert({ tx * 16 + 6 + dx, ty * 16 + 6 + dz });
+        for (int dz = 0; dz < 16; ++dz)
+            for (int dx = 0; dx < 16; ++dx) whole.insert({ tx * 16 + dx, ty * 16 + dz });
+        const AreaDiff self = CompareArea(terrain.Tiles(), terrain.Tiles(), whole);
+        printf("map vs itself: %zu cells, same %s\n", self.cells, self.Same() ? "yes" : "NO");
+        if (!self.Same()) ++problems;
+
+        Ghosts ghosts;
+        std::vector<std::string> errors;
+        ghosts.Reset(&mpq, "WXL", {}, errors);
+        const std::string base = map.substr(0, map.find('_'));
+        if (const auto dbc = mpq.Read("DBFilesClient\\Map.dbc"))
+            for (const MapEntry& m : ParseMapDbc(*dbc))
+                if (m.directory != map && m.directory.rfind(base, 0) == 0)
+                    ghosts.AddLayer(0, -1, m.directory, m.directory).only = { TileKey(tx, ty) };
+        for (int i = 0; i < 4 * int(ghosts.Layers().size()) + 4; ++i) ghosts.Stream(map, 0, 0, 0);   // camera far away: only `only` loads
+        for (const auto& l : ghosts.Layers())
+        {
+            if (l.tiles.empty()) { printf("  %-22s no tile %d_%d\n", l.label.c_str(), tx, ty); continue; }
+            for (const auto* cells : { &area, &whole })
+            {
+                const AreaDiff d = CompareArea(terrain.Tiles(), l.tiles, *cells);
+                printf("  %-22s %-6s %3zu/%3zu chunks differ, height %.2f/%.1f yd, edge %.2f/%.1f yd, objects +%zu -%zu%s\n", l.label.c_str(),
+                       cells == &area ? "4x4" : "tile", d.changed, d.cells, d.meanHeight, d.maxHeight, d.meanEdge, d.maxEdge,
+                       d.newDoodads.size() + d.newWmos.size(), d.goneDoodads + d.goneWmos, d.Same() ? "  (identical)" : "");
+                for (const auto& o : d.newDoodads)
+                    if (!cells->count({ int(std::floor(o.pos[0] / kChunkSize)), int(std::floor(o.pos[2] / kChunkSize)) })) ++problems;
+                if (cells == &whole && d.water)   // which water fields differ, first such chunk
+                {
+                    const LoadedTile& a = terrain.Tiles().at(TileKey(tx, ty));
+                    const LoadedTile& b = l.tiles.at(TileKey(tx, ty));
+                    for (size_t cell = 0; cell < 256; ++cell)
+                    {
+                        const int16_t i = a.byGrid[cell], j = b.byGrid[cell];
+                        if (i < 0 || j < 0) continue;
+                        const auto wa = TerrainAdapter::LiquidState(a.adt, a.adt.chunks[size_t(i)]), wb = TerrainAdapter::LiquidState(b.adt, b.adt.chunks[size_t(j)]);
+                        if (wa == wb) continue;
+                        std::string fields;
+                        if (wa.size() != wb.size()) fields = "instance count " + std::to_string(wa.size()) + " vs " + std::to_string(wb.size());
+                        else
+                            for (size_t k = 0; k < wa.size(); ++k)
+                                for (const auto& [name, value] : wa[k].items())
+                                    if (wb[k].value(name, nlohmann::json()) != value) fields += " " + name;
+                        printf("      water: cell %zu differs in%s\n", cell, fields.c_str());
+                        break;
+                    }
+                }
+            }
+        }
+        // What one step of cycling costs, per stage (the selection as a 4x4 area and as the whole tile).
+        for (const auto& l : ghosts.Layers())
+        {
+            if (l.tiles.empty()) continue;
+            for (const auto* cells : { &area, &whole })
+            {
+                using Clock = std::chrono::steady_clock;
+                auto ms = [](Clock::time_point a) { return std::chrono::duration<float, std::milli>(Clock::now() - a).count(); };
+                auto t = Clock::now();
+                const AreaDiff d = CompareArea(terrain.Tiles(), l.tiles, *cells);
+                const float diffMs = ms(t);
+                t = Clock::now();
+                const TerrainClipboard clip = TerrainAdapter::CopyFrom(l.tiles, *cells);
+                const float copyMs = ms(t);
+                PasteOptions o;
+                t = Clock::now();
+                const PastePlan plan = terrain.PlanPaste(clip, clip.originX, clip.originZ, 0.0f, o);
+                const float planMs = ms(t);
+                o.blend = false;   // what cycling shows until it settles
+                t = Clock::now();
+                const PastePlan hard = terrain.PlanPaste(clip, clip.originX, clip.originZ, 0.0f, o);
+                const float hardMs = ms(t);
+                t = Clock::now();
+                terrain.PreviewPlan(&plan);
+                terrain.PreviewPlan(nullptr);
+                const float previewMs = ms(t);
+                printf("  timing %-18s %-4s diff %6.1f ms, copy %6.1f ms, blended plan %7.1f ms (%zu chunks), hard plan %6.1f ms, preview+restore %6.1f ms\n",
+                       l.label.c_str(), cells == &area ? "4x4" : "tile", diffMs, copyMs, planMs, plan.chunks.size(), hardMs, previewMs);
+                (void)hard;
+                (void)d;
+            }
+            break;   // one version is enough to see the costs
+        }
+        printf("%d problem(s)\n", problems);
+        return problems ? 1 : 0;
+    }
+
+    /// `--diff-check <data dir> <base map> <other map>`: scans the other map against the base on the worker (progress
+    /// printed), groups the areas, rejects the largest, scans again (every tile must come from the saved results and the
+    /// rejected area must stay rejected), and checks one area's chunks against CompareArea.
+    int DiffCheck()
+    {
+        if (__argc < 5 || !__wargv) return 2;
+        setvbuf(stdout, nullptr, _IONBF, 0);
+        auto arg = [](int i) {
+            char buf[1024] = {};
+            WideCharToMultiByte(CP_ACP, 0, __wargv[i], -1, buf, sizeof buf, nullptr, nullptr);
+            return std::string(buf);
+        };
+        MpqChain mpq;
+        mpq.Open(arg(2));
+        const std::string base = arg(3), other = arg(4);
+        const auto file = std::filesystem::temp_directory_path() / "wow-world-editor-diffcheck.json";
+        std::error_code ec;
+        std::filesystem::remove(file, ec);
+        int problems = 0;
+        auto expect = [&](bool ok, const std::string& what) { printf("  %-62s %s\n", what.c_str(), ok ? "ok" : "FAILED"); problems += !ok; };
+        auto scan = [&](Differences& d) {
+            d.Start(mpq, base, mpq, other, other, {}, file);
+            size_t shown = 0;
+            while (d.GetProgress().running)
+            {
+                d.Update();
+                const auto p = d.GetProgress();
+                if (p.done >= shown + p.total / 10 || p.done == p.total)
+                {
+                    printf("    %4zu / %zu tiles (%zu cached), %.1f s, %zu areas so far\n", p.done, p.total, p.cached, p.seconds, d.Regions().size());
+                    shown = p.done;
+                }
+                Sleep(50);
+            }
+            d.Cancel();   // joins, takes the rest, saves
+            return d.GetProgress();
+        };
+
+        Differences first;
+        printf("first scan %s vs %s:\n", base.c_str(), other.c_str());
+        const auto p1 = scan(first);
+        size_t cells = 0, biggest = 0;
+        const Differences::Region* big = nullptr;
+        for (const auto& r : first.Regions())
+        {
+            cells += r.cells.size();
+            if (r.cells.size() > biggest) { biggest = r.cells.size(); big = &r; }
+        }
+        printf("  %zu tiles in %.1f s: %zu area(s), %zu chunk(s); largest %zu chunks\n", p1.total, p1.seconds, first.Regions().size(), cells, biggest);
+        expect(p1.done == p1.total && p1.total > 0, "every tile scanned");
+        expect(!first.Regions().empty(), "areas found");
+        std::map<size_t, size_t> sizes;
+        for (const auto& r : first.Regions()) ++sizes[r.cells.size() < 4 ? 1 : r.cells.size() < 16 ? 4 : r.cells.size() < 64 ? 16 : 64];
+        for (const auto& [from, n] : sizes) printf("    %zu area(s) of %zu+ chunks\n", n, from);
+        if (!big) return 1;
+        printf("  largest: cells %d..%d x %d..%d, kinds 0x%02x, height up to %.1f yd\n", big->x0, big->x1, big->z0, big->z1, big->kinds, big->maxHeight);
+        {
+            // Which kinds its chunks carry, counted, and one chunk's texture lists side by side.
+            std::map<int, size_t> kinds;
+            auto tileOf = [&](const std::string& map, int key) -> std::optional<LoadedTile> {
+                const auto wdt = mpq.Read("World\\Maps\\" + map + "\\" + map + ".wdt");
+                if (auto bytes = mpq.Read("World\\Maps\\" + map + "\\" + map + "_" + std::to_string(key % 64) + "_" + std::to_string(key / 64) + ".adt"))
+                    if (auto adt = ParseAdt(*bytes, wdt && WdtBigAlpha(*wdt))) return LoadedTile::Make(key % 64, key / 64, {}, std::move(*adt));
+                return std::nullopt;
+            };
+            const auto [gx, gz] = big->cells[big->cells.size() / 2];
+            const int key = TileKey(gx / 16, gz / 16);
+            const auto a = tileOf(base, key), b = tileOf(other, key);
+            if (a && b)
+            {
+                std::map<int, LoadedTile> ma, mb;
+                ma.emplace(key, *a);
+                mb.emplace(key, *b);
+                std::set<std::pair<int, int>> all;
+                for (int c = 0; c < 256; ++c) all.insert({ (key % 64) * 16 + c % 16, (key / 64) * 16 + c / 16 });
+                for (const CellDiff& c : CompareCells(ma, mb, all))
+                    for (int bit = 0; bit < 6; ++bit)
+                        if (c.kinds & (1 << bit)) ++kinds[bit];
+                for (const auto& [bit, n] : kinds) printf("    kind bit %d on %zu chunk(s) of tile %d_%d\n", bit, n, key % 64, key / 64);
+                const int16_t ia = a->byGrid[size_t((gz % 16) * 16 + gx % 16)], ib = b->byGrid[size_t((gz % 16) * 16 + gx % 16)];
+                if (ia >= 0 && ib >= 0)
+                    for (uint32_t l = 0; l < 4; ++l)
+                    {
+                        const AdtChunk& ca = a->adt.chunks[size_t(ia)];
+                        const AdtChunk& cb = b->adt.chunks[size_t(ib)];
+                        printf("    layer %u: %-55s | %s\n", l, l < ca.layerCount ? a->adt.textures[ca.textureIds[l]].c_str() : "-",
+                               l < cb.layerCount ? b->adt.textures[cb.textureIds[l]].c_str() : "-");
+                    }
+            }
+        }
+        const std::string bigKey = big->key;
+        const auto bigCells = big->cells;
+        first.SetStatus(bigCells, Differences::Status::Rejected);
+        expect(first.Find(bigKey) && first.Find(bigKey)->status == Differences::Status::Rejected, "largest area rejected");
+
+        // The same area through CompareArea (the in-place compare's numbers): it must see changes on those chunks too.
+        {
+            std::map<int, LoadedTile> a, b;
+            for (int key : first.Find(bigKey)->Tiles())
+            {
+                auto read = [&](const std::string& map, std::map<int, LoadedTile>& into) {
+                    const auto wdt = mpq.Read("World\\Maps\\" + map + "\\" + map + ".wdt");
+                    if (auto bytes = mpq.Read("World\\Maps\\" + map + "\\" + map + "_" + std::to_string(key % 64) + "_" + std::to_string(key / 64) + ".adt"))
+                        if (auto adt = ParseAdt(*bytes, wdt && WdtBigAlpha(*wdt))) into.emplace(key, LoadedTile::Make(key % 64, key / 64, {}, std::move(*adt)));
+                };
+                read(base, a);
+                read(other, b);
+            }
+            const AreaDiff d = CompareArea(a, b, std::set<std::pair<int, int>>(bigCells.begin(), bigCells.end()));
+            printf("  largest area by CompareArea: %zu/%zu chunks differ, +%zu objects\n", d.changed, d.cells, d.newDoodads.size() + d.newWmos.size());
+            if (first.Find(bigKey)->kinds & CellDiff::NewTerrain)   // CompareArea only sees chunks both have
+                expect(d.cells < bigCells.size(), "new terrain: chunks the map lacks are not in CompareArea");
+            else
+                expect(d.changed + d.newDoodads.size() + d.newWmos.size() > 0, "CompareArea agrees the area differs");
+        }
+
+        Differences second;
+        printf("second scan (saved results):\n");
+        const auto p2 = scan(second);
+        printf("  %.1f s, %zu of %zu tiles from the saved results\n", p2.seconds, p2.cached, p2.total);
+        expect(p2.cached == p2.total, "every tile reused");
+        expect(second.Regions().size() == first.Regions().size(), "same areas");
+        const Differences::Region* again = second.Find(bigKey);
+        expect(again && again->status == Differences::Status::Rejected, "rejection kept");
+        printf("%d problem(s)\n", problems);
+        return problems ? 1 : 0;
+    }
+
+    /// `--water-check <data dir> <map> <x> <y>`: on a tile with both wet and dry chunks, paste a dry chunk over a wet one
+    /// (its water must go) and the wet one over a dry one (its water must come), undo and redo, turn the water four
+    /// quarters (must come back the same), then export and read the tile back: MH2O as pasted, every other chunk's water kept.
+    int WaterCheck()
+    {
+        if (__argc < 6 || !__wargv) return 2;
+        setvbuf(stdout, nullptr, _IONBF, 0);
+        auto arg = [](int i) {
+            char buf[1024] = {};
+            WideCharToMultiByte(CP_ACP, 0, __wargv[i], -1, buf, sizeof buf, nullptr, nullptr);
+            return std::string(buf);
+        };
+        const std::string map = arg(3);
+        const int tx = std::stoi(arg(4)), ty = std::stoi(arg(5));
+        ComPtr<ID3D11Device> device;
+        ComPtr<ID3D11DeviceContext> context;
+        if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &device, nullptr, &context))) return 1;
+        Renderer renderer;
+        std::string error;
+        if (!renderer.Init(device.Get(), context.Get(), error)) return 1;
+        MpqChain mpq;
+        mpq.Open(arg(2));
+        ChangeStore store;
+        TerrainAdapter terrain(mpq, renderer, store);
+        store.Register(terrain);
+        if (!terrain.SetMap(map, error)) { printf("%s\n", error.c_str()); return 1; }
+        for (int i = 0; i < 9; ++i) terrain.Stream((tx + 0.5f) * kTileSize, (ty + 0.5f) * kTileSize, 1, error);
+        const int key = TileKey(tx, ty);
+        auto tile = [&]() -> const LoadedTile& { return terrain.Tiles().at(key); };
+        auto water = [&](int ci) { return TerrainAdapter::LiquidState(tile().adt, tile().adt.chunks[size_t(ci)]); };
+        int wet = -1, dry = -1;
+        for (int ci = 0; ci < int(tile().adt.chunks.size()); ++ci)
+            (water(ci).empty() ? dry : wet) = ci;
+        const size_t mclq = size_t(std::count_if(tile().adt.liquids.begin(), tile().adt.liquids.end(), [](const AdtLiquid& l) { return l.fromMclq; }));
+        printf("%s_%d_%d: %zu liquid instance(s) (%zu old MCLQ); wet chunk %d, dry chunk %d\n", map.c_str(), tx, ty, tile().adt.liquids.size(), mclq,
+               wet, dry);
+        if (wet < 0 || dry < 0) { printf("need a tile with both wet and dry chunks\n"); return 1; }
+        const nlohmann::json wetBefore = water(wet);
+        const size_t total = tile().adt.liquids.size(), wetCount = wetBefore.size();
+        auto cell = [&](int ci) { return terrain.GridOf({ key, ci }); };
+        const TerrainClipboard dryClip = terrain.Copy({ { key, dry } }), wetClip = terrain.Copy({ { key, wet } });
+        int problems = 0;
+        auto expect = [&](bool ok, const char* what) { printf("  %-60s %s\n", what, ok ? "ok" : "FAILED"); problems += !ok; };
+
+        // Rotation is lossless: four quarter turns give the same water.
+        nlohmann::json turned = wetBefore;
+        for (int i = 0; i < 4; ++i) turned = TerrainAdapter::RotateLiquidState(turned);
+        expect(turned == wetBefore, "four quarter turns of the wet chunk's water");
+
+        PasteOptions o;
+        o.blend = false;
+        o.objects = false;
+        auto paste = [&](const TerrainClipboard& clip, int target) {
+            const auto [gx, gz] = cell(target);
+            auto change = terrain.ApplyPlan(terrain.PlanPaste(clip, gx, gz, 0.0f, o), "water check");
+            if (change) store.Commit(std::move(*change));
+            return change.has_value();
+        };
+        expect(paste(dryClip, wet), "dry chunk pasted over the wet one");
+        expect(water(wet).empty(), "  its water is gone");
+        store.Undo();
+        expect(water(wet) == wetBefore, "  undo brings it back");
+        store.Redo();
+        expect(water(wet).empty(), "  redo removes it again");
+        expect(paste(wetClip, dry), "wet chunk pasted over the dry one");
+        expect(water(dry) == wetBefore, "  the dry chunk now has exactly that water");
+        expect(tile().adt.liquids.size() == total, "  instance count unchanged (moved, not lost)");
+
+        // Export and read back: the client's view of the tile.
+        const auto out = std::filesystem::temp_directory_path() / "wow-world-editor-watercheck";
+        std::error_code ec;
+        std::filesystem::remove_all(out, ec);
+        std::vector<std::filesystem::path> files;
+        std::vector<Problem> exportProblems;
+        terrain.Export(out, error, &files, &exportProblems);
+        for (const Problem& p : exportProblems) printf("  export: %s\n", p.message.c_str());
+        const std::string name = map + "_" + std::to_string(tx) + "_" + std::to_string(ty) + ".adt";
+        const auto file = std::find_if(files.begin(), files.end(), [&](const auto& p) { return p.filename().string() == name; });
+        expect(file != files.end(), "exported the tile (structure check passed)");
+        if (file != files.end())
+        {
+            std::ifstream f(*file, std::ios::binary);
+            const std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+            const auto wdt = mpq.Read("World\\Maps\\" + map + "\\" + map + ".wdt");
+            const auto back = ParseAdt(bytes, wdt && WdtBigAlpha(*wdt));
+            expect(back.has_value(), "exported tile parses");
+            if (back)
+            {
+                expect(TerrainAdapter::LiquidState(*back, back->chunks[size_t(wet)]).empty(), "  exported: wet chunk is dry");
+                expect(TerrainAdapter::LiquidState(*back, back->chunks[size_t(dry)]) == wetBefore, "  exported: dry chunk has the pasted water");
+                size_t kept = 0;
+                for (size_t ci = 0; ci < back->chunks.size(); ++ci)
+                    if (int(ci) != wet && int(ci) != dry)
+                    {
+                        const bool same = TerrainAdapter::LiquidState(*back, back->chunks[ci]) == water(int(ci));
+                        if (!same && kept + 1 == ci)   // the first difference, shown short
+                            printf("  chunk %zu differs:\n    editor   %.300s\n    exported %.300s\n", ci, water(int(ci)).dump().c_str(),
+                                   TerrainAdapter::LiquidState(*back, back->chunks[ci]).dump().c_str());
+                        kept += same;
+                    }
+                expect(kept == back->chunks.size() - 2, "  exported: every other chunk's water unchanged");
+                printf("  exported %zu instance(s) (was %zu, moved %zu)\n", back->liquids.size(), total, wetCount);
+            }
+        }
+        printf("%d problem(s)\n", problems);
+        return problems ? 1 : 0;
+    }
+
     int GhostCheck()
     {
         if (__argc < 7 || !__wargv) return 2;
@@ -1282,6 +1678,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdLine, int)
     if (cmdLine && wcsstr(cmdLine, L"--render")) return RenderCheck();
     if (cmdLine && wcsstr(cmdLine, L"--catalog-check")) return CatalogCheck();
     if (cmdLine && wcsstr(cmdLine, L"--ghost-check")) return GhostCheck();
+    if (cmdLine && wcsstr(cmdLine, L"--compare-check")) return CompareCheck();
+    if (cmdLine && wcsstr(cmdLine, L"--water-check")) return WaterCheck();
+    if (cmdLine && wcsstr(cmdLine, L"--diff-check")) return DiffCheck();
     if (cmdLine && wcsstr(cmdLine, L"--blueprint-check")) return BlueprintCheck();
     if (cmdLine && wcsstr(cmdLine, L"--asset-check")) return AssetCheck();
     if (cmdLine && wcsstr(cmdLine, L"--export") && __argc >= 3)
@@ -1619,6 +2018,47 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdLine, int)
         std::filesystem::remove_all(dir, ec);
         }
         printf("spawn check: %d problem(s)\n", problems);
+        return problems ? 1 : 0;
+    }
+    if (cmdLine && wcsstr(cmdLine, L"--unit-catalog-check") && __argc >= 4)
+    {
+        // `--unit-catalog-check <AC server dir> <data dir>`: reads every creature and gameobject template the way the
+        // catalog does, times it, and counts how many of the first 500 of each have a model in the client.
+        setvbuf(stdout, nullptr, _IONBF, 0);
+        std::string password, note, error;
+        const auto profile = ServerProfile::FromWorldserverConf(std::filesystem::path(__wargv[2]), password, note);
+        if (!profile) { printf("%s\n", note.c_str()); return 1; }
+        Db db;
+        if (!db.Connect(profile->dbHost, profile->dbPort, profile->dbUser, password, profile->worldDb, error)) { printf("db: %s\n", error.c_str()); return 1; }
+        MpqChain mpq;
+        mpq.Open(std::filesystem::path(__wargv[3]).string());
+        DisplayLooks looks(mpq);
+        ChangeStore store;
+        int problems = 0;
+        for (const SpawnKind kind : { SpawnKind::Creature, SpawnKind::GameObject })
+        {
+            SpawnAdapter adapter(store, kind);
+            adapter.SetDb(&db);
+            const auto start = std::chrono::steady_clock::now();
+            const auto all = adapter.All(error);
+            const float ms = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - start).count();
+            std::map<uint32_t, size_t> categories;
+            size_t modelled = 0, tried = 0;
+            for (const auto& t : all)
+            {
+                ++categories[t.category];
+                if (tried >= 500) continue;
+                ++tried;
+                Spawn s;
+                s.kind = kind;
+                s.displayId = t.displayId;
+                s.size = t.size;
+                modelled += looks.SpawnLook(s).has_value();
+            }
+            printf("%s: %zu templates in %.0f ms, %zu categories, %zu of the first %zu have a model%s\n", kind == SpawnKind::Creature ? "creatures" : "gameobjects",
+                   all.size(), ms, categories.size(), modelled, tried, error.empty() ? "" : ("  error: " + error).c_str());
+            problems += all.empty() || modelled == 0;
+        }
         return problems ? 1 : 0;
     }
     if (cmdLine && wcsstr(cmdLine, L"--sql") && __argc >= 4)
@@ -2024,7 +2464,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdLine, int)
         std::error_code ec;
         std::filesystem::remove_all(out, ec);
         std::string error;
-        check(areas.Export({ out / "client", out / "server" }, out / "dbc" / "AreaTable.json", error), "export " + error);
+        check(areas.Export({ out / "client", out / "server" }, out / "dbc", error), "export " + error);
         auto readFile = [](const std::filesystem::path& p) {
             std::ifstream f(p, std::ios::binary);
             return std::vector<uint8_t>((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
@@ -2061,8 +2501,104 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdLine, int)
         store.Undo();
         store.Undo();
         check(areas.Count() == 0 && !areas.Find(id) && areas.Find(87)->name == "Goldshire", "undo restores the client's rows");
-        check(areas.Export({ out / "client", out / "server" }, out / "dbc" / "AreaTable.json", error) && !std::filesystem::exists(out / "client" / "AreaTable.dbc"),
+        check(areas.Export({ out / "client", out / "server" }, out / "dbc", error) && !std::filesystem::exists(out / "client" / "AreaTable.dbc"),
               "export with no rows removes the old files");
+
+        // WMOAreaTable: the WMOs of Northshire (Azeroth 32_48); Blizzard's own rows must name groups the files have.
+        printf("-- WMOAreaTable\n");
+        WmoAreaAdapter wmoAreas(mpq, store);
+        store.Register(wmoAreas);
+        const auto rows = wmoAreas.Rows();
+        uint32_t maxWmoRow = rows.empty() ? 0 : rows.rbegin()->first, wmoInRange = 0;
+        for (const auto& [rid, r] : rows) wmoInRange += rid >= 700000 && rid <= 709999;
+        printf("client: %zu rows, max id %u, %u row(s) in 700000-709999\n", rows.size(), maxWmoRow, wmoInRange);
+        const auto tileBytes = mpq.Read("World\\Maps\\Azeroth\\Azeroth_32_48.adt");
+        const auto tile = tileBytes ? ParseAdt(*tileBytes, false) : std::nullopt;
+        check(tile && !tile->wmos.empty(), "Azeroth_32_48 has WMOs");
+        size_t matched = 0, unknown = 0;
+        std::optional<std::pair<WmoAreaKeys, uint32_t>> sample;   // keys + name set of a placement with rows
+        for (const WmoPlacement& p : tile ? tile->wmos : std::vector<WmoPlacement>{})
+        {
+            const auto keys = ReadWmoAreaKeys(p.model, [&](const std::string& n) { return mpq.Read(n); });
+            if (!keys) { printf("  cannot read %s\n", p.model.c_str()); ++unknown; continue; }
+            std::set<uint32_t> groups;
+            for (const auto& g : keys->groups) groups.insert(g.first);
+            const auto own = wmoAreas.For(keys->wmoId, p.nameSet);
+            size_t hits = 0;
+            for (const auto& [group, row] : own) hits += groups.count(group);
+            printf("  %s: WMOID %u, name set %u, %zu group(s), %zu row(s), %zu matching a group\n", p.model.c_str(), keys->wmoId, p.nameSet,
+                   keys->groups.size(), own.size(), hits);
+            matched += hits;
+            if (!own.empty() && !sample) sample = { *keys, p.nameSet };
+        }
+        check(unknown == 0 && matched > 0, "Blizzard's rows name group ids read from the WMO files");
+        if (sample)
+        {
+            const WmoAreaKeys& keys = sample->first;
+            const uint32_t nameSet = 120;   // unused: every group gets a new row
+            std::vector<Change> parts;
+            for (const auto& [group, name] : keys.groups)
+            {
+                const auto own = wmoAreas.For(keys.wmoId, nameSet);
+                const uint32_t rid = own.count(group) ? own.at(group).first : wmoAreas.FreeId(700000, 709999);
+                nlohmann::json after = own.count(group) ? own.at(group).second : wmoAreas.NewRow(rid, keys.wmoId, nameSet, group, 0);
+                after["AreaTableID"] = 87;
+                Change c = wmoAreas.MakeChange(rid, wmoAreas.Row(rid), after, "wmo check");
+                wmoAreas.Apply(c);
+                parts.push_back(std::move(c));
+            }
+            store.Commit(std::move(parts), "wmo check");
+            const auto own = wmoAreas.For(keys.wmoId, nameSet);
+            size_t toGoldshire = 0;
+            for (const auto& [group, row] : own) toGoldshire += row.second.value("AreaTableID", 0u) == 87;
+            check(toGoldshire >= keys.groups.size(), "every group of the sample WMO points at Goldshire");
+            check(wmoAreas.Export({ out / "client" }, out / "dbc", error), "WMOAreaTable export " + error);
+            Dbc wback;
+            const auto firstRow = own.begin()->second.first;
+            check(wback.Load(readFile(out / "client" / "WMOAreaTable.dbc")) && wback.Rows() == rows.size() + keys.groups.size() && wback.Find(firstRow) &&
+                      wback.U32(*wback.Find(firstRow), 10) == 87,
+                  "WMOAreaTable written: row count and AreaTableID");
+            store.Undo();
+            check(wmoAreas.Count() == 0, "undo removes every WMO row change (one batch)");
+        }
+        // World map: Blizzard's Elwynn map and Goldshire overlay, read through the editor's mapping (editor x = zero - LocLeft
+        // side, z = zero - LocTop side), must put Goldshire's chunks inside the overlay's pixel rectangle.
+        printf("-- WorldMapArea / WorldMapOverlay\n");
+        WorldMapAreaAdapter worldMaps(mpq, store);
+        WorldMapOverlayAdapter overlays(mpq, store);
+        const auto maps = worldMaps.Rows(), pieces = overlays.Rows();
+        auto countIn = [](const auto& rows, uint32_t a, uint32_t b) { size_t n = 0; for (const auto& [rid, r] : rows) n += rid >= a && rid <= b; return n; };
+        printf("client: %zu WorldMapArea rows (max id %u, %zu in 9000-9099), %zu overlays (max id %u, %zu in 90000-90999)\n", maps.size(),
+               maps.empty() ? 0 : maps.rbegin()->first, countIn(maps, 9000, 9099), pieces.size(), pieces.empty() ? 0 : pieces.rbegin()->first,
+               countIn(pieces, 90000, 90999));
+        const auto elwynn = worldMaps.ForZone(0, 12);
+        check(elwynn.has_value(), "Elwynn Forest has a world map");
+        if (elwynn)
+        {
+            const nlohmann::json& m = worldMaps.Row(*elwynn);
+            const float x0 = kZeroPoint - m.value("LocLeft", 0.0f), z0 = kZeroPoint - m.value("LocTop", 0.0f);
+            const float sx = m.value("LocLeft", 0.0f) - m.value("LocRight", 0.0f), sz = m.value("LocTop", 0.0f) - m.value("LocBottom", 0.0f);
+            nlohmann::json gold;
+            for (const auto& [oid, o] : overlays.For(*elwynn))
+                if (o.value("AreaID[0]", 0u) == 87) gold = o;
+            check(gold.is_object(), "Elwynn has a Goldshire overlay (" + gold.value("TextureName", std::string("-")) + ")");
+            size_t chunks = 0, inside = 0;
+            for (int ty = int(z0 / kTileSize); ty <= int((z0 + sz) / kTileSize); ++ty)
+                for (int tx = int(x0 / kTileSize); tx <= int((x0 + sx) / kTileSize); ++tx)
+                {
+                    const auto bytes = mpq.Read("World\\Maps\\Azeroth\\Azeroth_" + std::to_string(tx) + "_" + std::to_string(ty) + ".adt");
+                    const auto adt = bytes ? ParseAdt(*bytes, false) : std::nullopt;
+                    for (const AdtChunk& c : adt ? adt->chunks : std::vector<AdtChunk>{})
+                    {
+                        if (c.areaId != 87) continue;
+                        ++chunks;
+                        const float px = (c.baseX + kChunkSize / 2 - x0) / sx * 1002, py = (c.baseZ + kChunkSize / 2 - z0) / sz * 668;
+                        inside += gold.is_object() && px >= gold.value("OffsetX", 0) - 4 && px <= gold.value("OffsetX", 0) + gold.value("TextureWidth", 0) + 4 &&
+                                  py >= gold.value("OffsetY", 0) - 4 && py <= gold.value("OffsetY", 0) + gold.value("TextureHeight", 0) + 4;
+                    }
+                }
+            check(chunks > 0 && inside * 10 >= chunks * 9, "Goldshire chunks land in its overlay: " + std::to_string(inside) + " of " + std::to_string(chunks));
+        }
         std::filesystem::remove_all(out, ec);
         printf("%s\n", problems ? "AREA CHECK FAILED" : "area check passed");
         return problems ? 1 : 0;
