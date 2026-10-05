@@ -207,6 +207,13 @@ private:
     /// Exports, then packs out/client into the project's patch MPQ (out/<patchName>); with `install`, copies it into
     /// the client's Data folder too (the client must be closed: it holds its archives open).
     void BuildPatch(bool install);
+    // Sources window: the project's base files and the compare sources, as layers (edited copy until Apply).
+    bool m_showSources = false;
+    std::vector<Project::Source> m_sourcesEdit;   // [0] = the base
+    std::map<size_t, std::string> m_scanNotes;    // per edited source: what the last scan found and left out
+    void DrawSources();
+    void ApplySources();
+    std::vector<std::pair<std::string, std::vector<MpqLayer>>> CompareSources() const;
     void Undo();
     void Redo();
     void GoToTile(const std::string& map, int x, int y);

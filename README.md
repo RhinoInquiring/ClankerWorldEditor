@@ -72,6 +72,31 @@ objects or map position; search by area name.
   **Only new terrain** lists just these cards.
 - Measured: a whole Eastern Kingdoms scan (687-741 tiles) takes about 10 s; a rescan about 6 s.
 
+### Sources: where the game files come from
+
+**View > Sources** (or **Sources...** in the Versions window). A source is a stack of layers; later layers win, as
+later patches do:
+
+- **MPQ folder**: a client's `Data` folder (or the client folder holding it), a module bundle, any folder of MPQs;
+  its archives are read in the client's own load order, locale folders included.
+- **MPQ file**: one archive, e.g. a single module patch.
+- **Unpacked folder**: files laid out by game path (`World\Maps\...`, `DBFilesClient\...`, `Textures\...`), indexed
+  when the source opens; a folder that has none of those at its top gets a note (picked one level too high or low).
+
+- **Scan folder**: for a folder holding a mix (module bundles, mods, unpacked trees at any depth). Every `.mpq`
+  inside becomes its own layer, in the client's load order; every folder that is the top of unpacked game files
+  becomes an unpacked layer above them (a client folder, which holds `Data`, is scanned into, not taken as one).
+  Files outside any game tree are listed as left out. **Rescan** (one per scanned folder) keeps the layers still
+  there in place with their settings, drops the ones gone, and puts new ones on top.
+
+The **project base** is what you edit, export against and see; it starts as the client folder and can stack more on
+top (a module bundle, an unpacked mod) without installing anything into the client. **Compare sources** feed ghost
+layers, compare and Differences, and supply assets. Each layer has **Players have it**: on for a client's Data and
+installed patches (the patch MPQ does not carry their files), off for an unpacked folder of new art in the base (the
+patch carries what the edits use from it; that is the default for unpacked folders added to the base). New layers go
+on top; arrows reorder, the box disables, Apply saves to project.json (a base change reopens the project, compare
+changes reattach). Older projects convert on open: the client becomes the base, their other clients compare sources.
+
 ### Export and the patch MPQ
 
 - **Ctrl+E** writes the client files to `<project>/out/client`, starting from an empty folder each time (an undone
@@ -156,6 +181,11 @@ largest, then scans again: every tile must come from the saved results and the r
 `--diff-objects "<client>\Data" <base map> <other map> <zone id>` lists, for every difference area in a zone, the
 buildings the compare carries and every building of the other version reaching into it (origin inside or not, on the
 map already or not, model in the client or not), e.g. `Kalimdor Kalimdor_Turtle 400` for Thousand Needles.
+`--sources-check "<client>\Data"` stacks a single MPQ and an unpacked folder over a real client and checks which copy
+wins (and after reordering and disabling), files only one layer has, the catalog listing, "players have it", the
+notes for bad layers, an unpacked tile in the version list, and project.json (layers, and an old project converting).
+`--scan-check` scans a mixed test folder (MPQs at any depth, a locale folder, two unpacked mods, one with its own
+MPQ, a client-like folder, stray files) and checks the layers, their order, reads through them, the strays, and a rescan.
 `--mpq-check <folder> [keep.MPQ]` packs a folder the way the patch is packed, opens it as a client Data folder and
 compares every file read back (the tiles check does this with a real export too).
 `--minimap-check "<client>\Data" <map> <x> <y> [out.png]` draws the tile as the editor's minimaps are drawn and saves it
@@ -186,6 +216,7 @@ tile and its textures without opening a window and prints a summary.
 | `src/AppDifferences.cpp` | Catalog > Differences: scan controls, progress, cards with pictures, review / approve / reject |
 | `src/Minimap.*` | Top-down orthographic render (minimaps, world maps, thumbnails) and the minimap look |
 | `src/AppCompare.cpp` | Compare selection: cycle versions of the selected chunks in place, per-version difference table |
+| `src/AppSources.cpp` | Sources window: base and compare sources as layers (MPQ folders, single MPQs, unpacked folders) |
 | `src/AppServer.cpp` | Server setup wizard, Server panel (GM commands), Problems panel |
 | `src/Loader.*` | Background tile preparation: reads/parses ADTs, decodes textures, builds model meshes off the UI thread |
 | `src/Spawns.*` | Spawn adapter (world.creature / world.gameobject): rows as changes (full rows before/after), DB writes, SQL export |

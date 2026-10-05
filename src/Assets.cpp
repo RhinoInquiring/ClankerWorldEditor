@@ -114,7 +114,7 @@ AssetReport CopyMissingAssets(const MpqChain& mpq, const std::vector<fs::path>& 
     std::deque<std::pair<std::string, std::vector<uint8_t>>> queue;   // files whose references still need following
     auto visit = [&](const std::string& name) {
         if (name.empty() || !seen.insert(Catalog::Normalize(name)).second) return;
-        if (mpq.HasOwn(name)) return;   // the base client has it, and everything it refers to
+        if (mpq.HasInstalled(name)) return;   // players have it (and everything it refers to)
         auto bytes = mpq.Read(name);    // from another client
         const bool optional = name.size() > 6 && Catalog::Normalize(name).ends_with("_s.blp");
         if (!bytes)

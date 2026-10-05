@@ -64,6 +64,15 @@ Known gap: MCNR normals are not rewritten yet, so the client lights edited terra
 - Export writes each added tile (with any later edits), the map's WDT and WDL, the minimap images (as
   `textures/Minimap/wwe_<map>_<x>_<y>.blp`) and the client's `md5translate.trs` with lines naming them.
 
+## Sources (project.json)
+
+- `"base": {"name", "layers": [{"kind": "mpqfolder"|"mpq"|"folder", "path", "enabled", "installed"}]}`: the files
+  the project edits and exports against, later layers above earlier ones. `"compare": [...]`, same shape: versions
+  to compare against. `installed` = players' clients have the layer; export copies referenced files no installed
+  layer has (MpqChain::HasInstalled). `from` (optional) = the folder a scan found the layer in (Rescan updates those).
+- Older projects (`clientDir` + `"sources": [{name, dataDir}]`) load as base = the client, compare = those sources;
+  the next save writes the new shape. `clientDir` stays: play test and install target.
+
 ## Output
 
 - `out/client/`: client files of the last export, rebuilt from empty each time; `out/<patchName>` (project.json,

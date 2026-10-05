@@ -315,17 +315,24 @@ bool App::OpenProject(const std::string& dir)
     if (!project) { Log("Could not open project: %s", error.c_str()); return false; }
 
     CloseProject();
-    const size_t archives = m_mpq.Open(project->DataDir().string());
+    const size_t archives = m_mpq.Open(project->base.layers);
+    for (size_t i = 0; i < project->base.layers.size() && i < m_mpq.Report().size(); ++i)
+        if (!m_mpq.Report()[i].note.empty())
+            Log("Base layer %s: %s", project->base.layers[i].path.c_str(), m_mpq.Report()[i].note.c_str());
     m_mpq.SetOverlay(project->dir / "overlay");   // tiles the project added (rebuilt once its changes are loaded)
     m_terrain.SetProjectDir(project->dir);
-    if (!archives) Log("No MPQ archives in %s. Check the client folder in project.json.", project->DataDir().string().c_str());
+    if (!archives) Log("The project's base files have no archives: check Sources (View > Sources).");
     if (auto dbc = m_mpq.Read("DBFilesClient\\Map.dbc")) m_maps = ParseMapDbc(*dbc);
     std::vector<std::string> blueprintErrors;
     m_blueprints = Blueprint::LoadAll(project->BlueprintsDir(), blueprintErrors);
     m_blueprintThumbs.clear();
     for (const auto& e : blueprintErrors) Log("Blueprint not loaded: %s", e.c_str());
     std::vector<std::string> sourceErrors;
-    m_ghosts.Reset(&m_mpq, project->name, project->sources, sourceErrors);
+    {
+        std::vector<std::pair<std::string, std::vector<MpqLayer>>> compare;
+        for (const Project::Source& s : project->compare) compare.push_back({ s.name, s.layers });
+        m_ghosts.Reset(&m_mpq, project->name, compare, sourceErrors);
+    }
     m_ghosts.StartWorker();
     for (const auto& e : sourceErrors) Log("Source not attached: %s", e.c_str());
     UpdateFallbacks();
@@ -1535,53 +1542,16 @@ void App::DrawVersions()
     }
     ImGui::SetItemTooltip("Scans a whole other version of this map and lists every edited area as a card (Catalog > Differences)");
 
-    // Sources: the project's client plus other clients to compare against.
+    // Sources: the project's base files plus other versions to compare against (edited in the Sources window).
     ImGui::SeparatorText("Sources");
     for (size_t i = 0; i < m_ghosts.Sources().size(); ++i)
     {
         const auto& s = m_ghosts.Sources()[i];
-        ImGui::PushID(int(i));
-        ImGui::TextUnformatted(s.name.c_str());
-        ImGui::SetItemTooltip("%s\n%zu archives", i == 0 ? "This project's client" : s.dataDir.c_str(), s.mpq->Names().size());
-        if (i > 0)
-        {
-            ImGui::SameLine();
-            if (ImGui::SmallButton("Remove"))
-            {
-                std::vector<int> drop;
-                for (const auto& l : m_ghosts.Layers())
-                    if (l.source == i) drop.push_back(l.id);
-                for (int id : drop) RemoveGhostLayer(id);
-                m_mpq.SetFallbacks({});
-                m_ghosts.RemoveSource(i);
-                UpdateFallbacks();
-                m_project->sources.erase(m_project->sources.begin() + std::ptrdiff_t(i - 1));
-                std::string error;
-                if (!m_project->Save(error)) Log("%s", error.c_str());
-                m_versionsKey.clear();
-                ImGui::PopID();
-                break;
-            }
-        }
-        ImGui::PopID();
+        ImGui::TextUnformatted(i == 0 ? (s.name + " (project base)").c_str() : s.name.c_str());
+        ImGui::SetItemTooltip("%zu archive(s) and unpacked folder(s)", s.mpq->Names().size());
     }
-    if (ImGui::Button("Add source..."))
-        if (auto dir = PickFolder(m_hwnd, L"Pick another WoW client folder (or its Data folder)"))
-        {
-            std::string error;
-            const std::string name = std::filesystem::path(*dir).filename().string();
-            if (m_ghosts.AddSource(name, *dir, error))
-            {
-                m_project->sources.push_back({ name, *dir });
-                if (!m_project->Save(error)) Log("%s", error.c_str());
-                UpdateFallbacks();
-                Log("Source %s attached: %zu archives.", name.c_str(), m_ghosts.Sources().back().mpq->Names().size());
-                m_versionsKey.clear();
-            }
-            else
-                Log("%s", error.c_str());
-        }
-    ImGui::SetItemTooltip("Another client to compare against (Epoch, Turtle, an older copy...). Nothing is copied.");
+    if (ImGui::Button("Sources...")) m_showSources = true;
+    ImGui::SetItemTooltip("Folders of MPQs, single MPQs and unpacked folders: the project's base files and versions to compare against");
 
     if (m_terrain.Map().empty()) { ImGui::TextColored(kQuiet, "Open a map to see its versions."); ImGui::End(); return; }
 
@@ -2205,6 +2175,7 @@ void App::Frame(float dt)
     if (ImGuiWindow* inspector = ImGui::FindWindowByName("Inspector"); inspector && inspector->DockId)
         ImGui::SetNextWindowDockID(inspector->DockId, ImGuiCond_FirstUseEver);
     DrawVersions();
+    DrawSources();
     DrawChangesPanel();
     DrawProblemsPanel();
     if (ImGuiWindow* log = ImGui::FindWindowByName("Log"); log && log->DockId) ImGui::SetNextWindowDockID(log->DockId, ImGuiCond_FirstUseEver);
@@ -2371,6 +2342,7 @@ void App::DrawMenuBar()
         ImGui::MenuItem("Gameobjects", nullptr, &m_showSpawns[int(SpawnKind::GameObject)]);
         if (ImGui::MenuItem("Focus camera on tile", "F", false, !m_terrain.Tiles().empty())) FocusTile();
         ImGui::Separator();
+        ImGui::MenuItem("Sources", nullptr, &m_showSources);
         if (ImGui::MenuItem("Reset panel layout")) m_buildLayout = true;
         ImGui::EndMenu();
     }

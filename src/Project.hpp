@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Mpq.hpp"
+
 #include <cstdint>
 #include <filesystem>
 #include <map>
@@ -25,7 +27,12 @@ struct Project
     IdRange Range(const std::string& kind) const { auto it = idRanges.find(kind); return it == idRanges.end() ? IdRange{} : it->second; }
     bool Owns(const std::string& kind, uint32_t id) const { const IdRange r = Range(kind); return id >= r.first && id <= r.last && r.first; }
     std::string serverProfile;   // name of the user's ServerProfile (Server.hpp); credentials never live here
-    std::vector<std::pair<std::string, std::string>> sources;   // other clients to compare against: name, data dir
+    /// A version of the game files: layers of MPQ folders, single MPQs and unpacked folders, later layers above.
+    struct Source { std::string name; std::vector<MpqLayer> layers; };
+    /// What the project edits and exports against, and what the editor shows. Default: the client's Data folder.
+    Source base;
+    /// Other versions to compare against (ghost layers, compare, Differences) and to take assets from.
+    std::vector<Source> compare;
     /// The patch MPQ the project builds (out/<name>) and installs (client Data, in the locale folder for a
     /// patch-<locale>-X name). patch-enUS-Z loads after every patch-X, so the project's files win over the modules'.
     std::string patchName = "patch-enUS-Z.MPQ";

@@ -105,39 +105,155 @@ bool WriteMpq(const std::filesystem::path& archive, const std::filesystem::path&
 
 void MpqChain::Close()
 {
-    for (void* h : m_archives) SFileCloseArchive(h);
+    for (const Archive& a : m_archives)
+        if (a.handle) SFileCloseArchive(a.handle);
     m_archives.clear();
     m_names.clear();
+    m_report.clear();
     m_fallbacks.clear();
 }
 
-size_t MpqChain::Open(const std::string& dataDir)
+namespace
+{
+    /// Folders a game-file tree has at its top; an unpacked layer without any was likely picked one level too high or low.
+    bool LooksLikeGameFiles(const std::filesystem::path& dir)
+    {
+        static const char* kRoots[] = { "world", "dbfilesclient", "textures", "interface", "sound", "character", "creature", "item",
+                                        "spells", "dungeons", "tileset", "environments", "xtextures", "particles", "cameras", "fonts" };
+        std::error_code ec;
+        for (const auto& e : std::filesystem::directory_iterator(dir, ec))
+            if (e.is_directory(ec))
+                for (const char* r : kRoots)
+                    if (Lower(e.path().filename().string()) == r) return true;
+        return false;
+    }
+}
+
+LayerScan ScanForLayers(const std::filesystem::path& root)
+{
+    namespace fs = std::filesystem;
+    LayerScan scan;
+    std::vector<fs::path> mpqs, trees;
+    std::error_code ec;
+    std::vector<fs::path> todo{ root };
+    while (!todo.empty())
+    {
+        const fs::path dir = todo.back();
+        todo.pop_back();
+        // The top of an unpacked tree: one layer; its archives (if any) are layers of their own.
+        const bool tree = LooksLikeGameFiles(dir) && !fs::is_directory(dir / "Data", ec);
+        if (tree) trees.push_back(dir);
+        for (const auto& e : fs::directory_iterator(dir, fs::directory_options::skip_permission_denied, ec))
+        {
+            if (e.is_regular_file(ec))
+            {
+                if (Lower(e.path().extension().string()) == ".mpq") mpqs.push_back(e.path());
+                else if (!tree && ++scan.strayCount <= 8) scan.strays.push_back(fs::relative(e.path(), root, ec).string());
+            }
+            else if (e.is_directory(ec))
+            {
+                if (!tree) todo.push_back(e.path());
+                else   // archives anywhere inside the tree still count (a mod folder shipping a patch beside its loose files)
+                    for (const auto& f : fs::recursive_directory_iterator(e.path(), fs::directory_options::skip_permission_denied, ec))
+                        if (f.is_regular_file(ec) && Lower(f.path().extension().string()) == ".mpq") mpqs.push_back(f.path());
+            }
+        }
+    }
+    // Lowest priority first: archives in the client's order (path breaks ties), then the unpacked trees by path.
+    std::sort(mpqs.begin(), mpqs.end(), [](const fs::path& a, const fs::path& b) {
+        const auto ra = Rank(a.filename().string()), rb = Rank(b.filename().string());
+        return ra != rb ? ra < rb : a < b;
+    });
+    std::sort(trees.begin(), trees.end());
+    for (const auto& p : mpqs) scan.layers.push_back({ MpqLayer::Kind::MpqFile, p.string(), true, true, root.string() });
+    for (const auto& p : trees) scan.layers.push_back({ MpqLayer::Kind::Folder, p.string(), true, true, root.string() });
+    return scan;
+}
+
+std::vector<MpqLayer> RescanLayers(const std::vector<MpqLayer>& layers, const std::string& root, LayerScan* report)
+{
+    LayerScan scan = ScanForLayers(root);
+    auto same = [](const MpqLayer& a, const MpqLayer& b) { return a.kind == b.kind && Lower(a.path) == Lower(b.path); };
+    std::vector<MpqLayer> out;
+    for (const MpqLayer& l : layers)   // kept in place with their settings, unless the scan no longer finds them
+        if (l.from != root || std::any_of(scan.layers.begin(), scan.layers.end(), [&](const MpqLayer& s) { return same(s, l); }))
+            out.push_back(l);
+    for (const MpqLayer& s : scan.layers)   // new ones on top
+        if (std::none_of(out.begin(), out.end(), [&](const MpqLayer& l) { return same(s, l); })) out.push_back(s);
+    if (report) *report = std::move(scan);
+    return out;
+}
+
+size_t MpqChain::Open(const std::vector<MpqLayer>& layers)
 {
     namespace fs = std::filesystem;
     Close();
-
-    std::vector<fs::path> found;
-    std::error_code ec;
-    for (const auto& entry : fs::directory_iterator(dataDir, ec))
+    m_report.resize(layers.size());
+    // Highest priority first: the last layer's archives lead.
+    for (size_t li = layers.size(); li-- > 0;)
     {
-        if (entry.is_regular_file(ec) && Lower(entry.path().extension().string()) == ".mpq")
-            found.push_back(entry.path());
-        else if (entry.is_directory(ec))   // locale folders (enUS, deDE, ...)
-            for (const auto& sub : fs::directory_iterator(entry.path(), ec))
-                if (sub.is_regular_file(ec) && Lower(sub.path().extension().string()) == ".mpq")
-                    found.push_back(sub.path());
-    }
-    std::sort(found.begin(), found.end(), [](const fs::path& a, const fs::path& b) {
-        return Rank(a.filename().string()) > Rank(b.filename().string());
-    });
-
-    for (const auto& path : found)
-    {
-        HANDLE h = nullptr;
-        if (SFileOpenArchive(path.string().c_str(), 0, MPQ_OPEN_READ_ONLY, &h))
+        const MpqLayer& layer = layers[li];
+        LayerReport& report = m_report[li];
+        if (!layer.enabled) { report.note = "disabled"; continue; }
+        std::error_code ec;
+        if (layer.kind == MpqLayer::Kind::Folder)
         {
-            m_archives.push_back(h);
-            m_names.push_back(path.filename().string());
+            Archive a;
+            a.installed = layer.installed;
+            const fs::path root = layer.path;
+            for (const auto& e : fs::recursive_directory_iterator(root, fs::directory_options::skip_permission_denied, ec))
+                if (e.is_regular_file(ec) && Lower(e.path().extension().string()) != ".mpq")
+                {
+                    const std::string rel = Backslashes(fs::relative(e.path(), root, ec).string());
+                    if (a.files.emplace(Lower(rel), e.path()).second) a.listed.push_back(rel);
+                }
+            report.files = a.files.size();
+            if (a.files.empty()) { report.note = "no files"; continue; }
+            if (!LooksLikeGameFiles(root))
+                report.note = "no game folders (World, DBFilesClient, Textures...) at its top: pick the folder that holds them";
+            m_names.push_back(root.filename().string() + "/");
+            m_archives.push_back(std::move(a));
+            report.archives = 1;
+            continue;
+        }
+        std::vector<fs::path> found;
+        if (layer.kind == MpqLayer::Kind::MpqFile)
+        {
+            if (fs::is_regular_file(layer.path, ec)) found.push_back(layer.path);
+            else report.note = "file not found";
+        }
+        else
+        {
+            fs::path dir = layer.path;
+            if (fs::is_directory(dir / "Data", ec)) dir /= "Data";   // a client folder: its Data
+            for (const auto& entry : fs::directory_iterator(dir, ec))
+            {
+                if (entry.is_regular_file(ec) && Lower(entry.path().extension().string()) == ".mpq")
+                    found.push_back(entry.path());
+                else if (entry.is_directory(ec))   // locale folders (enUS, deDE, ...)
+                    for (const auto& sub : fs::directory_iterator(entry.path(), ec))
+                        if (sub.is_regular_file(ec) && Lower(sub.path().extension().string()) == ".mpq")
+                            found.push_back(sub.path());
+            }
+            std::sort(found.begin(), found.end(), [](const fs::path& a, const fs::path& b) {
+                return Rank(a.filename().string()) > Rank(b.filename().string());
+            });
+            if (found.empty()) report.note = "no MPQ archives here";
+        }
+        for (const auto& path : found)
+        {
+            HANDLE h = nullptr;
+            if (SFileOpenArchive(path.string().c_str(), 0, MPQ_OPEN_READ_ONLY, &h))
+            {
+                Archive a;
+                a.handle = h;
+                a.installed = layer.installed;
+                m_archives.push_back(std::move(a));
+                m_names.push_back(path.filename().string());
+                ++report.archives;
+            }
+            else if (report.note.empty())
+                report.note = "could not open " + path.filename().string();
         }
     }
     return m_archives.size();
@@ -150,8 +266,14 @@ std::vector<MpqChain::Entry> MpqChain::List() const
     std::unordered_set<std::string> seen;   // lower-case names already listed
     for (size_t a = 0; a < m_archives.size(); ++a)   // highest priority first: the first archive listing a name wins
     {
+        if (!m_archives[a].handle)
+        {
+            for (const std::string& name : m_archives[a].listed)
+                if (seen.insert(Lower(name)).second) out.push_back({ name, a });
+            continue;
+        }
         SFILE_FIND_DATA fd{};
-        HANDLE find = SFileFindFirstFile(m_archives[a], "*", &fd, nullptr);
+        HANDLE find = SFileFindFirstFile(m_archives[a].handle, "*", &fd, nullptr);
         if (!find) continue;
         do
         {
@@ -195,12 +317,28 @@ bool MpqChain::HasOwn(const std::string& name) const
     return false;
 }
 
+bool MpqChain::HasInstalled(const std::string& name) const
+{
+    for (size_t a = 0; a < m_archives.size(); ++a)
+        if (m_archives[a].installed && Has(a, name)) return true;
+    return false;
+}
+
 std::optional<std::vector<uint8_t>> MpqChain::ReadFrom(size_t archive, const std::string& name) const
 {
-    std::lock_guard lock(m_lock);
     if (archive >= m_archives.size()) return std::nullopt;
+    const Archive& a = m_archives[archive];
+    if (!a.handle)
+    {
+        const auto it = a.files.find(Lower(Backslashes(name)));
+        if (it == a.files.end()) return std::nullopt;
+        std::ifstream f(it->second, std::ios::binary);
+        if (!f) return std::nullopt;
+        return std::vector<uint8_t>((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    }
+    std::lock_guard lock(m_lock);
     HANDLE file = nullptr;
-    if (!SFileOpenFileEx(m_archives[archive], Backslashes(name).c_str(), SFILE_OPEN_FROM_MPQ, &file)) return std::nullopt;
+    if (!SFileOpenFileEx(a.handle, Backslashes(name).c_str(), SFILE_OPEN_FROM_MPQ, &file)) return std::nullopt;
     std::vector<uint8_t> bytes(SFileGetFileSize(file, nullptr));
     DWORD read = 0;
     const bool ok = bytes.empty() || SFileReadFile(file, bytes.data(), static_cast<DWORD>(bytes.size()), &read, nullptr);
@@ -211,6 +349,9 @@ std::optional<std::vector<uint8_t>> MpqChain::ReadFrom(size_t archive, const std
 
 bool MpqChain::Has(size_t archive, const std::string& name) const
 {
+    if (archive >= m_archives.size()) return false;
+    const Archive& a = m_archives[archive];
+    if (!a.handle) return a.files.count(Lower(Backslashes(name))) != 0;
     std::lock_guard lock(m_lock);
-    return archive < m_archives.size() && SFileHasFile(m_archives[archive], Backslashes(name).c_str());
+    return SFileHasFile(a.handle, Backslashes(name).c_str());
 }

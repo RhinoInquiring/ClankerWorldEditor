@@ -125,7 +125,7 @@ std::vector<std::pair<std::string, BlpImage>> Ghosts::TakeImages()
     return std::exchange(m_worker->images, {});
 }
 
-void Ghosts::Reset(const MpqChain* project, const std::string& projectName, const std::vector<std::pair<std::string, std::string>>& attached,
+void Ghosts::Reset(const MpqChain* project, const std::string& projectName, const std::vector<std::pair<std::string, std::vector<MpqLayer>>>& attached,
                    std::vector<std::string>& errors)
 {
     const bool worker = m_worker != nullptr;
@@ -139,24 +139,21 @@ void Ghosts::Reset(const MpqChain* project, const std::string& projectName, cons
     own.name = projectName;
     own.mpq = project;
     m_sources.push_back(std::move(own));
-    for (const auto& [name, dir] : attached)
+    for (const auto& [name, layers] : attached)
     {
         std::string error;
-        if (!AddSource(name, dir, error)) errors.push_back(error);
+        if (!AddSource(name, layers, error)) errors.push_back(error);
     }
     if (worker) StartWorker();
 }
 
-bool Ghosts::AddSource(const std::string& name, const std::string& dataDir, std::string& error)
+bool Ghosts::AddSource(const std::string& name, const std::vector<MpqLayer>& layers, std::string& error)
 {
-    // A client folder or its Data folder.
-    fs::path dir = dataDir;
-    if (fs::is_directory(dir / "Data")) dir /= "Data";
     auto chain = std::make_unique<MpqChain>();
-    if (!chain->Open(dir.string())) { error = "No MPQ archives in " + dir.string(); return false; }
+    if (!chain->Open(layers)) { error = (name.empty() ? std::string("A source") : name) + ": no archives or files in its layers"; return false; }
     Source s;
-    s.name = name.empty() ? fs::path(dataDir).filename().string() : name;
-    s.dataDir = dataDir;
+    s.name = name.empty() && !layers.empty() ? fs::path(layers.front().path).filename().string() : name;
+    s.layers = layers;
     s.mpq = chain.get();
     s.owned = std::move(chain);
     m_sources.push_back(std::move(s));

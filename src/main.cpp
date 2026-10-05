@@ -886,7 +886,7 @@ namespace
         for (int i = 0; i < 9; ++i) terrain.Stream((tx + 0.5f) * kTileSize, (ty + 0.5f) * kTileSize, 1, error);
         Ghosts ghosts;
         std::vector<std::string> errors;
-        ghosts.Reset(&mpq, "base", { { "other", arg(3) } }, errors);
+        ghosts.Reset(&mpq, "base", { { "other", { { MpqLayer::Kind::MpqFolder, arg(3) } } } }, errors);
         if (!errors.empty()) { printf("%s\n", errors[0].c_str()); return 1; }
         mpq.SetFallbacks({ ghosts.Sources()[1].mpq });
         const int id = ghosts.AddLayer(1, -1, "other", __argc > 7 ? arg(7) : std::string()).id;   // optional 7th: another map of that client
@@ -1365,6 +1365,198 @@ namespace
         return bad;
     }
 
+    /// `--sources-check <data dir>`: layers over a real client: an unpacked folder and a single MPQ both overriding a
+    /// client file, files only one layer has, reordering and disabling, "players have it", notes for bad layers, the
+    /// version list seeing an unpacked folder, and project.json (new layers and an old project's sources).
+    int SourcesCheck()
+    {
+        if (__argc < 3 || !__wargv) return 2;
+        setvbuf(stdout, nullptr, _IONBF, 0);
+        namespace fs = std::filesystem;
+        auto arg = [](int i) {
+            char buf[1024] = {};
+            WideCharToMultiByte(CP_ACP, 0, __wargv[i], -1, buf, sizeof buf, nullptr, nullptr);
+            return std::string(buf);
+        };
+        const std::string data = arg(2);
+        const fs::path t = fs::temp_directory_path() / "wow-world-editor-sourcescheck";
+        std::error_code ec;
+        fs::remove_all(t, ec);
+        int problems = 0;
+        auto expect = [&](bool ok, const std::string& what) { printf("  %-66s %s\n", what.c_str(), ok ? "ok" : "FAILED"); problems += !ok; };
+        auto put = [](const fs::path& p, const std::string& text) {
+            fs::create_directories(p.parent_path());
+            std::ofstream(p, std::ios::binary) << text;
+        };
+        auto text = [](const std::optional<std::vector<uint8_t>>& b) { return b ? std::string(b->begin(), b->end()) : std::string("<none>"); };
+        const std::string shared = "DBFilesClient\\Map.dbc";
+        // An unpacked folder (with a tile, to show up as a version) and a single MPQ, both with their own Map.dbc.
+        put(t / "loose" / "DBFilesClient" / "Map.dbc", "from the unpacked folder");
+        put(t / "loose" / "Textures" / "Wwe" / "only_loose.blp", "loose only");
+        {
+            MpqChain client;
+            client.Open(data);
+            const auto adt = client.Read("World\\Maps\\Azeroth\\Azeroth_32_48.adt");
+            fs::create_directories(t / "loose" / "World" / "Maps" / "Azeroth");
+            if (adt) std::ofstream(t / "loose" / "World" / "Maps" / "Azeroth" / "Azeroth_32_48.adt", std::ios::binary)
+                         .write(reinterpret_cast<const char*>(adt->data()), std::streamsize(adt->size() - 4));   // different bytes: its own version
+        }
+        put(t / "mpqsrc" / "DBFilesClient" / "Map.dbc", "from the single MPQ");
+        put(t / "mpqsrc" / "Textures" / "Wwe" / "only_mpq.blp", "mpq only");
+        std::string error;
+        expect(WriteMpq(t / "single.MPQ", t / "mpqsrc", error), "a single MPQ built for the test");
+        fs::create_directories(t / "empty");
+
+        const MpqLayer client{ MpqLayer::Kind::MpqFolder, data }, single{ MpqLayer::Kind::MpqFile, (t / "single.MPQ").string() };
+        MpqLayer loose{ MpqLayer::Kind::Folder, (t / "loose").string() };
+        loose.installed = false;   // new art: the patch carries it
+        {
+            MpqChain c;
+            c.Open({ client, single, loose });
+            expect(text(c.Read(shared)) == "from the unpacked folder", "top layer wins: the unpacked folder over the MPQ and the client");
+            expect(text(c.Read("textures/wwe/ONLY_MPQ.blp")) == "mpq only", "a file only the single MPQ has (any case, any slash)");
+            expect(text(c.Read("Textures\\Wwe\\only_loose.blp")) == "loose only", "a file only the unpacked folder has");
+            expect(c.Read("World\\Maps\\Azeroth\\Azeroth.wdt").has_value(), "client files still read through the layers");
+            expect(!c.HasInstalled("Textures\\Wwe\\only_loose.blp") && c.HasInstalled("Textures\\Wwe\\only_mpq.blp") && c.HasInstalled(shared),
+                   "players-have-it: off for the unpacked folder, on for the rest");
+            size_t listed = 0;
+            for (const auto& e : c.List())
+            {
+                const std::string n = Catalog::Normalize(e.name);
+                listed += n.find("only_loose") != std::string::npos || n.find("only_mpq") != std::string::npos;
+            }
+            expect(listed == 2, "the catalog lists both layers' own files");
+            expect(c.Report().size() == 3 && c.Report()[2].files == 3 && c.Report()[2].note.empty() && c.Report()[1].archives == 1,
+                   "layer report: 3 unpacked files, 1 single archive, no notes");
+        }
+        {
+            MpqChain c;
+            c.Open({ client, loose, single });
+            expect(text(c.Read(shared)) == "from the single MPQ", "reordered: now the single MPQ wins");
+            MpqLayer off = single;
+            off.enabled = false;
+            c.Open({ client, loose, off });
+            expect(text(c.Read(shared)) == "from the unpacked folder" && !c.Read("Textures\\Wwe\\only_mpq.blp"), "disabled: the single MPQ gives nothing");
+            c.Open({ client, { MpqLayer::Kind::Folder, (t / "empty").string() }, { MpqLayer::Kind::MpqFile, (t / "nope.MPQ").string() },
+                     { MpqLayer::Kind::Folder, (t / "loose" / "Textures").string() } });
+            printf("    notes: \"%s\" / \"%s\" / \"%s\"\n", c.Report()[1].note.c_str(), c.Report()[2].note.c_str(), c.Report()[3].note.c_str());
+            expect(!c.Report()[1].note.empty() && !c.Report()[2].note.empty() && !c.Report()[3].note.empty(),
+                   "notes for an empty folder, a missing MPQ, a folder one level too deep");
+        }
+        {
+            // The version list (patch history) shows the unpacked folder's copy of a tile.
+            MpqChain base;
+            base.Open(data);
+            Ghosts ghosts;
+            std::vector<std::string> errors;
+            ghosts.Reset(&base, "client", { { "layered", { client, loose } } }, errors);
+            const auto versions = ghosts.Versions("Azeroth", 32, 48, nullptr);
+            const bool seen = std::any_of(versions.begin(), versions.end(), [](const Ghosts::Version& v) { return v.label.find("loose/") != std::string::npos; });
+            expect(seen, "the version list includes the unpacked folder's tile");
+        }
+        {
+            // project.json: layers round-trip; an old project's client and sources become base and compare sources.
+            Project p;
+            p.dir = t / "project";
+            p.clientDir = "C:/client";
+            p.base = { "Mine", { client, single, loose } };
+            p.compare = { { "Turtle", { { MpqLayer::Kind::MpqFolder, "C:/turtle" } } } };
+            expect(p.Save(error), "project saved");
+            const auto back = Project::Load(p.dir, error);
+            expect(back && back->base.layers.size() == 3 && back->base.layers[2].kind == MpqLayer::Kind::Folder && !back->base.layers[2].installed &&
+                       back->base.layers[1].kind == MpqLayer::Kind::MpqFile && back->compare.size() == 1 && back->compare[0].name == "Turtle",
+                   "layers and compare sources come back as saved");
+            put(t / "old" / "project.json", R"({"name":"old","clientDir":"C:/wxl","sources":[{"name":"Epoch","dataDir":"D:/epoch/Data"}]})");
+            const auto old = Project::Load(t / "old", error);
+            expect(old && old->base.layers.size() == 1 && old->base.layers[0].path == "C:/wxl" && old->compare.size() == 1 &&
+                       old->compare[0].layers[0].path == "D:/epoch/Data",
+                   "an old project: its client becomes the base, its sources compare sources");
+        }
+        fs::remove_all(t, ec);
+        printf("%d problem(s)\n", problems);
+        return problems ? 1 : 0;
+    }
+
+    /// `--scan-check`: a mixed folder (MPQs at any depth, a locale folder, two unpacked mods, one shipping its own MPQ,
+    /// a client-like folder with Interface beside Data, stray files) scanned into layers: kinds, order, game paths read
+    /// through them, strays reported; then a rescan after a mod is added and one removed keeps the user's settings.
+    int ScanCheck()
+    {
+        setvbuf(stdout, nullptr, _IONBF, 0);
+        namespace fs = std::filesystem;
+        const fs::path t = fs::temp_directory_path() / "wow-world-editor-scancheck", root = t / "root";
+        std::error_code ec;
+        fs::remove_all(t, ec);
+        int problems = 0;
+        auto expect = [&](bool ok, const std::string& what) { printf("  %-66s %s\n", what.c_str(), ok ? "ok" : "FAILED"); problems += !ok; };
+        auto put = [](const fs::path& p, const std::string& text) {
+            fs::create_directories(p.parent_path());
+            std::ofstream(p, std::ios::binary) << text;
+        };
+        auto mpq = [&](const fs::path& at, const std::string& file, const std::string& text) {
+            put(t / "src" / at.filename().string() / file, text);
+            std::string error;
+            fs::create_directories(at.parent_path());
+            WriteMpq(at, t / "src" / at.filename().string(), error);
+        };
+        mpq(root / "Client" / "Data" / "patch-A.MPQ", "Textures\\shared.blp", "client patch-A");
+        mpq(root / "Client" / "Data" / "enUS" / "patch-enUS-A.MPQ", "Textures\\shared.blp", "client patch-enUS-A");
+        put(root / "Client" / "Interface" / "AddOns" / "Foo" / "Foo.lua", "-- an addon: not a game tree, the client folder holds Data");
+        put(root / "Client" / "Wow.exe", "not really");
+        mpq(root / "Deep" / "a" / "b" / "patch-3.MPQ", "Textures\\deep.blp", "deep patch-3");
+        put(root / "Mods" / "ModOne" / "World" / "Maps" / "Azeroth" / "one.txt", "mod one");
+        put(root / "Mods" / "ModTwo" / "DBFilesClient" / "two.dbc", "mod two");
+        put(root / "Mods" / "ModTwo" / "Textures" / "shared.blp", "mod two shared");
+        mpq(root / "Mods" / "ModTwo" / "patch-M.MPQ", "Textures\\twompq.blp", "mod two's own archive");
+        put(root / "Mods" / "readme.txt", "stray");
+        put(root / "notes.txt", "stray");
+
+        LayerScan scan = ScanForLayers(root);
+        std::vector<std::string> order;
+        for (const MpqLayer& l : scan.layers)
+            order.push_back(std::string(l.kind == MpqLayer::Kind::Folder ? "dir:" : "mpq:") + fs::path(l.path).filename().string());
+        std::string shown;
+        for (const auto& o : order) shown += o + " ";
+        printf("  layers, lowest first: %s\n  strays: %zu\n", shown.c_str(), scan.strayCount);
+        const std::vector<std::string> want = { "mpq:patch-3.MPQ", "mpq:patch-A.MPQ", "mpq:patch-enUS-A.MPQ", "mpq:patch-M.MPQ", "dir:ModOne", "dir:ModTwo" };
+        expect(order == want, "archives in client order, then unpacked trees; the client folder not a tree");
+        for (const auto& f : scan.strays) printf("    stray: %s\n", f.c_str());
+        expect(scan.strayCount == 4, "four files left out and reported (readme, notes, Wow.exe, the client's addon)");
+        expect(std::all_of(scan.layers.begin(), scan.layers.end(), [&](const MpqLayer& l) { return l.from == root.string(); }), "every layer knows the scanned folder");
+        {
+            MpqChain c;
+            c.Open(scan.layers);
+            auto text = [&](const std::string& n) { const auto b = c.Read(n); return b ? std::string(b->begin(), b->end()) : std::string("<none>"); };
+            expect(text("World\\Maps\\Azeroth\\one.txt") == "mod one" && text("DBFilesClient\\two.dbc") == "mod two", "unpacked mods read by their game paths");
+            expect(text("Textures\\shared.blp") == "mod two shared", "an unpacked mod overrides the archives below it");
+            expect(text("Textures\\twompq.blp") == "mod two's own archive" && text("Textures\\deep.blp") == "deep patch-3", "archives at any depth read");
+            expect(!c.Read("patch-M.MPQ"), "an unpacked tree does not list the archives inside it as files");
+        }
+        // Rescan: ModOne disabled by the user and moved to the top; ModThree appears; ModTwo goes.
+        std::vector<MpqLayer> mine = scan.layers;
+        MpqLayer one = mine[4];
+        one.enabled = false;
+        mine.erase(mine.begin() + 4);
+        mine.push_back(one);
+        put(root / "Mods" / "ModThree" / "Textures" / "three.blp", "mod three");
+        fs::remove_all(root / "Mods" / "ModTwo", ec);
+        const std::vector<MpqLayer> again = RescanLayers(mine, root.string());
+        std::string after;
+        for (const MpqLayer& l : again) after += fs::path(l.path).filename().string() + (l.enabled ? " " : "(off) ");
+        printf("  after rescan: %s\n", after.c_str());
+        const auto at = [&](const std::string& name) {
+            for (size_t i = 0; i < again.size(); ++i)
+                if (fs::path(again[i].path).filename().string() == name) return int(i);
+            return -1;
+        };
+        expect(at("ModTwo") < 0 && at("patch-M.MPQ") < 0, "the removed mod and its archive are gone");
+        expect(at("ModOne") >= 0 && !again[size_t(at("ModOne"))].enabled && at("ModThree") == int(again.size()) - 1 && at("ModOne") == at("ModThree") - 1,
+               "ModOne kept where the user put it, still off; ModThree added on top");
+        fs::remove_all(t, ec);
+        printf("%d problem(s)\n", problems);
+        return problems ? 1 : 0;
+    }
+
     /// `--mpq-check <folder> [keep.MPQ]`: packs a folder as the project's patch is packed and reads every file back;
     /// with a second path, also writes the pack there (to open with other tools).
     int MpqCheck()
@@ -1712,7 +1904,7 @@ namespace
 
         Ghosts ghosts;
         std::vector<std::string> errors;
-        ghosts.Reset(&mpq, "WXL", { { "Other", arg(3) } }, errors);
+        ghosts.Reset(&mpq, "WXL", { { "Other", { { MpqLayer::Kind::MpqFolder, arg(3) } } } }, errors);
         for (const auto& e : errors) printf("source error: %s\n", e.c_str());
         const auto t0 = std::chrono::steady_clock::now();
         const auto versions = ghosts.Versions(map, tx, ty, &terrain.Tiles().at(TileKey(tx, ty)));
@@ -2169,6 +2361,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdLine, int)
     if (cmdLine && wcsstr(cmdLine, L"--tiles-check")) return TilesCheck();
     if (cmdLine && wcsstr(cmdLine, L"--minimap-check")) return MinimapCheck();
     if (cmdLine && wcsstr(cmdLine, L"--mpq-check")) return MpqCheck();
+    if (cmdLine && wcsstr(cmdLine, L"--sources-check")) return SourcesCheck();
+    if (cmdLine && wcsstr(cmdLine, L"--scan-check")) return ScanCheck();
     if (cmdLine && wcsstr(cmdLine, L"--diff-objects")) return DiffObjects();
     if (cmdLine && wcsstr(cmdLine, L"--blueprint-check")) return BlueprintCheck();
     if (cmdLine && wcsstr(cmdLine, L"--asset-check")) return AssetCheck();
@@ -2184,10 +2378,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdLine, int)
         Renderer renderer;
         if (!renderer.Init(device.Get(), context.Get(), error)) return 1;
         MpqChain mpq;
-        mpq.Open(project->DataDir().string());
+        mpq.Open(project->base.layers);
         Ghosts ghosts;
         std::vector<std::string> errors;
-        ghosts.Reset(&mpq, project->name, project->sources, errors);
+        std::vector<std::pair<std::string, std::vector<MpqLayer>>> compare;
+        for (const Project::Source& s : project->compare) compare.push_back({ s.name, s.layers });
+        ghosts.Reset(&mpq, project->name, compare, errors);
         std::vector<const MpqChain*> fallbacks;
         for (size_t i = 1; i < ghosts.Sources().size(); ++i) fallbacks.push_back(ghosts.Sources()[i].mpq);
         mpq.SetFallbacks(fallbacks);
@@ -2849,7 +3045,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdLine, int)
             if (__argc > 6)
             {
                 std::vector<std::string> errors;
-                ghosts.Reset(&mpq, "client", { { "other", arg(6) } }, errors);
+                ghosts.Reset(&mpq, "client", { { "other", { { MpqLayer::Kind::MpqFolder, arg(6) } } } }, errors);
                 ghosts.AddLayer(1, -1, "other");
                 if (background) ghosts.StartWorker();
             }

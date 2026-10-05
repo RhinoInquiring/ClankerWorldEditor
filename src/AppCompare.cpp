@@ -162,7 +162,8 @@ void App::UpdateCompare()
                 for (char& c : ext) c = char(std::tolower((unsigned char)c));
                 if (ext == ".mdx" || ext == ".mdl") name.replace(name.size() - 4, 4, ".m2");
             }
-            if (m_mpq.HasOwn(name)) return 0;
+            if (m_mpq.HasInstalled(name)) return 0;
+            if (m_mpq.HasOwn(name)) return 1;   // in the project's files, not in players' clients: export copies it
             for (size_t s = 1; s < m_ghosts.Sources().size(); ++s)
                 if (m_ghosts.Sources()[s].mpq->HasOwn(name)) return 1;
             return 2;

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Mpq.hpp"
 #include "Terrain.hpp"
 
 #include <DirectXMath.h>
@@ -24,7 +25,8 @@ class Ghosts
 public:
     struct Source
     {
-        std::string name, dataDir;
+        std::string name;
+        std::vector<MpqLayer> layers;
         std::unique_ptr<MpqChain> owned;   // attached sources own their chain; the project's is borrowed
         const MpqChain* mpq = nullptr;
     };
@@ -60,10 +62,10 @@ public:
         std::vector<std::pair<int, int>> loaded, unloaded;   // (layer id, tile key)
     };
 
-    /// Starts over with the project's client as source 0 and the attached sources (name, data dir).
-    void Reset(const MpqChain* project, const std::string& projectName, const std::vector<std::pair<std::string, std::string>>& attached,
+    /// Starts over with the project's files as source 0 and the attached sources (name, layers).
+    void Reset(const MpqChain* project, const std::string& projectName, const std::vector<std::pair<std::string, std::vector<MpqLayer>>>& attached,
                std::vector<std::string>& errors);
-    bool AddSource(const std::string& name, const std::string& dataDir, std::string& error);
+    bool AddSource(const std::string& name, const std::vector<MpqLayer>& layers, std::string& error);
     void RemoveSource(size_t index);
     const std::vector<Source>& Sources() const { return m_sources; }
     const MpqChain& Chain(size_t source) const { return *m_sources.at(source).mpq; }

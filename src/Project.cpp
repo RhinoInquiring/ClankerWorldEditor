@@ -14,7 +14,18 @@ bool Project::Save(std::string& error) const
     if (!serverProfile.empty()) j["serverProfile"] = serverProfile;
     j["patchName"] = patchName;
     for (const auto& [kind, r] : idRanges) j["idRanges"][kind] = { r.first, r.last };
-    for (const auto& [sourceName, dataDir] : sources) j["sources"].push_back({ { "name", sourceName }, { "dataDir", dataDir } });
+    auto source = [](const Source& s) {
+        nlohmann::json layers = nlohmann::json::array();
+        for (const MpqLayer& l : s.layers)
+        {
+            layers.push_back({ { "kind", MpqLayer::KindName(l.kind) }, { "path", l.path }, { "enabled", l.enabled }, { "installed", l.installed } });
+            if (!l.from.empty()) layers.back()["from"] = l.from;
+        }
+        return nlohmann::json{ { "name", s.name }, { "layers", std::move(layers) } };
+    };
+    j["base"] = source(base);
+    j["compare"] = nlohmann::json::array();
+    for (const Source& s : compare) j["compare"].push_back(source(s));
     std::ofstream f(dir / "project.json");
     f << j.dump(2) << "\n";
     if (!f) { error = "Cannot write " + (dir / "project.json").string(); return false; }
@@ -43,7 +54,19 @@ std::optional<Project> Project::Load(const fs::path& dir, std::string& error)
                 const std::string key = std::string(kind) == "creature.guid" ? "creatureGuidStart" : "gameobjectGuidStart";
                 if (j.contains(key)) p.idRanges[kind] = { j[key].get<uint32_t>(), j[key].get<uint32_t>() + 99999 };
             }
-        for (const auto& s : j.value("sources", nlohmann::json::array())) p.sources.push_back({ s.value("name", ""), s.value("dataDir", "") });
+        auto source = [](const nlohmann::json& s) {
+            Source out{ s.value("name", "") };
+            for (const auto& l : s.value("layers", nlohmann::json::array()))
+                out.layers.push_back({ MpqLayer::KindFrom(l.value("kind", "mpqfolder")), l.value("path", ""), l.value("enabled", true),
+                                       l.value("installed", true), l.value("from", "") });
+            return out;
+        };
+        if (j.contains("base")) p.base = source(j["base"]);
+        if (p.base.layers.empty()) p.base = { "Client", { { MpqLayer::Kind::MpqFolder, p.clientDir } } };   // older projects: the client
+        for (const auto& s : j.value("compare", nlohmann::json::array())) p.compare.push_back(source(s));
+        // Older projects listed other clients as "sources" (a Data folder each).
+        for (const auto& s : j.value("sources", nlohmann::json::array()))
+            p.compare.push_back({ s.value("name", ""), { { MpqLayer::Kind::MpqFolder, s.value("dataDir", "") } } });
         return p;
     }
     catch (const std::exception& e)
