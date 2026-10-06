@@ -257,6 +257,7 @@ bool App::Init(HWND hwnd, ID3D11Device* device, ID3D11DeviceContext* context, bo
         { "Group: Objects", "F2", [this] { SetGroup(Group::Objects); }, always },
         { "Group: Units", "F3", [this] { SetGroup(Group::Units); }, always },
         { "Group: Regions", "F4", [this] { SetGroup(Group::Regions); }, always },
+        { "Group: Atmosphere", "F6", [this] { SetGroup(Group::Atmosphere); }, always },
         { "Copy selected chunks", "Ctrl+C", [this] { CopySelection(); }, [this] { return !m_selection.empty(); } },
         { "Paste at cursor", "Ctrl+V", [this] { PasteAtCursor(); }, [this] { return !m_clipboard.Empty(); } },
         { "Start / stop placing the clipboard", "P", [this] { m_tool = Tool::Copy; m_placing = !m_placing; m_pin.reset(); }, [this] { return !m_clipboard.Empty(); } },
@@ -2192,7 +2193,8 @@ void App::Frame(float dt)
     // A tool of another group (button or shortcut): that group's panels come forward; each group remembers its tool.
     if (const Group g = GroupOf(m_tool); g != GroupOf(m_lastTool))
     {
-        const std::vector<const char*> panels[4] = { { "Inspector", "Catalog" }, { "Object", "Catalog" }, { "Inspector", "Catalog" }, { "Inspector", "Problems" } };
+        const std::vector<const char*> panels[kGroups] = { { "Inspector", "Catalog" }, { "Object", "Catalog" }, { "Inspector", "Catalog" },
+                                                           { "Inspector", "Problems" }, { "Inspector" } };
         for (const char* name : panels[int(g)]) ImGui::SetWindowFocus(name);
         ImGui::SetWindowFocus("Tools");
         if (g == Group::Terrain) m_catalogShowTab = int(Catalog::Kind::GroundTexture);
@@ -2343,8 +2345,8 @@ void App::HandleShortcuts()
     if (ImGui::GetIO().KeyCtrl) return;
     for (const ToolInfo& t : kTools)
         if (ImGui::IsKeyPressed(t.imKey, false)) m_tool = t.tool;
-    for (int g = 0; g < 4; ++g)   // F1..F4: tool groups
-        if (ImGui::IsKeyPressed(ImGuiKey(ImGuiKey_F1 + g), false)) SetGroup(Group(g));
+    for (int g = 0; g < kGroups; ++g)   // F1..F4, F6: tool groups
+        if (ImGui::IsKeyPressed(GroupKey(g), false)) SetGroup(Group(g));
     const bool pathMode = m_path && m_tool == Tool::Creatures;
     if (pathMode && (ImGui::IsKeyPressed(ImGuiKey_Enter, false) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false))) SavePathEdit();
     TransformKeys();   // every tool that moves things: handles, height, scale, ground, delete
@@ -2383,6 +2385,8 @@ void App::HandleShortcuts()
         else if (m_tool == Tool::Pois && m_poiSel) m_poiSel = 0;
         else if (m_flightPlace) m_flightPlace = false;
         else if (m_tool == Tool::Flights && (m_flightNode || m_flightPath)) { m_flightNode = m_flightPath = 0; m_flightPoint.reset(); }
+        else if (m_lightPlace) m_lightPlace = false;
+        else if (m_tool == Tool::Lights && m_lightSel) m_lightSel = 0;
         else if (m_comparing) StopCompare();          // the map comes back as it is
         else if (!m_diffPending.empty()) { EndNewTiles(); m_diffPending.clear(); m_diffActive.clear(); }   // a review still on its way
         else if (m_pin) CancelPin();                  // first Esc: unpin, terrain goes back
@@ -2439,6 +2443,7 @@ void App::DrawMenuBar()
         ImGui::MenuItem("Object boxes", nullptr, &m_drawOptions.showObjects);
         ImGui::MenuItem("Far terrain (whole map, low detail)", nullptr, &m_drawOptions.farTerrain);
         ImGui::MenuItem("Terrain level of detail", nullptr, &m_drawOptions.lod);
+        ImGui::MenuItem("Game lighting (time of day in Atmosphere > Lights)", nullptr, &m_gameLight);
         ImGui::MenuItem("Creatures", nullptr, &m_showSpawns[int(SpawnKind::Creature)]);
         ImGui::MenuItem("Gameobjects", nullptr, &m_showSpawns[int(SpawnKind::GameObject)]);
         DrawEventFilter(330);
@@ -2467,12 +2472,13 @@ void App::DrawToolbar()
     {
         // Tool groups: each has its own tools and brings its panels forward.
         const char* tips[] = { "Sculpt, paint, holes, copy and paste", "Doodads and WMOs: place from the Catalog, move, turn, scale",
-                               "Creatures, gameobjects and their paths", "Zones and areas, buildings, the world map" };
-        for (int g = 0; g < 4; ++g)
+                               "Creatures, gameobjects and their paths", "Zones and areas, buildings, the world map",
+                               "Lights: sky, fog and sun colours by time of day" };
+        for (int g = 0; g < kGroups; ++g)
         {
             const bool on = int(GroupOf(m_tool)) == g;
             if (on) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.22f, 0.42f, 0.70f, 1));
-            if (ImGui::Button((std::string(kGroupNames[g]) + "  F" + std::to_string(g + 1)).c_str())) SetGroup(Group(g));
+            if (ImGui::Button((std::string(kGroupNames[g]) + "  F" + std::to_string(g < 4 ? g + 1 : g + 2)).c_str())) SetGroup(Group(g));
             if (on) ImGui::PopStyleColor();
             ImGui::SetItemTooltip("%s", tips[g]);
             ImGui::SameLine();
@@ -2658,6 +2664,11 @@ void App::BuildOverlay(std::vector<LineVertex>& lines) const
     if (m_tool == Tool::Pois)
     {
         BuildPoiOverlay(lines);
+        return;
+    }
+    if (m_tool == Tool::Lights)
+    {
+        BuildLightOverlay(lines);
         return;
     }
     if (m_tool == Tool::Flights)
@@ -2865,7 +2876,7 @@ void App::DrawViewport(float dt)
         }
         // Spawns, paths, triggers, POIs and flight nodes stand on WMO floors too (bridges, buildings, dungeons): the nearer
         // of the terrain and a WMO under the cursor. Terrain tools keep aiming at the terrain.
-        if (SpawnTool() || m_tool == Tool::Triggers || m_tool == Tool::Pois || m_tool == Tool::Flights)
+        if (SpawnTool() || m_tool == Tool::Triggers || m_tool == Tool::Pois || m_tool == Tool::Flights || m_tool == Tool::Lights)
         {
             ModelRenderer::DrawSettings wmos = m_modelSettings;
             wmos.doodads = false;
@@ -2982,6 +2993,10 @@ void App::DrawViewport(float dt)
     else if (m_tool == Tool::Flights)
     {
         FlightsViewport(origin, size, viewProj);
+    }
+    else if (m_tool == Tool::Lights)
+    {
+        LightsViewport(origin, size, viewProj);
     }
     else if (m_tool == Tool::Objects)
     {
@@ -3130,6 +3145,8 @@ void App::DrawViewport(float dt)
     m_context->RSSetViewports(1, &vp);
     m_context->ClearRenderTargetView(m_vpRtv.Get(), sky);
     m_context->ClearDepthStencilView(m_vpDsv.Get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
+    UpdateSceneLight();
+    m_renderer.DrawSky(viewProj);
     if (m_drawOptions.farTerrain && !m_soloLayer)
     {
         // The low-detail map first, with a projection reaching across the continent; depth then starts over for the
@@ -3169,7 +3186,7 @@ void App::DrawViewport(float dt)
     const ImVec2 pad{ origin.x + 12, origin.y + 10 };
     if (!m_terrain.Map().empty())
     {
-        const char* tools[] = { "Select", "Sculpt", "Copy", "Holes", "Objects", "Paint", "Creatures", "Gameobjects", "Zones", "Triggers", "POIs", "Flights", "Shade" };
+        const char* tools[] = { "Select", "Sculpt", "Copy", "Holes", "Objects", "Paint", "Creatures", "Gameobjects", "Zones", "Triggers", "POIs", "Flights", "Shade", "Lights" };
         const char* modes[] = { "Raise", "Lower", "Flatten", "Smooth" };
         char caption[400];
         if (m_tool == Tool::Sculpt)
@@ -3201,6 +3218,8 @@ void App::DrawViewport(float dt)
                                     "click the ground: move the point there   Esc: stop" };
             snprintf(caption, sizeof caption, "%s   World > POIs   %s", m_terrain.Map().c_str(), picks[int(m_poiPick)]);
         }
+        else if (m_tool == Tool::Lights && m_lightPlace)
+            snprintf(caption, sizeof caption, "%s   World > Lights   click the ground: add a light   Shift+click: add and keep going   Esc: stop", m_terrain.Map().c_str());
         else if (m_tool == Tool::Objects && m_armed)
             snprintf(caption, sizeof caption, "%s   World > Objects > Place %s   click: place   Shift+click: place and keep going   Esc: stop",
                      m_terrain.Map().c_str(), FileOf(m_armed->path).c_str());
@@ -3208,7 +3227,8 @@ void App::DrawViewport(float dt)
         {
             // Every tool that moves things: the same caption and keys.
             const size_t selected = m_tool == Tool::Objects ? m_objSel.size() : SpawnTool() ? m_spawnSel.size()
-                                  : m_tool == Tool::Triggers ? size_t(m_triggerSel != 0) : m_tool == Tool::Flights ? size_t(m_flightNode || m_flightPoint) : size_t(m_poiSel != 0);
+                                  : m_tool == Tool::Triggers ? size_t(m_triggerSel != 0) : m_tool == Tool::Flights ? size_t(m_flightNode || m_flightPoint)
+                                  : m_tool == Tool::Lights ? size_t(m_lightSel != 0) : size_t(m_poiSel != 0);
             snprintf(caption, sizeof caption, "%s   World > %s > %s (%s)   %zu selected   %s", m_terrain.Map().c_str(), tools[int(m_tool)],
                      m_gizmo == Gizmo::Move ? "Move" : m_gizmo == Gizmo::Rotate ? "Rotate" : "Scale", m_gizmoLocal ? "local" : "world", selected,
                      TransformHint().c_str());
@@ -3325,6 +3345,7 @@ void App::DrawToolsPanel()
     if (m_tool == Tool::Triggers) DrawTriggersPanel(w);
     if (m_tool == Tool::Pois) DrawPoisPanel(w);
     if (m_tool == Tool::Flights) DrawFlightsPanel(w);
+    if (m_tool == Tool::Lights) DrawLightsPanel(w);
     if (SpawnTool()) DrawSpawnsPanel(w);
     if (m_tool == Tool::Objects && Section("Objects"))
     {

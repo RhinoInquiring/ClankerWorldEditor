@@ -47,6 +47,7 @@ add_executable(wow-world-editor WIN32
     src/AppCompare.cpp
     src/AppDifferences.cpp
     src/AppFlights.cpp
+    src/AppLights.cpp
     src/Differences.cpp
     src/AppInspect.cpp
     src/AppNpc.cpp
@@ -60,6 +61,7 @@ add_executable(wow-world-editor WIN32
     src/AppTriggers.cpp
     src/AppZones.cpp
     src/Areas.cpp
+    src/Lights.cpp
     src/Assets.cpp
     src/Blend.cpp
     src/Blueprint.cpp

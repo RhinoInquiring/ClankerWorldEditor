@@ -14,7 +14,7 @@ using namespace DirectX;
 namespace
 {
     const char* kTerrainShader = R"(
-cbuffer Frame : register(b0) { float4x4 viewProj; float4 lightDir; float4 params; float4 tint; };
+cbuffer Frame : register(b0) { float4x4 viewProj; float4 lightDir; float4 params; float4 tint; float4 ambient; float4 diffuse; float4 fogColor; float4 fog; };
 struct VsIn { float3 pos : POSITION; float3 nrm : NORMAL; float2 uv : TEXCOORD0; float4 col : COLOR; };
 struct VsOut { float4 pos : SV_POSITION; float3 nrm : NORMAL; float2 uv : TEXCOORD0; float3 col : COLOR; };
 VsOut VsMain(VsIn i) { VsOut o; o.pos = mul(float4(i.pos, 1), viewProj); o.nrm = i.nrm; o.uv = i.uv; o.col = i.col.rgb * (255.0 / 127.0); return o; }
@@ -33,8 +33,34 @@ float4 PsMain(VsOut i) : SV_TARGET
     c = lerp(c, t3.Sample(wrapS, tuv).rgb, a.b);
     c *= i.col;   // vertex shading (MCCV): 0x7F = unchanged
     float d = saturate(dot(normalize(i.nrm), -lightDir.xyz));
-    c *= 0.45 + 0.55 * d;
+    c *= ambient.w > 0.5 ? ambient.rgb + diffuse.rgb * d : 0.45 + 0.55 * d;   // the game's light, or even daylight
     if (params.y > 0.5) return float4(lerp(c, tint.rgb, 0.3), params.z);   // ghost: tinted, see-through
+    if (fog.z > 0.5) c = lerp(c, fogColor.rgb, saturate((i.pos.w - fog.x) / max(fog.y - fog.x, 1)));
+    return float4(c, 1);
+}
+
+// The sky: a full-screen triangle at the far plane; the view ray's height picks between the five sky colours. For this
+// pass viewProj is the inverse view-projection without translation, and the five colours ride in params, tint,
+// ambient, diffuse and fog (top to horizon); fogColor below the horizon.
+struct SkyOut { float4 pos : SV_POSITION; float3 ray : TEXCOORD0; };
+SkyOut VsSky(uint id : SV_VertexID)
+{
+    SkyOut o;
+    float2 p = float2((id << 1) & 2, id & 2) * 2 - 1;
+    o.pos = float4(p, 1, 1);
+    float4 w = mul(float4(p, 1, 1), viewProj);
+    o.ray = w.xyz / w.w;
+    return o;
+}
+float4 PsSky(SkyOut i) : SV_TARGET
+{
+    float e = normalize(i.ray).y;   // 1 straight up, 0 at the horizon
+    // ponytail: band heights eyeballed; the client's sky dome has its own fixed angles (and clouds, sun, skybox M2s).
+    float3 c = e > 0.5 ? lerp(tint.rgb, params.rgb, (e - 0.5) / 0.5)
+             : e > 0.25 ? lerp(ambient.rgb, tint.rgb, (e - 0.25) / 0.25)
+             : e > 0.1 ? lerp(diffuse.rgb, ambient.rgb, (e - 0.1) / 0.15)
+             : e > 0 ? lerp(fog.rgb, diffuse.rgb, e / 0.1)
+             : lerp(fog.rgb, fogColor.rgb, saturate(-e * 8));
     return float4(c, 1);
 }
 
@@ -47,17 +73,23 @@ float4 PsBaked(BakedOut i) : SV_TARGET { return float4(baked.Sample(clampS, (i.w
 )";
 
     const char* kLineShader = R"(
-cbuffer Frame : register(b0) { float4x4 viewProj; float4 lightDir; float4 params; float4 tint; };
+cbuffer Frame : register(b0) { float4x4 viewProj; float4 lightDir; float4 params; float4 tint; float4 ambient; float4 diffuse; float4 fogColor; float4 fog; };
 struct VsIn { float3 pos : POSITION; float4 col : COLOR; };
 struct VsOut { float4 pos : SV_POSITION; float4 col : COLOR; };
 VsOut VsMain(VsIn i) { VsOut o; o.pos = mul(float4(i.pos, 1), viewProj); o.col = i.col; return o; }
-float4 PsMain(VsOut i) : SV_TARGET { return params.y > 0.5 ? float4(tint.rgb, max(params.z, 0.35)) : i.col; }   // ghost: layer colour
+float4 PsMain(VsOut i) : SV_TARGET
+{
+    if (params.y > 0.5) return float4(tint.rgb, max(params.z, 0.35));   // ghost: layer colour
+    float4 c = i.col;
+    if (fog.z > 0.5) c.rgb = lerp(c.rgb, fogColor.rgb, saturate((i.pos.w - fog.x) / max(fog.y - fog.x, 1)));   // far terrain only
+    return c;
+}
 )";
 
     // Liquids: the colour pipeline's vertices (position, tint), textured with the liquid's animated frame; the
     // texture repeats every params.x yards across the surface.
     const char* kWaterShader = R"(
-cbuffer Frame : register(b0) { float4x4 viewProj; float4 lightDir; float4 params; float4 tint; };
+cbuffer Frame : register(b0) { float4x4 viewProj; float4 lightDir; float4 params; float4 tint; float4 ambient; float4 diffuse; float4 fogColor; float4 fog; };
 struct VsIn { float3 pos : POSITION; float4 col : COLOR; };
 struct VsOut { float4 pos : SV_POSITION; float4 col : COLOR; float2 uv : TEXCOORD0; };
 VsOut VsMain(VsIn i) { VsOut o; o.pos = mul(float4(i.pos, 1), viewProj); o.col = i.col; o.uv = i.pos.xz / params.x; return o; }
@@ -73,7 +105,18 @@ float4 PsMain(VsOut i) : SV_TARGET
 }
 )";
 
-    struct FrameConstants { XMFLOAT4X4 viewProj; XMFLOAT4 lightDir; XMFLOAT4 params; XMFLOAT4 tint; };
+    // ambient.w: game lighting on; fog: start, end (yards from the eye), on.
+    struct FrameConstants { XMFLOAT4X4 viewProj; XMFLOAT4 lightDir; XMFLOAT4 params; XMFLOAT4 tint; XMFLOAT4 ambient; XMFLOAT4 diffuse; XMFLOAT4 fogColor; XMFLOAT4 fog; };
+
+    /// The scene light's part of the frame constants (left zero, editor lighting, when it is off).
+    void LightConstants(const SceneLight& light, FrameConstants& fc)
+    {
+        if (!light.on) return;
+        fc.ambient = { light.ambient.x, light.ambient.y, light.ambient.z, 1 };
+        fc.diffuse = { light.diffuse.x, light.diffuse.y, light.diffuse.z, 0 };
+        fc.fogColor = { light.fog.x, light.fog.y, light.fog.z, 1 };
+        fc.fog = { light.fogStart, light.fogEnd, 1, 0 };
+    }
 
     bool Compile(const char* src, const char* entry, const char* target, Microsoft::WRL::ComPtr<ID3DBlob>& out, std::string& error)
     {
@@ -128,6 +171,10 @@ bool Renderer::Init(ID3D11Device* device, ID3D11DeviceContext* context, std::str
     if (!Compile(kWaterShader, "VsMain", "vs_5_0", wvs, error) || !Compile(kWaterShader, "PsMain", "ps_5_0", wps, error)) return false;
     device->CreateVertexShader(wvs->GetBufferPointer(), wvs->GetBufferSize(), nullptr, &m_waterVs);
     device->CreatePixelShader(wps->GetBufferPointer(), wps->GetBufferSize(), nullptr, &m_waterPs);
+    Com<ID3DBlob> svs, sps;
+    if (!Compile(kTerrainShader, "VsSky", "vs_5_0", svs, error) || !Compile(kTerrainShader, "PsSky", "ps_5_0", sps, error)) return false;
+    device->CreateVertexShader(svs->GetBufferPointer(), svs->GetBufferSize(), nullptr, &m_skyVs);
+    device->CreatePixelShader(sps->GetBufferPointer(), sps->GetBufferSize(), nullptr, &m_skyPs);
     m_start = std::chrono::steady_clock::now();
 
     const D3D11_INPUT_ELEMENT_DESC terrain[] = {
@@ -639,6 +686,7 @@ void Renderer::Draw(FXMMATRIX viewProj, const DrawOptions& options)
     XMStoreFloat4x4(&fc.viewProj, XMMatrixTranspose(viewProj));
     XMStoreFloat4(&fc.lightDir, XMVector3Normalize(XMVectorSet(-0.4f, -1.0f, -0.3f, 0)));
     fc.params = { options.textureRepeat, 0, 0, 0 };
+    LightConstants(m_light, fc);
     auto upload = [&](float tinted, float opacity = 1.0f, XMFLOAT4 tint = {}) {
         fc.params.y = tinted;
         fc.params.z = opacity;
@@ -866,10 +914,45 @@ void Renderer::LoadFar(const std::vector<std::vector<int16_t>>& tiles)
     if (FAILED(m_device->CreateBuffer(&vb, &vd, &m_farVertices)) || FAILED(m_device->CreateBuffer(&ib, &id, &m_farIndices))) ClearFar();
 }
 
+void Renderer::DrawSky(FXMMATRIX viewProj)
+{
+    if (!m_light.on) return;
+    FrameConstants fc{};
+    LightConstants(m_light, fc);
+    // The view's rotation only: rays from the eye, whatever the eye's position.
+    XMMATRIX inv = XMMatrixInverse(nullptr, viewProj);
+    const XMVECTOR eye = XMVector3TransformCoord(XMVectorSet(0, 0, 0, 1), inv);   // near-plane centre, close enough to the eye
+    inv = XMMatrixMultiply(inv, XMMatrixTranslationFromVector(XMVectorNegate(eye)));
+    XMStoreFloat4x4(&fc.viewProj, XMMatrixTranspose(inv));
+    const auto& s = m_light.sky;
+    fc.params = { s[0].x, s[0].y, s[0].z, 0 };
+    fc.tint = { s[1].x, s[1].y, s[1].z, 0 };
+    fc.ambient = { s[2].x, s[2].y, s[2].z, 0 };
+    fc.diffuse = { s[3].x, s[3].y, s[3].z, 0 };
+    fc.fog = { s[4].x, s[4].y, s[4].z, 0 };
+    D3D11_MAPPED_SUBRESOURCE mapped;
+    if (SUCCEEDED(m_context->Map(m_frameCb.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
+    {
+        memcpy(mapped.pData, &fc, sizeof fc);
+        m_context->Unmap(m_frameCb.Get(), 0);
+    }
+    m_context->VSSetConstantBuffers(0, 1, m_frameCb.GetAddressOf());
+    m_context->PSSetConstantBuffers(0, 1, m_frameCb.GetAddressOf());
+    m_context->OMSetBlendState(nullptr, nullptr, 0xffffffff);
+    m_context->OMSetDepthStencilState(m_noDepth.Get(), 0);
+    m_context->RSSetState(m_solid.Get());
+    m_context->IASetInputLayout(nullptr);
+    m_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    m_context->VSSetShader(m_skyVs.Get(), nullptr, 0);
+    m_context->PSSetShader(m_skyPs.Get(), nullptr, 0);
+    m_context->Draw(3, 0);
+}
+
 void Renderer::DrawFar(FXMMATRIX viewProj)
 {
     if (!m_farVertices) return;
     FrameConstants fc{};
+    LightConstants(m_light, fc);
     XMStoreFloat4x4(&fc.viewProj, XMMatrixTranspose(viewProj));
     D3D11_MAPPED_SUBRESOURCE mapped;
     if (SUCCEEDED(m_context->Map(m_frameCb.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))

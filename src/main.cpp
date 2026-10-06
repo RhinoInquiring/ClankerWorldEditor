@@ -26,6 +26,7 @@
 #include "Flights.hpp"
 #include "Pois.hpp"
 #include "Triggers.hpp"
+#include "Lights.hpp"
 
 #include <imgui.h>
 #include <imgui_impl_dx11.h>
@@ -2537,6 +2538,26 @@ namespace
         context->RSSetViewports(1, &vp);
         context->ClearRenderTargetView(rtv.Get(), sky);
         context->ClearDepthStencilView(dsv.Get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
+        if (const char* time = std::getenv("WWE_LIGHT"))   // the game's light at the eye, at this time (half-minutes), as View > Game lighting
+        {
+            ChangeStore lightStore;
+            Lights lights(mpq, lightStore);
+            uint32_t mapId = 0;
+            for (const auto& m : ParseMapDbc(mpq.Read("DBFilesClient\\Map.dbc").value_or(std::vector<uint8_t>{})))
+                if (_stricmp(m.directory.c_str(), arg(3).c_str()) == 0) mapId = m.id;
+            const LightState s = lights.At(mapId, eye, std::atoi(time));
+            SceneLight l;
+            l.on = true;
+            l.diffuse = s.colors[0];
+            l.ambient = s.colors[1];
+            l.fog = s.colors[7];
+            l.fogEnd = s.floats[0] > 1 ? s.floats[0] : 1000;
+            l.fogStart = l.fogEnd * std::clamp(s.floats[1], 0.0f, 0.99f);
+            for (size_t i = 0; i < 5; ++i) l.sky[i] = s.colors[2 + i];
+            renderer.SetSceneLight(l);
+            renderer.DrawSky(viewProj);
+            printf("game light at %s: fog %.0f-%.0f yd\n", time, l.fogStart, l.fogEnd);
+        }
         if (const auto wdl = mpq.Read("World\\Maps\\" + arg(3) + "\\" + arg(3) + ".wdl"))   // the far map, as the editor draws it
         {
             renderer.LoadFar(ParseWdl(*wdl));
@@ -4007,6 +4028,60 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdLine, int)
         return fly(true) < 50.0f ? 0 : 1;
     }
     if (cmdLine && wcsstr(cmdLine, L"--shade-check")) return ShadeCheck();
+    if (cmdLine && wcsstr(cmdLine, L"--light-check") && __argc >= 3)
+    {
+        // `--light-check <data dir>`: the light tables on the client's files: sizes, Goldshire at noon and midnight
+        // (the sky must be blue by day and dark by night), a params copy, an edited key read back.
+        setvbuf(stdout, nullptr, _IONBF, 0);
+        char dataDir[1024] = {};
+        WideCharToMultiByte(CP_ACP, 0, __wargv[2], -1, dataDir, sizeof dataDir, nullptr, nullptr);
+        MpqChain mpq;
+        mpq.Open(dataDir);
+        ChangeStore store;
+        Lights lights(mpq, store);
+        int problems = 0;
+        for (DbcTable* t : lights.Tables())
+        {
+            const auto rows = t->Rows();
+            printf("%-15s %5zu rows, max id %u\n", t->Name().c_str(), rows.size(), rows.empty() ? 0u : rows.rbegin()->first);
+            if (rows.empty()) ++problems;
+        }
+        const auto azeroth = lights.OnMap(0);
+        printf("Azeroth: %zu lights, default %s\n", azeroth.size(), !azeroth.empty() && azeroth.front().Global() ? "yes" : "no");
+        const XMFLOAT3 goldshire{ 32.6f * kTileSize, 60.0f, 48.6f * kTileSize };
+        for (int time : { 1440, 0 })
+        {
+            const LightState s = lights.At(0, goldshire, time);
+            printf("Goldshire %s: sky top %.2f %.2f %.2f, fog %.2f %.2f %.2f, fog end %.0f yd start %.2f, ambient %.2f %.2f %.2f, skybox %u\n",
+                   time ? "noon" : "midnight", s.colors[2].x, s.colors[2].y, s.colors[2].z, s.colors[7].x, s.colors[7].y, s.colors[7].z,
+                   s.floats[0], s.floats[1], s.colors[1].x, s.colors[1].y, s.colors[1].z, s.skybox);
+            const float bright = s.colors[2].x + s.colors[2].y + s.colors[2].z;
+            if (time && (s.colors[2].z <= s.colors[2].x || bright < 0.3f)) ++problems;   // noon sky: blue (deep: 0, 30, 74 in Elwynn)
+            if (!time && bright > 1.2f) ++problems;                                     // midnight: dark
+            if (s.floats[0] < 50 || s.floats[0] > 5000) ++problems;
+        }
+        // A params copy keeps every band; the copy evaluates like the original.
+        const uint32_t from = azeroth.empty() ? 1 : azeroth.front().params[0];
+        const uint32_t to = lights.FreeParamsId(3000, 3999);
+        const auto rows = lights.CopyParams(from, to);
+        Lights::Draft draft;
+        for (const auto& [table, id, row] : rows) draft[{ table->Name(), id }] = row;
+        const LightState a = lights.Params(from, 1440), b = lights.Params(to, 1440, &draft);
+        printf("copy params %u -> %u: %zu rows, same noon fog colour %s\n", from, to, rows.size(),
+               a.colors[7].x == b.colors[7].x && a.colors[7].z == b.colors[7].z ? "yes" : "NO");
+        if (!to || rows.size() != 25 || a.colors[7].x != b.colors[7].x) ++problems;
+        // Set the copy's fog colour to pure red at noon only: noon reads red, keys stay sorted.
+        nlohmann::json band = draft.at({ "LightIntBand", to * 18 - 17 + 7 });
+        auto keys = Lights::Keys(band);
+        keys.push_back({ 1440, Lights::Raw({ 1, 0, 0 }) });
+        std::erase_if(keys, [&](const auto& k) { return k.first == 1440 && k.second != Lights::Raw({ 1, 0, 0 }); });
+        draft[{ "LightIntBand", to * 18 - 17 + 7 }] = Lights::SetKeys(band, keys);
+        const LightState red = lights.Params(to, 1440, &draft);
+        printf("edited key: noon fog %.2f %.2f %.2f\n", red.colors[7].x, red.colors[7].y, red.colors[7].z);
+        if (red.colors[7].x < 0.99f || red.colors[7].y > 0.01f) ++problems;
+        printf("%d problem(s)\n", problems);
+        return problems ? 1 : 0;
+    }
     if (cmdLine && wcsstr(cmdLine, L"--plan-check"))
     {
         try { return PlanCheck(); }

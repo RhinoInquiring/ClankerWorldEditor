@@ -19,6 +19,7 @@
 #include "Tables.hpp"
 #include "Terrain.hpp"
 #include "Flights.hpp"
+#include "Lights.hpp"
 #include "Pois.hpp"
 #include "Triggers.hpp"
 
@@ -52,10 +53,13 @@ public:
     bool WantsQuit() const { return m_quit; }
 
 private:
-    enum class Tool { Select, Sculpt, Copy, Holes, Objects, Paint, Creatures, Gameobjects, Zones, Triggers, Pois, Flights, Shade };
+    enum class Tool { Select, Sculpt, Copy, Holes, Objects, Paint, Creatures, Gameobjects, Zones, Triggers, Pois, Flights, Shade, Lights };
     /// Tools come in groups (the toolbar's buttons); a group remembers the tool last used in it.
-    enum class Group { Terrain, Objects, Units, Regions };
-    static constexpr const char* kGroupNames[4] = { "Terrain", "Objects", "Units", "Regions" };
+    enum class Group { Terrain, Objects, Units, Regions, Atmosphere };
+    static constexpr int kGroups = 5;
+    /// The group's function key: F1-F4, then F6 (F5 is Play test).
+    static ImGuiKey GroupKey(int g) { return ImGuiKey(g < 4 ? ImGuiKey_F1 + g : ImGuiKey_F6 + (g - 4)); }
+    static constexpr const char* kGroupNames[kGroups] = { "Terrain", "Objects", "Units", "Regions", "Atmosphere" };
     /// Every tool once: its group, name, hotkey and what it does. Hotkeys, the Tools panel, the command palette and
     /// the shortcuts window all read this list, so a new tool is added here only.
     struct ToolInfo { Tool tool; Group group; const char* name; const char* key; ImGuiKey imKey; const char* about; };
@@ -73,6 +77,7 @@ private:
         { Tool::Triggers, Group::Regions, "Triggers", "K", ImGuiKey_K, "area triggers, teleports, entrances" },
         { Tool::Pois, Group::Regions, "POIs", "J", ImGuiKey_J, "map landmarks, gossip points, .tele bookmarks" },
         { Tool::Flights, Group::Regions, "Flights", "Y", ImGuiKey_Y, "flight masters' nodes and routes" },
+        { Tool::Lights, Group::Atmosphere, "Lights", "L", ImGuiKey_L, "light volumes: sky, fog and sun colours by time of day" },
     };
     static Group GroupOf(Tool t)
     {
@@ -81,7 +86,7 @@ private:
         return Group::Terrain;
     }
     void SetGroup(Group g) { m_tool = m_groupTool[int(g)]; }
-    Tool m_groupTool[4] = { Tool::Sculpt, Tool::Objects, Tool::Creatures, Tool::Zones };
+    Tool m_groupTool[kGroups] = { Tool::Sculpt, Tool::Objects, Tool::Creatures, Tool::Zones, Tool::Lights };
 
     struct Camera
     {
@@ -376,7 +381,7 @@ private:
     /// The active tool's selection, if it has one that can be moved.
     std::optional<Transformable> ActiveTransform();
     /// Whether the tool moves things with the shared controls (1 / 2 / 3 pick the handle, not a sculpt brush).
-    bool TransformTool() const { return m_tool == Tool::Objects || SpawnTool() || m_tool == Tool::Triggers || m_tool == Tool::Pois || m_tool == Tool::Flights; }
+    bool TransformTool() const { return m_tool == Tool::Objects || SpawnTool() || m_tool == Tool::Triggers || m_tool == Tool::Pois || m_tool == Tool::Flights || m_tool == Tool::Lights; }
     /// Move / rotate / scale handles on the selection; true while the mouse is over or dragging one.
     bool UpdateGizmo(const ImVec2& origin, const ImVec2& size);
     /// begin, preview(delta), commit in one go: keys, Alt+click and typed values.
@@ -397,6 +402,35 @@ private:
     std::optional<Transformable> PoiTransform();
     std::optional<Transformable> PathPointTransform();
     std::optional<Transformable> FlightTransform();
+    std::optional<Transformable> LightTransform();
+
+    // atmosphere: light volumes (Light.dbc) and their colour, fog and sky sets (AppLights.cpp)
+    bool m_gameLight = false;          // viewport shows the game's light at the camera (View menu, Lights tool)
+    int m_lightTime = 1440;            // preview time of day, half-minutes from midnight (noon)
+    int m_lightSlot = 0;               // which LightParamsID slot the preview and the editors use (0 clear weather)
+    uint32_t m_lightSel = 0;           // selected Light row (0: none)
+    std::optional<uint32_t> m_lightHover;
+    bool m_lightPlace = false;         // the next click on the ground adds a light there
+    Lights::Draft m_lightDraft;        // rows being edited (sliders, colour pickers, the gizmo), committed when the edit ends
+    std::string m_lightDraftLabel;
+    uint64_t m_lightDraftRevision = 0;
+    LightVolume m_lightStart;          // the selected light when a move began
+    /// The map's lights for this frame (cached on the tables' versions and the draft).
+    const std::vector<LightVolume>& LightsOnMap();
+    std::vector<LightVolume> m_lightsOnMap;
+    std::tuple<uint32_t, uint64_t, uint64_t> m_lightsOnMapKey{ ~0u, 0, 0 };
+    /// The scene light at the camera, to the renderer (or off); cached while the camera, time and data stay put.
+    void UpdateSceneLight();
+    std::tuple<uint32_t, int, int, int, int, int, uint64_t> m_sceneLightKey{};
+    void DrawLightsPanel(float width);
+    void LightsViewport(const ImVec2& origin, const ImVec2& size, DirectX::FXMMATRIX viewProj);
+    void BuildLightOverlay(std::vector<LineVertex>& lines) const;
+    /// A row into the draft (live preview); LightDraftCommit writes the draft as one undo step.
+    void LightDraftSet(DbcTable& table, uint32_t id, nlohmann::json row, const std::string& label);
+    void LightDraftCommit();
+    /// Adds a light at an editor position: its own colour set copied from the light there now.
+    void AddLight(const DirectX::XMFLOAT3& at);
+    void FlyToLight(const LightVolume& v);
 
     // regions: flight paths: taxi nodes, the paths between them and their points (AppFlights.cpp)
     void DrawFlightsPanel(float width);
@@ -407,7 +441,8 @@ private:
     void BuildFlightSolids(std::vector<LineVertex>& triangles) const;
     void DrawFlightLabels(ImDrawList* dl, const ImVec2& origin, const ImVec2& size, DirectX::FXMMATRIX viewProj) const;
     /// DBC rows set (null: removed) as one undo step; rows that do not change are left out.
-    void CommitDbc(std::vector<std::tuple<DbcTable*, uint32_t, nlohmann::json>> rows, const std::string& label);
+    void CommitDbc(std::vector<std::tuple<DbcTable*, uint32_t, nlohmann::json>> rows, const std::string& label,
+                   const char* note = "export, then restart the client and worldserver (taxi DBCs)");
     /// `count` ids of `table` free in the project's range `kind` (fewer when it runs out).
     std::vector<uint32_t> FreeDbcIds(const DbcTable& table, const std::string& kind, size_t count);
     /// Nodes on the open map and the paths with a point on it or an end at one of them.
@@ -452,6 +487,7 @@ private:
     MpqChain m_mpq;
     Renderer m_renderer;
     ChangeStore m_store;
+    Lights m_lights{ m_mpq, m_store };   // atmosphere tables (AppLights.cpp)
     TerrainAdapter m_terrain{ m_mpq, m_renderer, m_store };
     ModelRenderer m_models;
     ModelRenderer::DrawSettings m_modelSettings;
@@ -887,7 +923,7 @@ private:
     std::vector<DbcTable*> DbcTables()
     {
         return { &m_areas, &m_wmoAreas, &m_worldMaps, &m_mapOverlays, &m_triggers, &m_mapRows, &m_areaPois, &m_taxiNodes, &m_taxiPaths, &m_taxiPoints,
-                 &m_displayRows, &m_extraRows };
+                 &m_displayRows, &m_extraRows, &m_lights.light, &m_lights.params, &m_lights.intBands, &m_lights.floatBands, &m_lights.skyboxes };
     }
     uint32_t m_flightNode = 0, m_flightPath = 0;         // selected node, or selected path (one at a time)
     std::optional<size_t> m_flightPoint;                 // selected point of the selected path (index)

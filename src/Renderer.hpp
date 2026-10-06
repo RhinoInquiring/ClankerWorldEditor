@@ -6,6 +6,7 @@
 #include <DirectXMath.h>
 #include <wrl/client.h>
 
+#include <array>
 #include <chrono>
 #include <map>
 #include <string>
@@ -41,10 +42,25 @@ void AddCone(std::vector<LineVertex>& triangles, const DirectX::XMFLOAT3& base, 
 /// Appends a lit solid tube (8-sided) from `a` to `b` for DrawSolids: thick path lines.
 void AddTube(std::vector<LineVertex>& triangles, const DirectX::XMFLOAT3& a, const DirectX::XMFLOAT3& b, float radius, const DirectX::XMFLOAT4& color);
 
+/// The game's light where the camera is (Lights::At), for the viewport's game-lighting preview. Off: the editor's own
+/// even daylight.
+struct SceneLight
+{
+    bool on = false;
+    DirectX::XMFLOAT3 ambient{}, diffuse{}, fog{};
+    float fogStart = 0, fogEnd = 0;   // yards from the eye
+    std::array<DirectX::XMFLOAT3, 5> sky{};   // top, middle, middle to horizon, above horizon, horizon
+};
+
 /// Draws the loaded ADT tiles: blended terrain plus boxes for doodad and WMO placements.
 class Renderer
 {
 public:
+    void SetSceneLight(const SceneLight& light) { m_light = light; }
+    const SceneLight& Light() const { return m_light; }
+    /// The sky gradient of the scene light behind everything (call first; nothing when the scene light is off).
+    void DrawSky(DirectX::FXMMATRIX viewProj);
+
     bool Init(ID3D11Device* device, ID3D11DeviceContext* context, std::string& error);
 
     /// Adds (or replaces) tile `key`; textures come from the MPQ chain and are shared between tiles.
@@ -100,6 +116,7 @@ public:
 
 private:
     class Loader* m_loader = nullptr;
+    SceneLight m_light;
     template <class T> using Com = Microsoft::WRL::ComPtr<T>;
     Com<ID3D11Buffer> m_farVertices, m_farIndices;
     std::vector<std::pair<int, UINT>> m_farTiles;   // tile key, first index (1536 indices each)
@@ -150,6 +167,8 @@ private:
     Com<ID3D11VertexShader> m_terrainVs, m_lineVs;
     Com<ID3D11PixelShader> m_terrainPs, m_linePs, m_waterPs;
     Com<ID3D11VertexShader> m_waterVs;
+    Com<ID3D11VertexShader> m_skyVs;
+    Com<ID3D11PixelShader> m_skyPs;
     std::chrono::steady_clock::time_point m_start;   // liquid animation clock
     Dbc m_liquidTypes;
     bool m_liquidTypesRead = false;

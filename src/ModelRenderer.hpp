@@ -162,7 +162,8 @@ private:
     void RenderThumb(Thumb& thumb, const std::vector<std::tuple<GpuMesh*, DirectX::XMFLOAT4X4, const Look*>>& parts);
     struct Run { GpuMesh* mesh; UINT first, count; const Look* look = nullptr; const ModelSkeleton* pose = nullptr; uint32_t timeMs = 0; };
     /// Draws runs of instances already written to the instance buffer: opaque pass, then blended pass.
-    void Submit(const std::vector<Run>& runs, DirectX::FXMMATRIX viewProj);
+    /// sceneLit: the world (the renderer's scene light applies); thumbnails and the NPC viewer keep their own light.
+    void Submit(const std::vector<Run>& runs, DirectX::FXMMATRIX viewProj, bool sceneLit = false);
     void AddInstance(int tile, const std::string& key, GpuMesh* mesh, DirectX::FXMMATRIX world, float scale, uint32_t uid, int layer,
                      const Look* look = nullptr);
 

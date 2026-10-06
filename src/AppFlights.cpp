@@ -109,7 +109,7 @@ void App::RefreshFlightMasters()
     }
 }
 
-void App::CommitDbc(std::vector<std::tuple<DbcTable*, uint32_t, nlohmann::json>> rows, const std::string& label)
+void App::CommitDbc(std::vector<std::tuple<DbcTable*, uint32_t, nlohmann::json>> rows, const std::string& label, const char* note)
 {
     std::vector<Change> parts;
     for (auto& [table, id, row] : rows)
@@ -123,7 +123,7 @@ void App::CommitDbc(std::vector<std::tuple<DbcTable*, uint32_t, nlohmann::json>>
     if (parts.empty()) return;
     if (parts.size() == 1) m_store.Commit(std::move(parts[0]));
     else m_store.Commit(std::move(parts), label);
-    Log("%s: export, then restart the client and worldserver (taxi DBCs).", label.c_str());
+    Log("%s: %s.", label.c_str(), note);
 }
 
 std::vector<uint32_t> App::FreeDbcIds(const DbcTable& table, const std::string& kind, size_t count)

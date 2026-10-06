@@ -89,6 +89,7 @@ std::optional<App::Transformable> App::ActiveTransform()
     if (m_tool == Tool::Triggers) return TriggerTransform();
     if (m_tool == Tool::Pois) return PoiTransform();
     if (m_tool == Tool::Flights) return FlightTransform();
+    if (m_tool == Tool::Lights) return LightTransform();
     return std::nullopt;
 }
 
@@ -218,6 +219,50 @@ std::optional<App::Transformable> App::TriggerTransform()
         CommitTrigger(g.id, g, m_teleportEdit, "Drop trigger " + std::to_string(g.id) + " to the ground");
     };
     t.remove = [this] { CommitTrigger(m_triggerSel, std::nullopt, std::nullopt, "Delete trigger " + std::to_string(m_triggerSel)); };
+    return t;
+}
+
+std::optional<App::Transformable> App::LightTransform()
+{
+    if (!m_lightSel || !m_project) return std::nullopt;
+    const nlohmann::json& row = m_lights.Row(m_lights.light, m_lightSel, &m_lightDraft);
+    if (row.is_null()) return std::nullopt;
+    const LightVolume v = Lights::FromRow(row);
+    if (v.Global()) return std::nullopt;   // the map's default has no place
+    Transformable t;
+    t.rotate = false;
+    t.scale = Transformable::Scale::Uniform;
+    t.limits = "A light is a sphere: no turn; scaling sets both radii.";
+    t.frame = Store(XMMatrixTranslation(v.pos.x, v.pos.y, v.pos.z));
+    t.what = "light " + std::to_string(v.id);
+    t.begin = [this, v] { m_lightStart = v; };
+    t.preview = [this](FXMMATRIX delta) {
+        LightVolume e = m_lightStart;
+        e.pos = Moved(m_lightStart.pos, delta);
+        const float s = XMVectorGetX(XMVector3Length(delta.r[0]));   // uniform scale
+        e.inner = m_lightStart.inner * s;
+        e.outer = m_lightStart.outer * s;
+        LightDraftSet(m_lights.light, e.id, Lights::ToRow(e, m_lights.light.Row(e.id)), "Move " + std::string("light ") + std::to_string(e.id));
+    };
+    t.commit = [this](const std::string& label) {
+        m_lightDraftLabel = label;
+        LightDraftCommit();
+    };
+    t.cancel = [this] {
+        m_lightDraft.erase({ m_lights.light.Name(), m_lightStart.id });
+        ++m_lightDraftRevision;
+    };
+    t.ground = [this, v] {
+        LightVolume e = v;
+        if (const auto h = GroundAt(e.pos.x, e.pos.z, e.pos.y + 1000)) e.pos.y = *h + 5;
+        LightDraftSet(m_lights.light, e.id, Lights::ToRow(e, m_lights.light.Row(e.id)), "Drop light " + std::to_string(e.id) + " to the ground");
+        LightDraftCommit();
+    };
+    t.remove = [this, v] {
+        LightDraftCommit();
+        CommitDbc({ { &m_lights.light, v.id, nullptr } }, "Delete light " + std::to_string(v.id), "export, then restart the client (light DBCs)");
+        m_lightSel = 0;
+    };
     return t;
 }
 

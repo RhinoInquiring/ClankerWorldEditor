@@ -91,6 +91,11 @@ drawn into place. Right: Blizzard's baked skins (left column) beside the editor'
 
 ![Flight paths around Stonard: the routes and the nearest flight master](docs/images/flights.jpg)
 
+### Atmosphere
+| Feature | What it does |
+| --- | --- |
+| [Lights](docs/atmosphere/lights.md) | Light volumes (Light.dbc) as spheres on the map; sky, fog, sun and water colours by time of day; game lighting in the viewport |
+
 ### Map versions
 | Feature | What it does |
 | --- | --- |

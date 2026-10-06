@@ -19,7 +19,7 @@ using namespace DirectX;
 namespace
 {
     const char* kShader = R"(
-cbuffer Frame : register(b0) { float4x4 viewProj; float4 lightDir; };
+cbuffer Frame : register(b0) { float4x4 viewProj; float4 lightDir; float4 ambient; float4 diffuse; float4 fogColor; float4 fog; };   // ambient.w: game light on
 // mode x: alpha test threshold (0 = off); y: liquid opacity (0 = not a liquid); z: 1 = liquid keeps its texture colours;
 // w: opacity (texture animation). uvAnim: uv' = (uv - 0.5) * xy + 0.5 + zw (scrolling water, waterfalls).
 cbuffer Batch : register(b1) { float4 mode; float4 uvAnim; };
@@ -51,11 +51,15 @@ float4 PsMain(VsOut i, bool front : SV_IsFrontFace) : SV_TARGET
         return float4(mode.z > 0.5 ? c.rgb : float3(0.2, 0.38, 0.46) * (0.65 + 0.9 * dot(c.rgb, 0.3333)), mode.y);
     float3 n = normalize(i.nrm);
     float d = abs(dot(n, -lightDir.xyz));   // two-sided: leaves and cards are lit from both sides
-    return float4(c.rgb * (0.8 + 0.4 * d), c.a);   // bright ambient like the client's daylight; walls keep their texture tone
+    if (ambient.w < 0.5) return float4(c.rgb * (0.8 + 0.4 * d), c.a);   // bright ambient like the client's daylight; walls keep their texture tone
+    // The game's light and fog. ponytail: WMO interiors use their own vertex colours in the client; lit like outdoors here.
+    float3 lit = c.rgb * (ambient.rgb + diffuse.rgb * d);
+    lit = lerp(lit, fogColor.rgb, saturate((i.pos.w - fog.x) / max(fog.y - fog.x, 1)));
+    return float4(lit, c.a);
 }
 )";
 
-    struct FrameConstants { XMFLOAT4X4 viewProj; XMFLOAT4 lightDir; };
+    struct FrameConstants { XMFLOAT4X4 viewProj; XMFLOAT4 lightDir; XMFLOAT4 ambient{}, diffuse{}, fogColor{}, fog{}; };
 
     bool Compile(const char* entry, const char* target, Microsoft::WRL::ComPtr<ID3DBlob>& out, std::string& error)
     {
@@ -571,15 +575,22 @@ void ModelRenderer::Draw(FXMMATRIX viewProj, const XMFLOAT3& eye, const DrawSett
     }
     m_context->Unmap(m_instanceBuffer.Get(), 0);
     m_drawn = total;
-    Submit(runs, viewProj);
+    Submit(runs, viewProj, true);
 }
 
-void ModelRenderer::Submit(const std::vector<Run>& runs, FXMMATRIX viewProj)
+void ModelRenderer::Submit(const std::vector<Run>& runs, FXMMATRIX viewProj, bool sceneLit)
 {
     D3D11_MAPPED_SUBRESOURCE mapped;
     FrameConstants fc;
     XMStoreFloat4x4(&fc.viewProj, XMMatrixTranspose(viewProj));
     XMStoreFloat4(&fc.lightDir, XMVector3Normalize(XMVectorSet(-0.4f, -1.0f, -0.3f, 0)));
+    if (const SceneLight& l = m_textures->Light(); sceneLit && l.on)
+    {
+        fc.ambient = { l.ambient.x, l.ambient.y, l.ambient.z, 1 };
+        fc.diffuse = { l.diffuse.x, l.diffuse.y, l.diffuse.z, 0 };
+        fc.fogColor = { l.fog.x, l.fog.y, l.fog.z, 1 };
+        fc.fog = { l.fogStart, l.fogEnd, 1, 0 };
+    }
     if (SUCCEEDED(m_context->Map(m_frameCb.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
     {
         memcpy(mapped.pData, &fc, sizeof fc);

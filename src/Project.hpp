@@ -34,7 +34,9 @@ struct Project
                                                 { "creaturedisplayinfo.id", { 90000, 90999 } },          // CreatureDisplayInfo (client max ~32754)
                                                 { "creaturedisplayinfoextra.id", { 90000, 90999 } },     // CreatureDisplayInfoExtra (client max ~21381)
                                                 { "gossip_menu.id", { 9000000, 9099999 } },              // gossip menus (stock max ~90002)
-                                                { "npc_text.id", { 9000000, 9099999 } } };               // gossip texts (stock max ~921061)
+                                                { "npc_text.id", { 9000000, 9099999 } },                 // gossip texts (stock max ~921061)
+                                                { "light.id", { 20000, 20999 } },                        // Light.dbc (client max 14497)
+                                                { "lightparams.id", { 11000, 11999 } } };                // LightParams (client max 10025); bands follow at 18P-17, 6P-5
     IdRange Range(const std::string& kind) const { auto it = idRanges.find(kind); return it == idRanges.end() ? IdRange{} : it->second; }
     bool Owns(const std::string& kind, uint32_t id) const { const IdRange r = Range(kind); return id >= r.first && id <= r.last && r.first; }
     std::string serverProfile;   // name of the user's ServerProfile (Server.hpp); credentials never live here
