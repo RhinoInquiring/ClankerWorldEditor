@@ -1,5 +1,9 @@
 # WorldEditor
 
+![Stormwind in the editor's renderer](docs/images/stormwind.jpg)
+
+<!-- shot: ui-overview.png - the whole editor window (see docs/images/README.md) -->
+
 A standalone world editor for **World of Warcraft 3.3.5a (build 12340)** and **AzerothCore**. It reads the game's
 own files (MPQ archives or unpacked folders), shows the world with its own renderer, and edits terrain, water,
 objects, creature and gameobject spawns, paths, zones and world maps. Edits come out as a patch MPQ any 3.3.5 client
@@ -36,11 +40,26 @@ build\Release\wow-world-editor.exe
 | [Blueprints](docs/terrain/blueprints.md) | Save an area as a reusable piece and place it anywhere, on any map |
 | [Water](docs/terrain/water.md) | Terrain water travels with copies and pastes; a dry paste removes the water under it |
 
+<!-- shot: copy-paste.png - a pinned paste with its blend band -->
+
+<img src="docs/images/map-picture.png" width="210" align="right" alt="The Maps panel picture of the Eastern Kingdoms">
+
+Every map shows as a picture of its heights in the **Maps** panel (right: the Eastern Kingdoms, one cell per tile);
+click a tile to fly there.
+<br clear="right">
+
 ### Objects
 | Feature | What it does |
 | --- | --- |
 | [Objects](docs/objects/objects.md) | Select, move, turn and scale doodads and buildings with a gizmo; furniture follows its building |
 | [Catalog](docs/objects/catalog.md) | Browse every model, building, texture and unit with thumbnails; click to place or paint |
+| [Dungeons](docs/objects/objects.md#doodad-sets-replacing-dungeon-wmos) | WMO-only maps (most instances) load as their WMO: move, turn or replace it, pick its doodad set; spawns and points stand on its floors |
+
+![Inside Stormwind: buildings, doodads and trees](docs/images/city.jpg)
+
+![Catalog thumbnails](docs/images/catalog.png)
+
+![Razorfen Kraul, a WMO-only map, open in the editor with its spawns](docs/images/dungeon.jpg)
 
 ### Units (AzerothCore)
 | Feature | What it does |
@@ -48,6 +67,16 @@ build\Release\wow-world-editor.exe
 | [Creatures and gameobjects](docs/units/spawns.md) | Place and edit spawns in the world database, with their real models |
 | [Paths](docs/units/paths.md) | Draw and edit creature waypoint paths in 3D |
 | [NPC viewer](docs/units/npc-viewer.md) | One creature in its own preview (animations, skins, equipment, geosets, textures); edit its template, models and equipment, or copy it as a new NPC; design character appearances (race, face, hair, armour) |
+
+![A creature selected with its waypoint path: balls, tubes and blue arrows](docs/images/spawns-paths.jpg)
+
+![The NPC viewer: animations, skins, equipment and geosets of a character model](docs/images/npc-viewer.jpg)
+
+<img src="docs/images/skins.jpg" width="256" align="right" alt="Blizzard's baked NPC skins (left) and the editor's composites of the same fields (right)">
+
+Character NPCs without a baked skin are composited as the client does: skin, face, hair and every armour piece
+drawn into place. Right: Blizzard's baked skins (left column) beside the editor's composites of the same NPCs.
+<br clear="right">
 
 ### Regions
 | Feature | What it does |
@@ -58,6 +87,10 @@ build\Release\wow-world-editor.exe
 | [Points of interest](docs/regions/pois.md) | World map landmarks (AreaPOI.dbc), gossip map flags, `.tele` bookmarks |
 | [Flight paths](docs/regions/flight-paths.md) | Taxi nodes, the routes between them and their points; which flight master serves which node |
 
+![The Zones tool: area borders on the ground and the areas of the loaded terrain](docs/images/zones.jpg)
+
+![Flight paths around Stonard: the routes and the nearest flight master](docs/images/flights.jpg)
+
 ### Map versions
 | Feature | What it does |
 | --- | --- |
@@ -66,6 +99,9 @@ build\Release\wow-world-editor.exe
 | [Ghost layers](docs/versions/ghost-layers.md) | Show other versions of the map over yours; see every version of a tile, patch history included |
 | [Compare](docs/versions/compare.md) | Flip a selected area through every other version in place, with what each would cost to paste |
 | [Differences](docs/versions/differences.md) | Scan a whole other version, review its edits as cards, approve or reject each; new tiles included |
+
+<!-- shot: compare.png - comparing a selection across versions -->
+<img src="docs/images/differences.png" width="480" alt="Differences: a scan of another version, its edits as cards to review">
 
 ### Output
 | Feature | What it does |
@@ -84,3 +120,6 @@ build\Release\wow-world-editor.exe
 - [Change model](docs/concepts/change-model.md): how edits are recorded, undone, saved and exported; the project folder
 - [Command-line checks](docs/development/checks.md): headless tests and tools (`--selftest`, `--tiles-check`, ...)
 - [Code layout](docs/development/code-layout.md): what each source file holds
+
+The scene pictures are drawn by the editor's own renderer from the command line (`tools/readme-images.ps1`); the
+pictures of its panels are taken by hand ([docs/images](docs/images/README.md)).
