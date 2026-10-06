@@ -75,6 +75,8 @@ void App::LoadNpc(uint32_t entry, bool frame)
     v.editEquips = m_npcEquips.Rows(entry);
     v.editRevision = m_store.Revision();
     v.dirty = false;
+    v.appearanceId = 0;
+    v.editDisplay = v.editExtra = nullptr;
     v.name = Col(v.editTemplate, "name");
     RebuildNpcLists();
     // Keep showing the same display while it is still one of the template's (after an edit or an undo), else the first.
@@ -468,6 +470,7 @@ void App::DrawNpcViewer()
             if (ImGui::BeginTabItem("View")) { DrawNpcViewTab(); ImGui::EndTabItem(); }
             if (ImGui::BeginTabItem("Template")) { DrawNpcTemplateTab(); ImGui::EndTabItem(); }
             if (ImGui::BeginTabItem("Models & gear")) { DrawNpcGearTab(); ImGui::EndTabItem(); }
+            if (ImGui::BeginTabItem("Appearance")) { DrawNpcAppearanceTab(); ImGui::EndTabItem(); }
             ImGui::EndTabBar();
         }
     }
@@ -661,6 +664,18 @@ void App::ApplyNpc()
         parts.push_back(std::move(c));
         return true;
     };
+    bool appearanceChanged = false;
+    if (v.appearanceId && v.editDisplay.is_object() && v.editExtra.is_object())
+        for (auto [table, row] : { std::pair{ &m_extraRows, &v.editExtra }, std::pair{ &m_displayRows, &v.editDisplay } })
+        {
+            const uint32_t id = row->value("ID", 0u);
+            const nlohmann::json before = table->Row(id);
+            if (before == *row) continue;
+            Change c = table->MakeChange(id, before, *row, label);
+            table->Apply(c);
+            parts.push_back(std::move(c));
+            appearanceChanged = true;
+        }
     const bool templateChanged = v.editTemplate.is_object() && add(m_npcTemplates, { v.editTemplate });
     const bool modelsChanged = add(m_npcModels, v.editModels);
     const bool equipChanged = add(m_npcEquips, v.editEquips);
@@ -672,6 +687,9 @@ void App::ApplyNpc()
     m_creatures.Refresh();            // spawns in the world take the new look
     if (templateChanged && RunServerCommand(".reload creature_template " + std::to_string(v.entry))) Log("%s: creature_template reloaded on the server.", label.c_str());
     if (modelsChanged || equipChanged) Log("%s: models and equipment reach a running worldserver after a restart.", label.c_str());
+    if (appearanceChanged)
+        Log("%s: the appearance is CreatureDisplayInfo / CreatureDisplayInfoExtra rows: export (and build the patch), copy out/server/dbc to the "
+            "server, then restart the client and worldserver.", label.c_str());
     LoadNpc(v.entry, false);
 }
 
@@ -1002,6 +1020,7 @@ void App::DrawNpcGearTab()
             {
                 v.pickSet = int(i);
                 v.pickSlot = k;
+                v.pickArmor = -1;
                 openPicker = true;
             }
             ImGui::SetItemTooltip("%s: item %u. Click to choose another.", kSlots[k], item);
@@ -1038,12 +1057,16 @@ void App::DrawItemPicker()
     bool search = ImGui::IsWindowAppearing();
     if (search) ImGui::SetKeyboardFocusHere();
     ImGui::SetNextItemWidth(-1);
-    if (ImGui::InputTextWithHint("##query", "Weapons, shields, held items: name or entry", &v.pickQuery)) search = true;
+    if (ImGui::InputTextWithHint("##query", v.pickArmor >= 0 ? "Armour for this slot: name or entry" : "Weapons, shields, held items: name or entry", &v.pickQuery))
+        search = true;
     if (search)
     {
         v.pickHits.clear();
-        // What creature_equip_template accepts: weapons, shields, held-in-off-hand items, ranged weapons.
-        std::string where = "InventoryType IN (13, 14, 15, 17, 21, 22, 23, 25, 26)";
+        // What creature_equip_template accepts (weapons, shields, held-in-off-hand items, ranged weapons), or what an
+        // armour slot of CreatureDisplayInfoExtra shows.
+        static const char* const kArmourTypes[11] = { "1", "3", "4", "5, 20", "6", "7", "8", "9", "10", "19", "16" };
+        std::string where = v.pickArmor >= 0 && v.pickArmor < 11 ? std::string("InventoryType IN (") + kArmourTypes[v.pickArmor] + ")"
+                                                                  : "InventoryType IN (13, 14, 15, 17, 21, 22, 23, 25, 26)";
         if (!v.pickQuery.empty())
         {
             const bool number = std::all_of(v.pickQuery.begin(), v.pickQuery.end(), [](unsigned char c) { return std::isdigit(c); });
@@ -1078,7 +1101,15 @@ void App::DrawItemPicker()
         if (v.pickHits.size() == 200) ImGui::TextColored(kQuiet, "First 200 shown: type more of the name.");
     }
     ImGui::EndChild();
-    if (chosen && v.pickSet >= 0 && size_t(v.pickSet) < v.editEquips.size())
+    if (chosen && v.pickArmor >= 0 && v.editExtra.is_object())
+    {
+        const uint32_t display = *chosen ? NpcItem(*chosen).display : 0;
+        v.editExtra["NPCItemDisplay[" + std::to_string(v.pickArmor) + "]"] = display;
+        v.dirty = true;
+        RefreshNpcDisplay();
+        ImGui::CloseCurrentPopup();
+    }
+    else if (chosen && v.pickSet >= 0 && size_t(v.pickSet) < v.editEquips.size())
     {
         v.editEquips[size_t(v.pickSet)]["ItemID" + std::to_string(v.pickSlot + 1)] = std::to_string(*chosen);
         v.dirty = true;
@@ -1086,4 +1117,195 @@ void App::DrawItemPicker()
         ImGui::CloseCurrentPopup();
     }
     ImGui::EndPopup();
+}
+
+// ---------------------------------------------------------------------------------------------- appearance
+
+void App::RefreshNpcDisplay()
+{
+    NpcView& v = m_npc;
+    const std::string model = v.look ? v.look->look.model : std::string();
+    const int sequence = v.sequence;
+    const bool autoCamera = v.autoCamera;
+    v.autoCamera = false;
+    SetNpcDisplay(v.displayId, v.displayScale);
+    v.autoCamera = autoCamera;
+    if (v.look && v.look->look.model == model && sequence >= 0 && v.info && v.info->skeleton && size_t(sequence) < v.info->skeleton->sequences.size())
+        SetNpcSequence(sequence);
+}
+
+void App::NewNpcAppearance(uint32_t from)
+{
+    NpcView& v = m_npc;
+    if (!m_project || !v.entry) return;
+    if (v.appearanceId && v.editDisplay.is_object() && m_displayRows.Row(v.appearanceId).is_null())
+    {
+        Log("Apply the new appearance first (it has no rows yet, so a second one would take the same id).");
+        return;
+    }
+    const Project::IdRange rd = m_project->Range("creaturedisplayinfo.id"), re = m_project->Range("creaturedisplayinfoextra.id");
+    const uint32_t displayId = m_displayRows.FreeId(rd.first, rd.last), extraId = m_extraRows.FreeId(re.first, re.last);
+    if (!displayId || !extraId)
+    {
+        Log("No free CreatureDisplayInfo / CreatureDisplayInfoExtra id in the project's ranges (File > Project settings).");
+        return;
+    }
+    nlohmann::json d = from ? m_displayRows.Row(from) : nlohmann::json();
+    nlohmann::json e = d.is_object() && d.value("ExtendedDisplayInfoID", 0u) ? m_extraRows.Row(d.value("ExtendedDisplayInfoID", 0u)) : nlohmann::json();
+    if (!e.is_object())
+    {
+        // A new character: the race's own player display as the template row (sounds, blood, size class).
+        const uint32_t race = 1, sex = 0;   // human male
+        d = m_displayRows.Row(m_looks.RaceDisplay(race, sex));
+        if (!d.is_object()) { Log("ChrRaces has no display for race %u.", race); return; }
+        e = { { "DisplayRaceID", race }, { "DisplaySexID", sex }, { "SkinID", 0u }, { "FaceID", 0u }, { "HairStyleID", 0u }, { "HairColorID", 0u },
+              { "FacialHairID", 0u }, { "Flags", 0u }, { "BakeName", "" } };
+        for (int i = 0; i < 11; ++i) e["NPCItemDisplay[" + std::to_string(i) + "]"] = 0u;
+    }
+    d["ID"] = displayId;
+    d["ExtendedDisplayInfoID"] = extraId;
+    d["PortraitTextureName"] = "";
+    e["ID"] = extraId;
+    e["BakeName"] = "";   // the client composites the skin from the fields instead
+    v.appearanceId = displayId;
+    v.editDisplay = std::move(d);
+    v.editExtra = std::move(e);
+    v.dirty = true;
+    // The template shows the new display instead of the one it came from.
+    bool replaced = false;
+    for (auto& m : v.editModels)
+        if (from && U(Col(m, "CreatureDisplayID")) == from) { m["CreatureDisplayID"] = std::to_string(displayId); replaced = true; }
+    if (!replaced)
+        v.editModels.push_back({ { "CreatureID", std::to_string(v.entry) }, { "CreatureDisplayID", std::to_string(displayId) }, { "DisplayScale", "1" },
+                                 { "Probability", "1" }, { "VerifiedBuild", "0" } });
+    v.displayId = displayId;
+    RebuildNpcLists();
+    SetNpcDisplay(displayId, v.displayScale);
+    Log("New appearance: display %u + extra %u (applied with the NPC's other edits).", displayId, extraId);
+}
+
+void App::DrawNpcAppearanceTab()
+{
+    NpcView& v = m_npc;
+    if (!v.entry) { ImGui::TextColored(kQuiet, "No creature open."); return; }
+    const bool owned = m_project && m_project->Owns("creaturedisplayinfo.id", v.displayId);
+    bool humanoid = false;
+    m_looks.SkinNames(v.displayId, &humanoid);
+    // Edit the project's own display in place; read its rows when it comes up (unless other edits are pending).
+    if (owned && humanoid && v.appearanceId != v.displayId && !v.dirty)
+    {
+        v.appearanceId = v.displayId;
+        v.editDisplay = m_displayRows.Row(v.displayId);
+        v.editExtra = m_extraRows.Row(v.editDisplay.value("ExtendedDisplayInfoID", 0u));
+    }
+    if (!owned || !humanoid || v.appearanceId != v.displayId || !v.editExtra.is_object())
+    {
+        if (!v.displayId) ImGui::TextColored(kQuiet, "No display shown.");
+        else if (!humanoid) ImGui::TextWrapped("Display %u is not a character model: its look is its skins (View > Skins).", v.displayId);
+        else if (!owned) ImGui::TextWrapped("Display %u belongs to the client and other creatures may use it: edit a copy.", v.displayId);
+        else ImGui::TextWrapped("Apply or revert the other edits first.");
+        ImGui::BeginDisabled(!m_project);
+        if (humanoid && ImGui::Button("Make an editable copy")) NewNpcAppearance(v.displayId);
+        if (ImGui::Button("New character appearance")) NewNpcAppearance(0);
+        ImGui::EndDisabled();
+        ImGui::SetItemTooltip("New CreatureDisplayInfo + CreatureDisplayInfoExtra rows in the project's ranges (File > Project settings)");
+        return;
+    }
+
+    nlohmann::json& e = v.editExtra;
+    bool changed = false;
+    auto get = [&](const char* f) { return e.value(f, 0u); };
+    auto set = [&](const std::string& f, uint32_t x) {
+        if (e.value(f, 0u) == x) return;
+        e[f] = x;
+        changed = true;
+    };
+    ImGui::TextColored(kQuiet, "Display %u, extra %u. The client draws these fields itself (no baked texture).", v.displayId, get("ID"));
+    const float labelWidth = 110;
+    auto row = [&](const char* label) {
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted(label);
+        ImGui::SameLine(labelWidth);
+        ImGui::SetNextItemWidth(-1);
+    };
+
+    // Race and sex pick the character model.
+    const auto races = m_looks.Races();
+    const uint32_t race = get("DisplayRaceID"), sex = get("DisplaySexID");
+    std::string raceName = std::to_string(race);
+    for (const auto& r : races)
+        if (r.id == race && !r.name.empty()) raceName = r.name;
+    row("Race");
+    if (ImGui::BeginCombo("##race", raceName.c_str(), ImGuiComboFlags_HeightLarge))
+    {
+        for (const auto& r : races)
+            if (!r.name.empty() && m_looks.CharacterModel(r.id, sex) && ImGui::Selectable((r.name + "##" + std::to_string(r.id)).c_str(), r.id == race))
+                set("DisplayRaceID", r.id);
+        ImGui::EndCombo();
+    }
+    row("Body");
+    if (ImGui::BeginCombo("##sex", sex ? "Female" : "Male"))
+    {
+        for (uint32_t s = 0; s < 2; ++s)
+            if (m_looks.CharacterModel(race, s) && ImGui::Selectable(s ? "Female" : "Male", s == sex)) set("DisplaySexID", s);
+        ImGui::EndCombo();
+    }
+    if (changed)
+        if (const uint32_t model = m_looks.CharacterModel(get("DisplayRaceID"), get("DisplaySexID"))) v.editDisplay["ModelID"] = model;
+
+    // One "Option: value" dropdown each, like wow.export's character tab. A value the new race lacks moves to its first.
+    auto choices = m_looks.CharacterChoices(get("DisplayRaceID"), get("DisplaySexID"), get("SkinID"), get("HairStyleID"));
+    auto option = [&](const char* label, const char* field, const std::vector<uint32_t>& values) {
+        const uint32_t x = get(field);
+        if (!values.empty() && std::find(values.begin(), values.end(), x) == values.end()) set(field, values.front());
+        row(label);
+        if (ImGui::BeginCombo((std::string("##") + field).c_str(), values.empty() ? "(none)" : std::to_string(get(field) + 1).c_str()))
+        {
+            for (uint32_t value : values)
+                if (ImGui::Selectable(std::to_string(value + 1).c_str(), value == get(field))) set(field, value);
+            ImGui::EndCombo();
+        }
+    };
+    option("Skin color", "SkinID", choices.skins);
+    choices = m_looks.CharacterChoices(get("DisplayRaceID"), get("DisplaySexID"), get("SkinID"), get("HairStyleID"));   // faces follow the skin
+    option("Face", "FaceID", choices.faces);
+    option("Hair style", "HairStyleID", choices.hairStyles);
+    choices = m_looks.CharacterChoices(get("DisplayRaceID"), get("DisplaySexID"), get("SkinID"), get("HairStyleID"));   // colours follow the style
+    option("Hair color", "HairColorID", choices.hairColors);
+    option("Facial hair", "FacialHairID", choices.facialHair);
+
+    ImGui::SeparatorText("Armour");
+    static const char* const kSlots[11] = { "Head", "Shoulders", "Shirt", "Chest", "Waist", "Legs", "Feet", "Wrists", "Hands", "Tabard", "Back" };
+    bool openPicker = false;
+    for (int slot = 0; slot < 11; ++slot)
+    {
+        ImGui::PushID(slot);
+        const std::string field = "NPCItemDisplay[" + std::to_string(slot) + "]";
+        const uint32_t display = e.value(field, 0u);
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted(kSlots[slot]);
+        ImGui::SameLine(80);
+        const std::string icon = m_looks.ItemIcon(display);
+        if (ID3D11ShaderResourceView* tex = icon.empty() ? nullptr : m_renderer.TextureFor(icon, m_mpq)) ImGui::Image(ImTextureID(intptr_t(tex)), { 22, 22 });
+        else ImGui::Dummy({ 22, 22 });
+        ImGui::SameLine();
+        if (ImGui::Button(display ? ("Item display " + std::to_string(display) + "##pick").c_str() : "(empty)##pick", { -30, 0 }))
+        {
+            v.pickArmor = slot;
+            v.pickSet = -1;
+            openPicker = true;
+        }
+        ImGui::SetItemTooltip("Choose an item for the %s slot (its display is stored)", kSlots[slot]);
+        ImGui::SameLine();
+        if (ImGui::SmallButton("x")) set(field, 0);
+        ImGui::SetItemTooltip("Empty the slot");
+        ImGui::PopID();
+    }
+    if (openPicker) ImGui::OpenPopup("##itempick");
+    DrawItemPicker();
+    if (changed)
+    {
+        v.dirty = true;
+        RefreshNpcDisplay();
+    }
 }

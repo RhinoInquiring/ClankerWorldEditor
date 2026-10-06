@@ -4,6 +4,7 @@
 #include "Mpq.hpp"
 
 #include <algorithm>
+#include <cmath>
 
 using namespace DirectX;
 
@@ -17,8 +18,8 @@ namespace
     namespace CS { constexpr uint32_t Race = 1, Sex = 2, Section = 3, Texture = 4, Variation = 8, Color = 9; }
     namespace CHG { constexpr uint32_t Race = 1, Sex = 2, Variation = 3, Geoset = 4; }
     namespace CFHS { constexpr uint32_t Race = 0, Sex = 1, Variation = 2, Geoset = 3; }
-    namespace IDI { constexpr uint32_t ModelName = 1, ModelTexture = 3, InventoryIcon = 5, GeosetGroup = 7, HelmetGeosetVis = 13; }
-    namespace CR { constexpr uint32_t ClientPrefix = 6; }
+    namespace IDI { constexpr uint32_t ModelName = 1, ModelTexture = 3, InventoryIcon = 5, GeosetGroup = 7, HelmetGeosetVis = 13, Texture = 15; }
+    namespace CR { constexpr uint32_t MaleDisplay = 4, FemaleDisplay = 5, ClientPrefix = 6, Name = 14; }
 
     // CreatureDisplayInfoExtra NPCItemDisplay slots.
     enum Slot { Helm, Shoulder, Shirt, Chest, Belt, Legs, Boots, Wrist, Gloves, Tabard, Cape };
@@ -35,6 +36,91 @@ namespace
     {
         const size_t dot = file.find_last_of('.');
         return dot == std::string::npos ? file : file.substr(0, dot);
+    }
+
+    // Where each part goes on a 3.3.5 character skin, in pixels of a 256 x 256 skin (scaled to the skin's size):
+    // x, y, width, height. The client's fixed layout (no CharComponentTextureSections table before Cataclysm).
+    enum Region { ArmUpper, ArmLower, Hand, FaceUpper, FaceLower, TorsoUpper, TorsoLower, LegUpper, LegLower, Foot };
+    constexpr int kRegions[10][4] = { { 0, 0, 128, 64 },    { 0, 64, 128, 64 },    { 0, 128, 128, 32 },  { 0, 160, 128, 32 },  { 0, 192, 128, 64 },
+                                      { 128, 0, 128, 64 },  { 128, 64, 128, 32 },  { 128, 96, 128, 64 }, { 128, 160, 128, 64 }, { 128, 224, 128, 32 } };
+    // ItemDisplayInfo Texture[0..7]: the region each fills and the folder its file sits in (Item\TextureComponents\<folder>).
+    constexpr Region kItemRegions[8] = { ArmUpper, ArmLower, Hand, TorsoUpper, TorsoLower, LegUpper, LegLower, Foot };
+    const char* const kItemFolders[8] = { "ArmUpperTexture", "ArmLowerTexture", "HandTexture", "TorsoUpperTexture",
+                                          "TorsoLowerTexture", "LegUpperTexture", "LegLowerTexture", "FootTexture" };
+
+    struct Layer { Region region; std::vector<std::string> files; };   // the first file that exists is drawn
+
+    /// RGBA pixels of a BLP from the chain; empty when missing.
+    std::vector<uint8_t> LoadPixels(const MpqChain& mpq, const std::string& path, uint32_t& w, uint32_t& h)
+    {
+        const auto file = mpq.Read(path);
+        const auto image = file ? ParseBlp(*file) : std::nullopt;
+        if (!image) return {};
+        w = image->width;
+        h = image->height;
+        return BlpPixels(*image);
+    }
+
+    /// The base skin with every layer alpha-blended into its region (bilinear resampled), plus a box-filtered mip chain.
+    std::optional<BlpImage> ComposeSkin(const MpqChain& mpq, const std::string& base, const std::vector<Layer>& layers)
+    {
+        uint32_t W = 0, H = 0;
+        std::vector<uint8_t> canvas = LoadPixels(mpq, base, W, H);
+        if (canvas.empty()) return std::nullopt;
+        for (const Layer& layer : layers)
+        {
+            uint32_t w = 0, h = 0;
+            std::vector<uint8_t> src;
+            for (const std::string& f : layer.files)
+                if (src = LoadPixels(mpq, f, w, h); !src.empty()) break;
+            if (src.empty()) continue;
+            const int* r = kRegions[layer.region];
+            const float sx = W / 256.0f, sy = H / 256.0f;
+            const int x0 = int(r[0] * sx), y0 = int(r[1] * sy), rw = std::max(1, int(r[2] * sx)), rh = std::max(1, int(r[3] * sy));
+            auto texel = [&](int x, int y, int c) {
+                x = std::clamp(x, 0, int(w) - 1);
+                y = std::clamp(y, 0, int(h) - 1);
+                return float(src[(size_t(y) * w + size_t(x)) * 4 + size_t(c)]);
+            };
+            for (int y = 0; y < rh && y0 + y < int(H); ++y)
+                for (int x = 0; x < rw && x0 + x < int(W); ++x)
+                {
+                    const float u = (x + 0.5f) * float(w) / float(rw) - 0.5f, v = (y + 0.5f) * float(h) / float(rh) - 0.5f;
+                    const int iu = int(std::floor(u)), iv = int(std::floor(v));
+                    const float fu = u - float(iu), fv = v - float(iv);
+                    float px[4];
+                    for (int c = 0; c < 4; ++c)
+                        px[c] = (texel(iu, iv, c) * (1 - fu) + texel(iu + 1, iv, c) * fu) * (1 - fv) +
+                                (texel(iu, iv + 1, c) * (1 - fu) + texel(iu + 1, iv + 1, c) * fu) * fv;
+                    uint8_t* d = &canvas[(size_t(y0 + y) * W + size_t(x0 + x)) * 4];
+                    const float a = px[3] / 255.0f;
+                    for (int c = 0; c < 3; ++c) d[c] = uint8_t(std::clamp(px[c] * a + d[c] * (1 - a), 0.0f, 255.0f));
+                }
+        }
+        BlpImage out;
+        out.width = W;
+        out.height = H;
+        out.format = BlpImage::Format::RGBA8;
+        out.mips.push_back(std::move(canvas));
+        for (uint32_t w = W, h = H; w > 1 || h > 1;)
+        {
+            const uint32_t nw = std::max(1u, w / 2), nh = std::max(1u, h / 2);
+            const std::vector<uint8_t>& up = out.mips.back();
+            std::vector<uint8_t> down(size_t(nw) * nh * 4);
+            for (uint32_t y = 0; y < nh; ++y)
+                for (uint32_t x = 0; x < nw; ++x)
+                    for (int c = 0; c < 4; ++c)
+                    {
+                        const uint32_t x1 = std::min(x * 2 + 1, w - 1), y1 = std::min(y * 2 + 1, h - 1);
+                        const int sum = up[(size_t(y * 2) * w + x * 2) * 4 + c] + up[(size_t(y * 2) * w + x1) * 4 + c] + up[(size_t(y1) * w + x * 2) * 4 + c] +
+                                        up[(size_t(y1) * w + x1) * 4 + c];
+                        down[(size_t(y) * nw + x) * 4 + size_t(c)] = uint8_t(sum / 4);
+                    }
+            out.mips.push_back(std::move(down));
+            w = nw;
+            h = nh;
+        }
+        return out;
     }
 }
 
@@ -86,25 +172,156 @@ std::vector<uint32_t> DisplayLooks::SameModel(uint32_t displayId)
 {
     Load();
     std::vector<uint32_t> out;
-    const auto row = m_displayInfo.Find(displayId);
-    if (!row) return out;
-    const uint32_t model = m_displayInfo.U32(*row, CDI::ModelID);
+    const auto d = Display(displayId);
+    if (!d) return out;
     for (uint32_t r = 0; r < m_displayInfo.Rows(); ++r)
-        if (m_displayInfo.U32(r, CDI::ModelID) == model) out.push_back(m_displayInfo.U32(r, 0));
+        if (m_displayInfo.U32(r, CDI::ModelID) == d->model) out.push_back(m_displayInfo.U32(r, 0));
+    if (std::find(out.begin(), out.end(), displayId) == out.end()) out.push_back(displayId);   // one of the project's
     std::sort(out.begin(), out.end());
     return out;
 }
 
 std::vector<std::string> DisplayLooks::SkinNames(uint32_t displayId, bool* humanoid)
 {
-    Load();
     std::vector<std::string> out;
-    const auto row = m_displayInfo.Find(displayId);
-    if (humanoid) *humanoid = row && m_displayInfo.U32(*row, CDI::ExtendedDisplayInfoID) != 0;
-    if (!row) return out;
-    for (uint32_t i = 0; i < 3; ++i)
-        if (std::string skin = m_displayInfo.Str(*row, CDI::TextureVariation + i); !skin.empty()) out.push_back(std::move(skin));
+    const auto d = Display(displayId);
+    if (humanoid) *humanoid = d && d->extra != 0;
+    if (!d) return out;
+    for (const std::string& skin : d->skins)
+        if (!skin.empty()) out.push_back(skin);
     return out;
+}
+
+std::optional<DisplayLooks::DisplayRow> DisplayLooks::Display(uint32_t id)
+{
+    Load();
+    DisplayRow d;
+    if (const nlohmann::json* j = m_override ? m_override(0, id) : nullptr)
+    {
+        if (!j->is_object()) return std::nullopt;
+        d.model = j->value("ModelID", 0u);
+        d.extra = j->value("ExtendedDisplayInfoID", 0u);
+        d.scale = j->value("CreatureModelScale", 1.0f);
+        for (int i = 0; i < 3; ++i) d.skins[i] = j->value("TextureVariation[" + std::to_string(i) + "]", std::string());
+        return d;
+    }
+    const auto row = m_displayInfo.Find(id);
+    if (!row) return std::nullopt;
+    d.model = m_displayInfo.U32(*row, CDI::ModelID);
+    d.extra = m_displayInfo.U32(*row, CDI::ExtendedDisplayInfoID);
+    d.scale = m_displayInfo.F32(*row, CDI::CreatureModelScale);
+    for (uint32_t i = 0; i < 3; ++i) d.skins[i] = m_displayInfo.Str(*row, CDI::TextureVariation + i);
+    return d;
+}
+
+std::optional<DisplayLooks::ExtraRow> DisplayLooks::Extra(uint32_t id)
+{
+    Load();
+    ExtraRow e;
+    if (const nlohmann::json* j = m_override ? m_override(1, id) : nullptr)
+    {
+        if (!j->is_object()) return std::nullopt;
+        e.race = j->value("DisplayRaceID", 0u);
+        e.sex = j->value("DisplaySexID", 0u);
+        e.skin = j->value("SkinID", 0u);
+        e.face = j->value("FaceID", 0u);
+        e.hairStyle = j->value("HairStyleID", 0u);
+        e.hairColor = j->value("HairColorID", 0u);
+        e.facial = j->value("FacialHairID", 0u);
+        for (int i = 0; i < 11; ++i) e.items[i] = j->value("NPCItemDisplay[" + std::to_string(i) + "]", 0u);
+        e.bake = j->value("BakeName", std::string());
+        return e;
+    }
+    const auto row = m_extra.Find(id);
+    if (!row) return std::nullopt;
+    e.race = m_extra.U32(*row, CDIE::Race);
+    e.sex = m_extra.U32(*row, CDIE::Sex);
+    e.skin = m_extra.U32(*row, CDIE::Skin);
+    e.face = m_extra.U32(*row, CDIE::Face);
+    e.hairStyle = m_extra.U32(*row, CDIE::HairStyle);
+    e.hairColor = m_extra.U32(*row, CDIE::HairColor);
+    e.facial = m_extra.U32(*row, CDIE::FacialHair);
+    for (uint32_t i = 0; i < 11; ++i) e.items[i] = m_extra.U32(*row, CDIE::Items + i);
+    e.bake = m_extra.Str(*row, CDIE::BakeName);
+    return e;
+}
+
+std::vector<DisplayLooks::Race> DisplayLooks::Races()
+{
+    Load();
+    std::vector<Race> out;
+    for (uint32_t r = 0; r < m_races.Rows(); ++r)
+        out.push_back({ m_races.U32(r, 0), m_races.Str(r, CR::Name) });
+    return out;
+}
+
+uint32_t DisplayLooks::RaceDisplay(uint32_t race, uint32_t sex)
+{
+    Load();
+    const auto row = m_races.Find(race);
+    return row ? m_races.U32(*row, sex ? CR::FemaleDisplay : CR::MaleDisplay) : 0;
+}
+
+uint32_t DisplayLooks::CharacterModel(uint32_t race, uint32_t sex)
+{
+    const auto d = Display(RaceDisplay(race, sex));
+    return d ? d->model : 0;
+}
+
+DisplayLooks::Choices DisplayLooks::CharacterChoices(uint32_t race, uint32_t sex, uint32_t skin, uint32_t hairStyle)
+{
+    Load();
+    Choices c;
+    auto add = [](std::vector<uint32_t>& list, uint32_t v) { if (std::find(list.begin(), list.end(), v) == list.end()) list.push_back(v); };
+    for (uint32_t r = 0; r < m_sections.Rows(); ++r)
+    {
+        if (m_sections.U32(r, CS::Race) != race || m_sections.U32(r, CS::Sex) != sex) continue;
+        const uint32_t section = m_sections.U32(r, CS::Section), variation = m_sections.U32(r, CS::Variation), color = m_sections.U32(r, CS::Color);
+        if (section == 0 && variation == 0) add(c.skins, color);
+        else if (section == 1 && color == skin) add(c.faces, variation);
+        else if (section == 3 && variation == hairStyle) add(c.hairColors, color);
+    }
+    for (uint32_t r = 0; r < m_hair.Rows(); ++r)
+        if (m_hair.U32(r, CHG::Race) == race && m_hair.U32(r, CHG::Sex) == sex) add(c.hairStyles, m_hair.U32(r, CHG::Variation));
+    for (uint32_t r = 0; r < m_facial.Rows(); ++r)
+        if (m_facial.U32(r, CFHS::Race) == race && m_facial.U32(r, CFHS::Sex) == sex) add(c.facialHair, m_facial.U32(r, CFHS::Variation));
+    for (auto* list : { &c.skins, &c.faces, &c.hairStyles, &c.hairColors, &c.facialHair }) std::sort(list->begin(), list->end());
+    return c;
+}
+
+std::string DisplayLooks::Composite(const ExtraRow& e)
+{
+    const std::string base = Section(e.race, e.sex, 0, 0, e.skin, 0);
+    if (base.empty()) return {};
+    std::vector<Layer> layers;
+    auto add = [&](Region region, std::string file) { if (!file.empty()) layers.push_back({ region, { std::move(file) } }); };
+    add(FaceLower, Section(e.race, e.sex, 1, e.face, e.skin, 0));            // face
+    add(FaceUpper, Section(e.race, e.sex, 1, e.face, e.skin, 1));
+    add(FaceLower, Section(e.race, e.sex, 2, e.facial, e.hairColor, 0));     // facial hair
+    add(FaceUpper, Section(e.race, e.sex, 2, e.facial, e.hairColor, 1));
+    add(FaceLower, Section(e.race, e.sex, 3, e.hairStyle, e.hairColor, 1));  // scalp
+    add(FaceUpper, Section(e.race, e.sex, 3, e.hairStyle, e.hairColor, 2));
+    add(LegUpper, Section(e.race, e.sex, 4, 0, e.skin, 0));                  // underwear
+    add(TorsoUpper, Section(e.race, e.sex, 4, 0, e.skin, 1));
+    // Armour from under to over; each part is <name>_<M|F>.blp for one sex, else <name>_U.blp.
+    static const Slot kOrder[] = { Shirt, Legs, Boots, Wrist, Chest, Gloves, Tabard, Belt };
+    for (const Slot slot : kOrder)
+        if (const auto row = e.items[slot] ? m_items.Find(e.items[slot]) : std::nullopt)
+            for (uint32_t part = 0; part < 8; ++part)
+                if (const std::string name = m_items.Str(*row, IDI::Texture + part); !name.empty())
+                {
+                    const std::string stem = std::string("Item\\TextureComponents\\") + kItemFolders[part] + "\\" + name;
+                    layers.push_back({ kItemRegions[part], { stem + (e.sex ? "_F.blp" : "_M.blp"), stem + "_U.blp" } });
+                }
+    std::string key = "composite:" + base;
+    for (const Layer& l : layers) key += "|" + std::to_string(int(l.region)) + "=" + l.files.front();
+    if (!m_composed.count(key) && m_upload)
+    {
+        if (const auto image = ComposeSkin(m_mpq, base, layers)) m_upload(key, *image);
+        else return base;
+        m_composed.insert(key);
+    }
+    return m_upload ? key : base;
 }
 
 std::optional<DisplayLooks::SpawnModel> DisplayLooks::SpawnLook(const Spawn& s)
@@ -127,21 +344,19 @@ std::string DisplayLooks::GameObjectModel(uint32_t displayId)
 
 std::optional<DisplayLooks::SpawnModel> DisplayLooks::CreatureLook(const Spawn& s)
 {
-    const auto row = m_displayInfo.Find(s.displayId);
-    if (!row) return std::nullopt;
-    const auto model = m_modelData.Find(m_displayInfo.U32(*row, CDI::ModelID));
+    const auto d = Display(s.displayId);
+    if (!d) return std::nullopt;
+    const auto model = m_modelData.Find(d->model);
     if (!model) return std::nullopt;
     SpawnModel m;
     m.look.model = m_modelData.Str(*model, CMD::ModelName);
     if (m.look.model.empty()) return std::nullopt;
-    float scale = m_displayInfo.F32(*row, CDI::CreatureModelScale);
-    if (!(scale > 0.01f && scale < 100.0f)) scale = 1;
+    const float scale = d->scale > 0.01f && d->scale < 100.0f ? d->scale : 1;
     m.scale = scale * (s.size > 0.01f && s.size < 100.0f ? s.size : 1);
     // Skins are file names next to the model.
     for (uint32_t i = 0; i < 3; ++i)
-        if (const std::string skin = m_displayInfo.Str(*row, CDI::TextureVariation + i); !skin.empty())
-            m.look.textures[11 + i] = Folder(m.look.model) + skin + ".blp";
-    if (const uint32_t extra = m_displayInfo.U32(*row, CDI::ExtendedDisplayInfoID)) Humanoid(extra, m);
+        if (!d->skins[i].empty()) m.look.textures[11 + i] = Folder(m.look.model) + d->skins[i] + ".blp";
+    if (d->extra) Humanoid(d->extra, m);
     for (int hand = 0; hand < 2; ++hand)
         if (s.weapons[hand]) Weapon(s.weapons[hand], s.weaponTypes[hand], hand == 1, m);
     return m;
@@ -158,18 +373,16 @@ std::string DisplayLooks::Section(uint32_t race, uint32_t sex, uint32_t section,
 
 void DisplayLooks::Humanoid(uint32_t extraId, SpawnModel& m)
 {
-    const auto e = m_extra.Find(extraId);
-    if (!e) return;
-    const uint32_t race = m_extra.U32(*e, CDIE::Race), sex = m_extra.U32(*e, CDIE::Sex);
-    const uint32_t skin = m_extra.U32(*e, CDIE::Skin), hairStyle = m_extra.U32(*e, CDIE::HairStyle), hairColor = m_extra.U32(*e, CDIE::HairColor);
-    const uint32_t facial = m_extra.U32(*e, CDIE::FacialHair);
+    const auto x = Extra(extraId);
+    if (!x) return;
+    const uint32_t race = x->race, sex = x->sex, skin = x->skin, hairStyle = x->hairStyle, hairColor = x->hairColor, facial = x->facial;
     uint32_t items[11];
-    for (uint32_t i = 0; i < 11; ++i) items[i] = m_extra.U32(*e, CDIE::Items + i);
+    std::copy(std::begin(x->items), std::end(x->items), items);
 
-    // Textures: the NPC's skin, face and armour come pre-baked into one body texture.
-    // ponytail: no BakeName -> plain skin from CharSections (no face or armour compositing).
-    if (const std::string bake = m_extra.Str(*e, CDIE::BakeName); !bake.empty()) m.look.textures[1] = "Textures\\BakedNpcTextures\\" + bake;
-    else if (const std::string base = Section(race, sex, 0, 0, skin, 0); !base.empty()) m.look.textures[1] = base;
+    // Textures: an NPC's skin, face and armour usually come baked into one body texture; without one the client
+    // composites them, and so does the editor.
+    if (!x->bake.empty()) m.look.textures[1] = "Textures\\BakedNpcTextures\\" + x->bake;
+    else if (const std::string body = Composite(*x); !body.empty()) m.look.textures[1] = body;
     if (const std::string hair = Section(race, sex, 3, hairStyle, hairColor, 0); !hair.empty()) m.look.textures[6] = hair;
     if (const std::string fur = Section(race, sex, 0, 0, skin, 1); !fur.empty()) m.look.textures[8] = fur;
 

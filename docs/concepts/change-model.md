@@ -86,7 +86,7 @@ Rows of one key (path id, guid, trigger id, map) before and after, written as de
 batch: points, addon and the creature's movement type in one undo step. A trigger edit is a batch too: its
 AreaTrigger.dbc row, its `areatrigger` row (same shape) and its teleport.
 
-### dbc.AreaTable, dbc.WMOAreaTable, dbc.WorldMapArea, dbc.WorldMapOverlay, dbc.AreaTrigger, dbc.Map, dbc.AreaPOI, dbc.TaxiNodes, dbc.TaxiPath, dbc.TaxiPathNode
+### dbc.AreaTable, dbc.WMOAreaTable, dbc.WorldMapArea, dbc.WorldMapOverlay, dbc.AreaTrigger, dbc.Map, dbc.AreaPOI, dbc.TaxiNodes, dbc.TaxiPath, dbc.TaxiPathNode, dbc.CreatureDisplayInfo, dbc.CreatureDisplayInfoExtra
 
 `{id, before, after}`, rows as every field by mod-dbc-patch schema name (null = no row). Export writes the client's
 table plus the project's rows to `out/client/DBFilesClient` and `out/server/dbc`, and the changes as JSON to `out/dbc`.

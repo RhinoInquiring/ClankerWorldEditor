@@ -26,6 +26,8 @@ struct BlpImage
     std::vector<std::vector<uint8_t>> mips;   // mip 0 first; RGBA8 rows are width * 4 bytes
 };
 std::optional<BlpImage> ParseBlp(const std::vector<uint8_t>& data);
+/// RGBA pixels of a BLP's first mip (BC1/2/3 decoded with their alpha; RGBA8 as is); empty when there are none.
+std::vector<uint8_t> BlpPixels(const BlpImage& image);
 
 struct AdtChunk
 {

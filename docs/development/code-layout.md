@@ -45,7 +45,7 @@ format code never touches the GPU; the `App*` files are the UI.
 | --- | --- |
 | `src/Renderer.*` | Terrain (blended layers, LOD, far terrain), water, overlay lines, solids, textures |
 | `src/ModelRenderer.*` | M2 and WMO instances, picking, thumbnails, attachments |
-| `src/Looks.*` | Display ids to models: creature skins, humanoid NPCs with equipment, gameobjects |
+| `src/Looks.*` | Display ids to models: creature skins, humanoid NPCs with equipment (skins composited when unbaked), gameobjects; character customisation choices |
 | `src/Minimap.*` | Top-down orthographic render (minimaps, world maps, thumbnails) and the minimap look |
 | `src/Loader.*` | Background preparation of tiles, textures and meshes |
 

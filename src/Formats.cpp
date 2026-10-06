@@ -1,6 +1,7 @@
 #include "Formats.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstring>
@@ -444,6 +445,66 @@ std::vector<MapEntry> ParseMapDbc(const std::vector<uint8_t>& d)
         maps.push_back({ id, CString(d, strings, h.stringSize, dirOff), CString(d, strings, h.stringSize, nameOff) });
     }
     return maps;
+}
+
+std::vector<uint8_t> BlpPixels(const BlpImage& b)
+{
+    if (b.mips.empty() || !b.width || !b.height) return {};
+    std::vector<uint8_t> out(size_t(b.width) * b.height * 4, 255);
+    const std::vector<uint8_t>& m = b.mips[0];
+    if (b.format == BlpImage::Format::RGBA8) return m.size() >= out.size() ? std::vector<uint8_t>(m.begin(), m.begin() + std::ptrdiff_t(out.size())) : out;
+    const size_t block = b.format == BlpImage::Format::BC1 ? 8 : 16;
+    auto rgb565 = [](uint16_t c) { return std::array<int, 3>{ (c >> 11) * 255 / 31, ((c >> 5) & 63) * 255 / 63, (c & 31) * 255 / 31 }; };
+    const uint32_t bw = (b.width + 3) / 4, bh = (b.height + 3) / 4;
+    for (uint32_t by = 0; by < bh; ++by)
+        for (uint32_t bx = 0; bx < bw; ++bx)
+        {
+            const size_t start = (size_t(by) * bw + bx) * block, at = start + (block - 8);   // the colour half comes last
+            if (at + 8 > m.size()) continue;
+            const uint16_t c0 = uint16_t(m[at] | m[at + 1] << 8), c1 = uint16_t(m[at + 2] | m[at + 3] << 8);
+            const auto a = rgb565(c0), z = rgb565(c1);
+            const bool four = c0 > c1 || block == 16;   // BC1 with c0 <= c1: three colours and transparent black
+            std::array<std::array<int, 4>, 4> pal{};
+            for (size_t k = 0; k < 3; ++k)
+            {
+                pal[0][k] = a[k];
+                pal[1][k] = z[k];
+                pal[2][k] = four ? (2 * a[k] + z[k]) / 3 : (a[k] + z[k]) / 2;
+                pal[3][k] = four ? (a[k] + 2 * z[k]) / 3 : 0;
+            }
+            for (auto& c : pal) c[3] = 255;
+            if (!four) pal[3][3] = 0;
+            // Alpha: BC2 4 bits per texel; BC3 two end points and 3-bit indices.
+            uint8_t alpha[16];
+            std::fill(std::begin(alpha), std::end(alpha), uint8_t(255));
+            if (b.format == BlpImage::Format::BC2)
+                for (int t = 0; t < 16; ++t) alpha[t] = uint8_t(((m[start + size_t(t / 2)] >> ((t & 1) * 4)) & 15) * 17);
+            else if (b.format == BlpImage::Format::BC3)
+            {
+                const int a0 = m[start], a1 = m[start + 1];
+                int ap[8] = { a0, a1 };
+                for (int k = 2; k < 8; ++k)
+                    ap[k] = a0 > a1 ? ((8 - k) * a0 + (k - 1) * a1) / 7 : k < 6 ? ((6 - k) * a0 + (k - 1) * a1) / 5 : k == 6 ? 0 : 255;
+                uint64_t bits = 0;
+                for (int k = 0; k < 6; ++k) bits |= uint64_t(m[start + 2 + size_t(k)]) << (8 * k);
+                for (int t = 0; t < 16; ++t) alpha[t] = uint8_t(ap[(bits >> (3 * t)) & 7]);
+            }
+            const uint32_t bits = uint32_t(m[at + 4] | m[at + 5] << 8 | m[at + 6] << 16 | uint32_t(m[at + 7]) << 24);
+            for (uint32_t py = 0; py < 4; ++py)
+                for (uint32_t px = 0; px < 4; ++px)
+                {
+                    const uint32_t x = bx * 4 + px, y = by * 4 + py;
+                    if (x >= b.width || y >= b.height) continue;
+                    const int t = int(py * 4 + px);
+                    const auto& c = pal[(bits >> (2 * t)) & 3];
+                    uint8_t* o = &out[(size_t(y) * b.width + x) * 4];
+                    o[0] = uint8_t(c[0]);
+                    o[1] = uint8_t(c[1]);
+                    o[2] = uint8_t(c[2]);
+                    o[3] = uint8_t(block == 8 ? c[3] : alpha[t]);
+                }
+        }
+    return out;
 }
 
 std::optional<BlpImage> ParseBlp(const std::vector<uint8_t>& d)

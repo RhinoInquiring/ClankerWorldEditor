@@ -36,6 +36,24 @@ pending asks first.
 place. **Delete** is offered only for entries in that range (undo brings them back; spawns are left alone). Other
 tables keyed by entry (`creature_template_addon`, `_movement`, `_resistance`, `_spell`, locales) are not copied yet.
 
+## Appearance
+
+The **Appearance** tab edits character-model looks (CreatureDisplayInfo + CreatureDisplayInfoExtra rows), in the
+layout of wow.export's character tab: **Race** and **Body**, then one dropdown each for **Skin color**, **Face**,
+**Hair style**, **Hair color** and **Facial hair** (only the values CharSections, CharHairGeosets and
+CharacterFacialHairStyles have for that race and body; faces follow the skin, hair colours the style), and the 11
+**Armour** slots (head to back), each filled from a searchable list of items for that slot.
+
+- A client display is shared by other creatures, so it is never edited: **Make an editable copy** copies it (and
+  its extra row) into the project's `creaturedisplayinfo.id` / `creaturedisplayinfoextra.id` ranges (default
+  90000-90999) and puts the copy in the template's models; **New character appearance** starts a human.
+- New appearances have no baked texture (`BakeName` empty), so the client composites skin, face, hair, underwear
+  and armour itself. The editor composites them the same way for its preview (and for every unbaked NPC in the
+  world view); `--skin-check` compares its result with Blizzard's bakes.
+- Applying writes the rows with the NPC's other edits. Export (or build the patch) puts the two DBCs in
+  `out/client/DBFilesClient`, `out/server/dbc` and `out/dbc/*.json` (mod-dbc-patch); copy `out/server/dbc` to the
+  server and restart client and worldserver.
+
 On a running worldserver, Apply sends `.reload creature_template <entry>` over SOAP for existing templates; models,
 equipment and new templates need a restart (AzerothCore has no reload for them).
 

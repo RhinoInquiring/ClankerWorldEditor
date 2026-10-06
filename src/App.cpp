@@ -201,16 +201,7 @@ bool App::Init(HWND hwnd, ID3D11Device* device, ID3D11DeviceContext* context, bo
     m_store.Register(m_terrain);
     m_store.Register(m_creatures);
     m_store.Register(m_gameobjects);
-    m_store.Register(m_areas);
-    m_store.Register(m_wmoAreas);
-    m_store.Register(m_worldMaps);
-    m_store.Register(m_mapOverlays);
-    m_store.Register(m_triggers);
-    m_store.Register(m_mapRows);
-    m_store.Register(m_areaPois);
-    m_store.Register(m_taxiNodes);
-    m_store.Register(m_taxiPaths);
-    m_store.Register(m_taxiPoints);
+    for (DbcTable* table : DbcTables()) m_store.Register(*table);
     for (TableRowsAdapter* table : TableAdapters())
     {
         m_store.Register(*table);
@@ -218,6 +209,17 @@ bool App::Init(HWND hwnd, ID3D11Device* device, ID3D11DeviceContext* context, bo
     }
     m_creatures.SetDb(&m_db);
     m_gameobjects.SetDb(&m_db);
+    // Displays: the NPC editor's unapplied appearance first, then the project's rows, then the client's.
+    m_looks.SetRowOverride([this](int table, uint32_t id) -> const nlohmann::json* {
+        const NpcView& v = m_npc;
+        if (v.appearanceId && v.editDisplay.is_object())
+        {
+            if (table == 0 && id == v.appearanceId) return &v.editDisplay;
+            if (table == 1 && v.editExtra.is_object() && id == v.editExtra.value("ID", 0u)) return &v.editExtra;
+        }
+        return (table == 0 ? m_displayRows : m_extraRows).Edited(id);
+    });
+    m_looks.SetUpload([this](const std::string& name, const BlpImage& image) { m_renderer.CacheTexture(name, image); });
 
     char user[64] = {};
     DWORD size = sizeof user;
@@ -429,18 +431,9 @@ void App::CloseProject()
     m_models.RemoveTile(-3);
     m_models.RemoveTile(-4);
     m_models.RemoveTile(-5);
-    m_areas.Reset();
-    m_wmoAreas.Reset();
+    for (DbcTable* table : DbcTables()) table->Reset();
     m_unitTemplatesRead[0] = m_unitTemplatesRead[1] = false;
-    m_worldMaps.Reset();
-    m_mapOverlays.Reset();
     m_mapJob.reset();
-    m_triggers.Reset();
-    m_mapRows.Reset();
-    m_areaPois.Reset();
-    m_taxiNodes.Reset();
-    m_taxiPaths.Reset();
-    m_taxiPoints.Reset();
     m_flightNode = m_flightPath = 0;
     m_flightPoint.reset();
     m_flightPlace = false;
@@ -510,7 +503,7 @@ void App::Export(bool playTest)
         if (!table->ExportSql(m_project->dir / "out" / "server", error)) Log("%s", error.c_str());
         else if (const size_t n = table->Count()) Log("out/server/%s.sql (%zu changed) and %s_revert.sql.", table->Table().c_str(), n, table->Table().c_str());
     }
-    for (const DbcTable* table : std::initializer_list<const DbcTable*>{ &m_areas, &m_wmoAreas, &m_worldMaps, &m_mapOverlays, &m_triggers, &m_mapRows, &m_areaPois, &m_taxiNodes, &m_taxiPaths, &m_taxiPoints })
+    for (const DbcTable* table : DbcTables())
     {
         if (!table->Export({ out / "DBFilesClient", m_project->dir / "out" / "server" / "dbc" }, m_project->dir / "out" / "dbc", error))
             Log("%s", error.c_str());

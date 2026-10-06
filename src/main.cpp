@@ -661,6 +661,163 @@ namespace
                SUCCEEDED(encoder->Commit());
     }
 
+    /// `--skin-check <data dir> <out.png> <display id> [...]`: for character displays with a baked texture, the client's
+    /// bake beside the editor's composite of the same fields (BakeName left out), one row per display, 256 px each.
+    /// Fails when a display gives no composite.
+    int SkinCheck()
+    {
+        if (__argc < 5 || !__wargv) return 2;
+        auto arg = [](int i) {
+            char buf[1024] = {};
+            WideCharToMultiByte(CP_ACP, 0, __wargv[i], -1, buf, sizeof buf, nullptr, nullptr);
+            return std::string(buf);
+        };
+        MpqChain mpq;
+        mpq.Open(arg(2));
+        Dbc displays, extras;
+        displays.Load(mpq.Read("DBFilesClient\\CreatureDisplayInfo.dbc").value_or(std::vector<uint8_t>{}));
+        extras.Load(mpq.Read("DBFilesClient\\CreatureDisplayInfoExtra.dbc").value_or(std::vector<uint8_t>{}));
+        // The extra rows as the editor holds them, without their bake: DisplayLooks then composites.
+        std::map<uint32_t, nlohmann::json> unbaked;
+        std::map<std::string, BlpImage> composed;
+        DisplayLooks looks(mpq);
+        looks.SetRowOverride([&](int table, uint32_t id) -> const nlohmann::json* { return table == 1 && unbaked.count(id) ? &unbaked[id] : nullptr; });
+        looks.SetUpload([&](const std::string& name, const BlpImage& image) { composed[name] = image; });
+        constexpr uint32_t kCell = 256;
+        const uint32_t rows = uint32_t(__argc - 4), width = kCell * 2;
+        std::vector<uint8_t> bgra(size_t(width) * kCell * rows * 4, 40);
+        auto blit = [&](const std::vector<uint8_t>& rgba, uint32_t w, uint32_t h, uint32_t col, uint32_t row) {
+            for (uint32_t y = 0; y < kCell; ++y)
+                for (uint32_t x = 0; x < kCell; ++x)
+                {
+                    const uint8_t* s = &rgba[(size_t(y * h / kCell) * w + x * w / kCell) * 4];
+                    uint8_t* d = &bgra[((size_t(row) * kCell + y) * width + col * kCell + x) * 4];
+                    d[0] = s[2]; d[1] = s[1]; d[2] = s[0]; d[3] = 255;
+                }
+        };
+        int bad = 0;
+        for (int i = 4; i < __argc; ++i)
+        {
+            const uint32_t display = uint32_t(_wtoi(__wargv[i])), row = uint32_t(i - 4);
+            const auto d = displays.Find(display);
+            const auto e = d ? extras.Find(displays.U32(*d, 3)) : std::nullopt;
+            if (!e) { printf("FAIL %u: not a character display\n", display); ++bad; continue; }
+            const std::string bake = extras.Str(*e, 20);
+            if (const auto file = bake.empty() ? std::nullopt : mpq.Read("Textures\\BakedNpcTextures\\" + bake))
+                if (const auto image = ParseBlp(*file)) blit(BlpPixels(*image), image->width, image->height, 0, row);
+            nlohmann::json j = { { "DisplayRaceID", extras.U32(*e, 1) }, { "DisplaySexID", extras.U32(*e, 2) }, { "SkinID", extras.U32(*e, 3) },
+                                 { "FaceID", extras.U32(*e, 4) }, { "HairStyleID", extras.U32(*e, 5) }, { "HairColorID", extras.U32(*e, 6) },
+                                 { "FacialHairID", extras.U32(*e, 7) }, { "BakeName", "" } };
+            for (uint32_t k = 0; k < 11; ++k) j["NPCItemDisplay[" + std::to_string(k) + "]"] = extras.U32(*e, 8 + k);
+            unbaked[extras.U32(*e, 0)] = j;
+            Spawn s;
+            s.displayId = display;
+            const auto look = looks.SpawnLook(s);
+            const auto body = look ? look->look.textures.find(1) : decltype(look->look.textures)::const_iterator{};
+            const auto image = look && body != look->look.textures.end() ? composed.find(body->second) : composed.end();
+            if (image == composed.end()) { printf("FAIL %u: no composite\n", display); ++bad; continue; }
+            blit(image->second.mips[0], image->second.width, image->second.height, 1, row);
+            // Mean colour difference between the two cells (0-255); a wrong region or layer shows as tens.
+            double diff = 0;
+            for (uint32_t y = 0; y < kCell; ++y)
+                for (uint32_t x = 0; x < kCell; ++x)
+                    for (int c = 0; c < 3; ++c)
+                        diff += std::abs(int(bgra[((size_t(row) * kCell + y) * width + x) * 4 + c]) - int(bgra[((size_t(row) * kCell + y) * width + kCell + x) * 4 + c]));
+            diff /= double(kCell) * kCell * 3;
+            const bool ok = bake.empty() || diff < 12;
+            bad += !ok;
+            printf("%s %u: race %u sex %u, composite %ux%u, mean difference from the bake %.1f\n", ok ? "ok  " : "FAIL", display, extras.U32(*e, 1),
+                   extras.U32(*e, 2), image->second.width, image->second.height, diff);
+        }
+        CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        if (!SavePng(__wargv[3], width, kCell * rows, bgra)) { printf("cannot write %s\n", arg(3).c_str()); return 1; }
+        return bad ? 1 : 0;
+    }
+
+    /// `--appearance-check <data dir> [display id]`: a new appearance as the NPC editor makes it (a copy of a character
+    /// display and its extra row in the 90000 ranges, bake dropped, hair changed), seen by DisplayLooks through the
+    /// project rows, exported, and read back from the written DBCs: the client's rows kept, the new rows' fields intact.
+    int AppearanceCheck()
+    {
+        if (__argc < 3 || !__wargv) return 2;
+        char buf[1024] = {};
+        WideCharToMultiByte(CP_ACP, 0, __wargv[2], -1, buf, sizeof buf, nullptr, nullptr);
+        MpqChain mpq;
+        mpq.Open(buf);
+        const uint32_t source = __argc >= 4 ? uint32_t(_wtoi(__wargv[3])) : 2072;   // Deputy Willem
+        int problems = 0;
+        auto check = [&](bool ok, const std::string& what) { printf("%s %s\n", ok ? "ok  " : "FAIL", what.c_str()); problems += !ok; };
+        ChangeStore store;
+        DbcTable displays(mpq, store, "CreatureDisplayInfo",
+                          { { "ID", 0, 'i' }, { "ModelID", 1, 'i' }, { "SoundID", 2, 'i' }, { "ExtendedDisplayInfoID", 3, 'i' }, { "CreatureModelScale", 4, 'f' },
+                            { "CreatureModelAlpha", 5, 'i' }, { "TextureVariation[0]", 6, 's' }, { "TextureVariation[1]", 7, 's' },
+                            { "TextureVariation[2]", 8, 's' }, { "PortraitTextureName", 9, 's' }, { "SizeClass", 10, 'i' }, { "BloodID", 11, 'i' },
+                            { "NPCSoundID", 12, 'i' }, { "ParticleColorID", 13, 'i' }, { "CreatureGeosetData", 14, 'i' }, { "ObjectEffectPackageID", 15, 'i' } },
+                          16);
+        std::vector<DbcField> extraFields = { { "ID", 0, 'i' }, { "DisplayRaceID", 1, 'i' }, { "DisplaySexID", 2, 'i' }, { "SkinID", 3, 'i' }, { "FaceID", 4, 'i' },
+                                              { "HairStyleID", 5, 'i' }, { "HairColorID", 6, 'i' }, { "FacialHairID", 7, 'i' } };
+        static const char* const kItems[11] = { "NPCItemDisplay[0]", "NPCItemDisplay[1]", "NPCItemDisplay[2]", "NPCItemDisplay[3]", "NPCItemDisplay[4]", "NPCItemDisplay[5]",
+                                                "NPCItemDisplay[6]", "NPCItemDisplay[7]", "NPCItemDisplay[8]", "NPCItemDisplay[9]", "NPCItemDisplay[10]" };
+        for (uint32_t i = 0; i < 11; ++i) extraFields.push_back({ kItems[i], 8 + i, 'i' });
+        extraFields.push_back({ "Flags", 19, 'i' });
+        extraFields.push_back({ "BakeName", 20, 's' });
+        DbcTable extras(mpq, store, "CreatureDisplayInfoExtra", extraFields, 21);
+        store.Register(displays);
+        store.Register(extras);
+
+        nlohmann::json d = displays.Row(source);
+        const uint32_t oldExtra = d.is_object() ? d.value("ExtendedDisplayInfoID", 0u) : 0;
+        nlohmann::json e = oldExtra ? extras.Row(oldExtra) : nlohmann::json();
+        if (!e.is_object()) { printf("display %u is not a character display\n", source); return 1; }
+        const uint32_t displayId = displays.FreeId(90000, 90999), extraId = extras.FreeId(90000, 90999);
+        check(displayId >= 90000 && extraId >= 90000, "free ids " + std::to_string(displayId) + " / " + std::to_string(extraId));
+        d["ID"] = displayId;
+        d["ExtendedDisplayInfoID"] = extraId;
+        e["ID"] = extraId;
+        e["BakeName"] = "";
+        e["HairStyleID"] = e.value("HairStyleID", 0u) == 1 ? 2u : 1u;
+        displays.Commit(displayId, d, "check");
+        extras.Commit(extraId, e, "check");
+
+        DisplayLooks looks(mpq);
+        std::set<std::string> uploaded;
+        looks.SetRowOverride([&](int table, uint32_t id) { return (table == 0 ? displays : extras).Edited(id); });
+        looks.SetUpload([&](const std::string& name, const BlpImage&) { uploaded.insert(name); });
+        Spawn s;
+        s.displayId = displayId;
+        const auto look = looks.SpawnLook(s);
+        check(look && look->look.textures.count(1) && look->look.textures.at(1).starts_with("composite:") && uploaded.count(look->look.textures.at(1)),
+              "the new display draws with a composited skin");
+
+        const auto out = std::filesystem::temp_directory_path() / "wwe-appearance-check";
+        std::filesystem::remove_all(out);
+        std::string error;
+        for (const DbcTable* t : { &displays, &extras })
+            check(t->Export({ out / "dbc" }, out / "patch", error), "export " + t->Name() + " " + error);
+        auto reread = [&](const char* name, Dbc& dbc) { std::ifstream f(out / "dbc" / name, std::ios::binary); return dbc.Load({ std::istreambuf_iterator<char>(f), {} }); };
+        Dbc client, written, writtenExtra;
+        client.Load(mpq.Read("DBFilesClient\\CreatureDisplayInfo.dbc").value_or(std::vector<uint8_t>{}));
+        check(reread("CreatureDisplayInfo.dbc", written) && written.Rows() == client.Rows() + 1, "CreatureDisplayInfo.dbc: the client's rows plus one");
+        const auto wd = written.Find(displayId);
+        check(wd && written.U32(*wd, 1) == d.value("ModelID", 0u) && written.U32(*wd, 3) == extraId &&
+                  std::abs(written.F32(*wd, 4) - d.value("CreatureModelScale", 0.0f)) < 1e-6f,
+              "new display row: model, extra and scale");
+        const auto cd = client.Find(source);
+        check(cd && written.Find(source) && written.U32(*written.Find(source), 1) == client.U32(*cd, 1), "the copied display left as it was");
+        check(reread("CreatureDisplayInfoExtra.dbc", writtenExtra), "CreatureDisplayInfoExtra.dbc written");
+        const auto we = writtenExtra.Find(extraId);
+        bool items = we.has_value();
+        for (uint32_t i = 0; we && i < 11; ++i) items &= writtenExtra.U32(*we, 8 + i) == e.value(kItems[i], 0u);
+        check(we && writtenExtra.U32(*we, 1) == e.value("DisplayRaceID", 0u) && writtenExtra.U32(*we, 5) == e.value("HairStyleID", 0u) &&
+                  writtenExtra.Str(*we, 20).empty() && items,
+              "new extra row: race, hair, every armour slot, no bake");
+        check(std::filesystem::exists(out / "patch" / "CreatureDisplayInfo.json") && std::filesystem::exists(out / "patch" / "CreatureDisplayInfoExtra.json"),
+              "mod-dbc-patch edit files written");
+        std::filesystem::remove_all(out);
+        printf("%s\n", problems ? "FAILED" : "all passed");
+        return problems ? 1 : 0;
+    }
+
     /// `--catalog-check <data dir> <out.png>`: build the catalog, time it, search it, and render thumbnails of the
     /// first matches for a few searches into one strip.
     int CatalogCheck()
@@ -2011,40 +2168,6 @@ namespace
     /// `--render <data dir> <map> <x> <y> <out.png> [yaw] [pitch] [height above ground] [fx] [fz]`:
     /// degrees for yaw/pitch, yards above the ground under the camera, (fx, fz) = camera spot within the tile (0..1).
     /// load the tile and its neighbours on a software device and save what the editor camera would show.
-    /// RGBA pixels of a BLP's first mip (BC1/2/3 colour decoded, alpha ignored; RGBA8 as is), for comparing pictures.
-    std::vector<uint8_t> BlpPixels(const BlpImage& b)
-    {
-        std::vector<uint8_t> out(size_t(b.width) * b.height * 4, 255);
-        if (b.mips.empty()) return {};
-        const std::vector<uint8_t>& m = b.mips[0];
-        if (b.format == BlpImage::Format::RGBA8) return m.size() >= out.size() ? std::vector<uint8_t>(m.begin(), m.begin() + std::ptrdiff_t(out.size())) : out;
-        const size_t block = b.format == BlpImage::Format::BC1 ? 8 : 16;
-        auto rgb565 = [](uint16_t c) { return std::array<int, 3>{ (c >> 11) * 255 / 31, ((c >> 5) & 63) * 255 / 63, (c & 31) * 255 / 31 }; };
-        for (uint32_t by = 0; by < b.height / 4; ++by)
-            for (uint32_t bx = 0; bx < b.width / 4; ++bx)
-            {
-                const size_t at = (size_t(by) * (b.width / 4) + bx) * block + (block - 8);   // the colour half
-                if (at + 8 > m.size()) continue;
-                const uint16_t c0 = uint16_t(m[at] | m[at + 1] << 8), c1 = uint16_t(m[at + 2] | m[at + 3] << 8);
-                const auto a = rgb565(c0), z = rgb565(c1);
-                std::array<std::array<int, 3>, 4> pal{ a, z };
-                for (int k = 0; k < 3; ++k)
-                {
-                    pal[2][size_t(k)] = (c0 > c1 || block == 16) ? (2 * a[size_t(k)] + z[size_t(k)]) / 3 : (a[size_t(k)] + z[size_t(k)]) / 2;
-                    pal[3][size_t(k)] = (c0 > c1 || block == 16) ? (a[size_t(k)] + 2 * z[size_t(k)]) / 3 : 0;
-                }
-                const uint32_t bits = uint32_t(m[at + 4] | m[at + 5] << 8 | m[at + 6] << 16 | uint32_t(m[at + 7]) << 24);
-                for (int py = 0; py < 4; ++py)
-                    for (int px = 0; px < 4; ++px)
-                    {
-                        const auto& c = pal[(bits >> (2 * (py * 4 + px))) & 3];
-                        const size_t o = ((size_t(by) * 4 + py) * b.width + bx * 4 + px) * 4;
-                        out[o] = uint8_t(c[0]); out[o + 1] = uint8_t(c[1]); out[o + 2] = uint8_t(c[2]);
-                    }
-            }
-        return out;
-    }
-
     /// `--minimap-check <data dir> <map> <x> <y> [out.png]`: renders the tile straight down as the editor's minimaps
     /// are, decodes the client's own minimap of it, and scores every rotation / mirror of the render against it: the
     /// layout MinimapFromTopDown uses is printed with them. The score only hints (lighting and textures differ, so it can
@@ -2782,6 +2905,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdLine, int)
     if (cmdLine && wcsstr(cmdLine, L"--model-check")) return ModelCheck();
     if (cmdLine && wcsstr(cmdLine, L"--render")) return RenderCheck();
     if (cmdLine && wcsstr(cmdLine, L"--catalog-check")) return CatalogCheck();
+    if (cmdLine && wcsstr(cmdLine, L"--skin-check")) return SkinCheck();
+    if (cmdLine && wcsstr(cmdLine, L"--appearance-check")) return AppearanceCheck();
     if (cmdLine && wcsstr(cmdLine, L"--ghost-check")) return GhostCheck();
     if (cmdLine && wcsstr(cmdLine, L"--compare-check")) return CompareCheck();
     if (cmdLine && wcsstr(cmdLine, L"--water-check")) return WaterCheck();

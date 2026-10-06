@@ -612,6 +612,10 @@ private:
         std::string pickQuery;
         std::vector<std::pair<uint32_t, Item>> pickHits;
         uint32_t pendingOpen = 0;                        // asked to open this entry while edits were not applied
+        // Appearance: a project character display (CreatureDisplayInfo + CreatureDisplayInfoExtra rows) as edited.
+        uint32_t appearanceId = 0;                       // the display editDisplay / editExtra are for (0 none)
+        nlohmann::json editDisplay, editExtra;
+        int pickArmor = -1;                              // the NPCItemDisplay slot the item picker fills (-1: an equipment set)
         Microsoft::WRL::ComPtr<ID3D11Texture2D> color, depth;
         Microsoft::WRL::ComPtr<ID3D11RenderTargetView> rtv;
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
@@ -638,6 +642,12 @@ private:
     void DrawNpcTemplateTab();
     void DrawNpcGearTab();
     void DrawItemPicker();
+    void DrawNpcAppearanceTab();
+    /// A new editable character display in the project's ranges: a copy of `from` (its baked texture dropped, so the
+    /// client composites the edits), or a new human when 0. It replaces `from` in the template's models (else is added).
+    void NewNpcAppearance(uint32_t from);
+    /// Rebuilds the shown display after an appearance edit, keeping the camera and the animation.
+    void RefreshNpcDisplay();
     /// Shows one display of the open template: rebuilds its look, skins, geosets and animation list.
     void SetNpcDisplay(uint32_t displayId, float scale);
     /// Rebuilds the look after the equipment set changed (geosets and hidden items stay).
@@ -776,6 +786,28 @@ private:
     TaxiNodesAdapter m_taxiNodes{ m_mpq, m_store };      // TaxiNodes.dbc: flight points
     TaxiPathAdapter m_taxiPaths{ m_mpq, m_store };       // TaxiPath.dbc: one way between two of them
     TaxiPathNodeAdapter m_taxiPoints{ m_mpq, m_store };  // TaxiPathNode.dbc: the points a path flies through
+    // NPC appearances (AppNpc.cpp): character-model displays the project adds.
+    DbcTable m_displayRows{ m_mpq, m_store, "CreatureDisplayInfo",
+                            { { "ID", 0, 'i' }, { "ModelID", 1, 'i' }, { "SoundID", 2, 'i' }, { "ExtendedDisplayInfoID", 3, 'i' },
+                              { "CreatureModelScale", 4, 'f' }, { "CreatureModelAlpha", 5, 'i' }, { "TextureVariation[0]", 6, 's' },
+                              { "TextureVariation[1]", 7, 's' }, { "TextureVariation[2]", 8, 's' }, { "PortraitTextureName", 9, 's' },
+                              { "SizeClass", 10, 'i' }, { "BloodID", 11, 'i' }, { "NPCSoundID", 12, 'i' }, { "ParticleColorID", 13, 'i' },
+                              { "CreatureGeosetData", 14, 'i' }, { "ObjectEffectPackageID", 15, 'i' } },
+                            16 };
+    DbcTable m_extraRows{ m_mpq, m_store, "CreatureDisplayInfoExtra",
+                          { { "ID", 0, 'i' }, { "DisplayRaceID", 1, 'i' }, { "DisplaySexID", 2, 'i' }, { "SkinID", 3, 'i' }, { "FaceID", 4, 'i' },
+                            { "HairStyleID", 5, 'i' }, { "HairColorID", 6, 'i' }, { "FacialHairID", 7, 'i' }, { "NPCItemDisplay[0]", 8, 'i' },
+                            { "NPCItemDisplay[1]", 9, 'i' }, { "NPCItemDisplay[2]", 10, 'i' }, { "NPCItemDisplay[3]", 11, 'i' },
+                            { "NPCItemDisplay[4]", 12, 'i' }, { "NPCItemDisplay[5]", 13, 'i' }, { "NPCItemDisplay[6]", 14, 'i' },
+                            { "NPCItemDisplay[7]", 15, 'i' }, { "NPCItemDisplay[8]", 16, 'i' }, { "NPCItemDisplay[9]", 17, 'i' },
+                            { "NPCItemDisplay[10]", 18, 'i' }, { "Flags", 19, 'i' }, { "BakeName", 20, 's' } },
+                          21 };
+    /// Every client DBC the project edits: registered, reset, exported alike.
+    std::vector<DbcTable*> DbcTables()
+    {
+        return { &m_areas, &m_wmoAreas, &m_worldMaps, &m_mapOverlays, &m_triggers, &m_mapRows, &m_areaPois, &m_taxiNodes, &m_taxiPaths, &m_taxiPoints,
+                 &m_displayRows, &m_extraRows };
+    }
     uint32_t m_flightNode = 0, m_flightPath = 0;         // selected node, or selected path (one at a time)
     std::optional<size_t> m_flightPoint;                 // selected point of the selected path (index)
     struct FlightHit { uint32_t node = 0, path = 0; size_t point = 0; };

@@ -342,9 +342,10 @@ void App::RunChecks()
     else
         m_problems.push_back({ Problem::Severity::Error, "IDs", "No area.id range set (File > Project settings)." });
     for (const auto& [kind, table] : std::initializer_list<std::pair<const char*, const DbcTable*>>{
-             { "wmoarea.id", &m_wmoAreas }, { "worldmaparea.id", &m_worldMaps }, { "worldmapoverlay.id", &m_mapOverlays } })
+             { "wmoarea.id", &m_wmoAreas }, { "worldmaparea.id", &m_worldMaps }, { "worldmapoverlay.id", &m_mapOverlays },
+             { "creaturedisplayinfo.id", &m_displayRows }, { "creaturedisplayinfoextra.id", &m_extraRows } })
         if (const Project::IdRange r = m_project->Range(kind); r.first && r.last >= r.first)
-            table->CheckIds(r.first, r.last, "Zones", m_problems);
+            table->CheckIds(r.first, r.last, table == &m_displayRows || table == &m_extraRows ? "NPCs" : "Zones", m_problems);
         else
             m_problems.push_back({ Problem::Severity::Error, "IDs", std::string("No ") + kind + " range set (File > Project settings)." });
     CheckTriggers(m_problems);

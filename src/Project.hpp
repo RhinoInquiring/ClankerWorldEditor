@@ -30,7 +30,9 @@ struct Project
                                                 { "taxinode.id", { 1, 448 } },              // TaxiNodes: AzerothCore's taxi mask ends at 448 (client max 440, gaps used)
                                                 { "taxipath.id", { 5000, 5999 } },          // TaxiPath (client max 1978)
                                                 { "taxipathnode.id", { 60000, 69999 } },    // TaxiPathNode (client max 46874)
-                                                { "creature_template.entry", { 9000000, 9099999 } } };   // new NPCs (stock max ~200000)
+                                                { "creature_template.entry", { 9000000, 9099999 } },     // new NPCs (stock max ~200000)
+                                                { "creaturedisplayinfo.id", { 90000, 90999 } },          // CreatureDisplayInfo (client max ~32754)
+                                                { "creaturedisplayinfoextra.id", { 90000, 90999 } } };   // CreatureDisplayInfoExtra (client max ~21381)
     IdRange Range(const std::string& kind) const { auto it = idRanges.find(kind); return it == idRanges.end() ? IdRange{} : it->second; }
     bool Owns(const std::string& kind, uint32_t id) const { const IdRange r = Range(kind); return id >= r.first && id <= r.last && r.first; }
     std::string serverProfile;   // name of the user's ServerProfile (Server.hpp); credentials never live here

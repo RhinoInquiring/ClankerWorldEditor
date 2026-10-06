@@ -50,6 +50,9 @@ public:
     void CheckIds(uint32_t first, uint32_t last, const char* area, std::vector<Problem>& problems) const;
     /// Bumped by every apply and revert (for caches).
     uint64_t Version() const { return m_version; }
+    /// The project's row of an id without reading the client's file: null when the project has not touched it (a null
+    /// json = removed).
+    const nlohmann::json* Edited(uint32_t id) const { auto it = m_project.find(id); return it == m_project.end() ? nullptr : &it->second; }
 
 protected:
     void Read() const;
