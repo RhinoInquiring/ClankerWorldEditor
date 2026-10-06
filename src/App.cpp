@@ -201,32 +201,23 @@ bool App::Init(HWND hwnd, ID3D11Device* device, ID3D11DeviceContext* context, bo
     m_store.Register(m_terrain);
     m_store.Register(m_creatures);
     m_store.Register(m_gameobjects);
-    m_store.Register(m_waypoints);
-    m_store.Register(m_addons);
     m_store.Register(m_areas);
     m_store.Register(m_wmoAreas);
     m_store.Register(m_worldMaps);
     m_store.Register(m_mapOverlays);
     m_store.Register(m_triggers);
     m_store.Register(m_mapRows);
-    m_store.Register(m_triggerRows);
-    m_store.Register(m_teleports);
-    m_store.Register(m_instances);
     m_store.Register(m_areaPois);
-    m_store.Register(m_gossipPois);
-    m_store.Register(m_teles);
     m_store.Register(m_taxiNodes);
     m_store.Register(m_taxiPaths);
     m_store.Register(m_taxiPoints);
+    for (TableRowsAdapter* table : TableAdapters())
+    {
+        m_store.Register(*table);
+        table->SetDb(&m_db);
+    }
     m_creatures.SetDb(&m_db);
     m_gameobjects.SetDb(&m_db);
-    m_waypoints.SetDb(&m_db);
-    m_addons.SetDb(&m_db);
-    m_triggerRows.SetDb(&m_db);
-    m_teleports.SetDb(&m_db);
-    m_instances.SetDb(&m_db);
-    m_gossipPois.SetDb(&m_db);
-    m_teles.SetDb(&m_db);
 
     char user[64] = {};
     DWORD size = sizeof user;
@@ -514,7 +505,7 @@ void App::Export(bool playTest)
         else if (size_t a, c, d; spawns->Counts(a, c, d), a + c + d)
             Log("Spawns: out/server/%s_spawns.sql (+%zu, ~%zu, -%zu) and %s_spawns_revert.sql.", spawns->Table(), a, c, d, spawns->Table());
     }
-    for (const TableRowsAdapter* table : { &m_waypoints, &m_addons, &m_triggerRows, &m_teleports, &m_instances, &m_gossipPois, &m_teles })
+    for (const TableRowsAdapter* table : TableAdapters())
     {
         if (!table->ExportSql(m_project->dir / "out" / "server", error)) Log("%s", error.c_str());
         else if (const size_t n = table->Count()) Log("out/server/%s.sql (%zu changed) and %s_revert.sql.", table->Table().c_str(), n, table->Table().c_str());
@@ -1146,12 +1137,11 @@ void App::DrawUnitCatalog(SpawnKind kind)
         return;
     }
     UnitTemplates(kind);
-    // Folders: creature types (CreatureType in AzerothCore SharedDefines.h), gameobject types.
-    static const char* const kCreatureTypes[] = { "None", "Beast", "Dragonkin", "Demon", "Elemental", "Giant", "Undead", "Humanoid",
-                                                  "Critter", "Mechanical", "Not specified", "Totem", "Non-combat pet", "Gas cloud" };
+    // Folders: creature types, gameobject types.
     auto categoryName = [&](uint32_t c) -> std::string {
         if (kind == SpawnKind::GameObject) return GameObjectTypeName(c);
-        return c < std::size(kCreatureTypes) ? kCreatureTypes[c] : "Type " + std::to_string(c);
+        const char* name = CreatureTypeName(c);
+        return name ? name : "Type " + std::to_string(c);
     };
     std::map<uint32_t, size_t> counts;
     for (const auto& t : m_unitTemplates[k]) ++counts[t.category];

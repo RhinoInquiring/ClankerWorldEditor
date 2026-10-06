@@ -45,6 +45,10 @@ public:
     /// A creature display's skin names (TextureVariation, empty ones left out) and whether it is a humanoid
     /// (CreatureDisplayInfoExtra) display.
     std::vector<std::string> SkinNames(uint32_t displayId, bool* humanoid = nullptr);
+    /// NPC editor: the faction a FactionTemplate id belongs to (Faction.dbc name; empty when unknown).
+    std::string FactionName(uint32_t factionTemplate);
+    /// An item display's inventory icon as a texture path ("Interface\Icons\....blp"; empty when none).
+    std::string ItemIcon(uint32_t itemDisplay);
 
 private:
     void Load();
@@ -58,7 +62,7 @@ private:
 
     const MpqChain& m_mpq;
     bool m_loaded = false;
-    Dbc m_displayInfo, m_modelData, m_goDisplay, m_extra, m_sections, m_hair, m_facial, m_items, m_races, m_helmVis, m_animations;
+    Dbc m_displayInfo, m_modelData, m_goDisplay, m_extra, m_sections, m_hair, m_facial, m_items, m_races, m_helmVis, m_animations, m_factionTemplates, m_factions;
 };
 
 /// Placement of a spawn's model at editor position `p`: server orientation o turns the model's +x to the server

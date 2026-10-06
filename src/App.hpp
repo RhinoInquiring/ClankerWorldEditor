@@ -600,6 +600,18 @@ private:
         bool focus = false;                              // bring the window forward next frame
         std::string filter, listedFor = "\x01";          // template list filter; the filter `listed` was built for
         std::vector<size_t> listed;                      // indices into UnitTemplates(Creature) passing the filter
+        // Editing: the rows as edited, applied together as one undo step. The preview follows the edits.
+        nlohmann::json editTemplate;                     // creature_template row (null: the entry has none)
+        std::vector<nlohmann::json> editModels, editEquips;   // creature_template_model / creature_equip_template rows
+        uint64_t editRevision = ~0ull;                   // change store revision the rows were read at
+        bool dirty = false;                              // edited and not applied
+        std::string columnFilter;
+        struct Item { std::string name; uint32_t display = 0, type = 0; bool found = false; };
+        std::map<uint32_t, Item> items;                  // item_template rows read so far, by entry
+        int pickSet = -1, pickSlot = 0;                  // the equipment slot the item picker fills
+        std::string pickQuery;
+        std::vector<std::pair<uint32_t, Item>> pickHits;
+        uint32_t pendingOpen = 0;                        // asked to open this entry while edits were not applied
         Microsoft::WRL::ComPtr<ID3D11Texture2D> color, depth;
         Microsoft::WRL::ComPtr<ID3D11RenderTargetView> rtv;
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
@@ -610,6 +622,22 @@ private:
     void DrawNpcViewer();
     /// Opens the viewer on a creature template (reads its models and equipment sets).
     void OpenNpc(uint32_t entry);
+    /// Reads the template's rows into the edit buffers (dropping edits) and refreshes the preview; `frame` re-aims the camera.
+    void LoadNpc(uint32_t entry, bool frame);
+    /// The preview's model and equipment lists from the edit buffers.
+    void RebuildNpcLists();
+    /// An item_template row (name, display, inventory type), read once.
+    const NpcView::Item& NpcItem(uint32_t entry);
+    /// Writes the edited rows (one undo step) and reloads the template on a running server.
+    void ApplyNpc();
+    /// A copy of the open template under the next free entry of the project's range, with its models and equipment.
+    void DuplicateNpc();
+    /// Deletes the open template, models and equipment (entries of the project's range only).
+    void DeleteNpc();
+    void DrawNpcViewTab();
+    void DrawNpcTemplateTab();
+    void DrawNpcGearTab();
+    void DrawItemPicker();
     /// Shows one display of the open template: rebuilds its look, skins, geosets and animation list.
     void SetNpcDisplay(uint32_t displayId, float scale);
     /// Rebuilds the look after the equipment set changed (geosets and hidden items stay).
@@ -722,6 +750,14 @@ private:
     std::vector<nlohmann::json> m_entranceInstance;       // instance_template row of the Entrance tab's map
     AreaPoiAdapter m_areaPois{ m_mpq, m_store };          // AreaPOI.dbc: world map landmarks
     TableRowsAdapter m_gossipPois{ m_store, "points_of_interest", "ID" }, m_teles{ m_store, "game_tele", "id" };
+    // NPC editor (AppNpc.cpp): a template, its models and its equipment sets.
+    TableRowsAdapter m_npcTemplates{ m_store, "creature_template", "entry" }, m_npcModels{ m_store, "creature_template_model", "CreatureID", "Idx" },
+                     m_npcEquips{ m_store, "creature_equip_template", "CreatureID", "ID" };
+    /// Every world-table adapter: registered, connected, synced, exported and checked alike.
+    std::vector<TableRowsAdapter*> TableAdapters()
+    {
+        return { &m_waypoints, &m_addons, &m_triggerRows, &m_teleports, &m_instances, &m_gossipPois, &m_teles, &m_npcTemplates, &m_npcModels, &m_npcEquips };
+    }
     PoiKind m_poiKind = PoiKind::MapIcon;                 // POIs tool: the kind listed, placed and selected
     uint32_t m_poiSel = 0;                                // selected point id of m_poiKind (0 = none)
     std::optional<uint32_t> m_poiHover;

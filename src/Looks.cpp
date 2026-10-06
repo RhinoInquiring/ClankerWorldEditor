@@ -17,7 +17,7 @@ namespace
     namespace CS { constexpr uint32_t Race = 1, Sex = 2, Section = 3, Texture = 4, Variation = 8, Color = 9; }
     namespace CHG { constexpr uint32_t Race = 1, Sex = 2, Variation = 3, Geoset = 4; }
     namespace CFHS { constexpr uint32_t Race = 0, Sex = 1, Variation = 2, Geoset = 3; }
-    namespace IDI { constexpr uint32_t ModelName = 1, ModelTexture = 3, GeosetGroup = 7, HelmetGeosetVis = 13; }
+    namespace IDI { constexpr uint32_t ModelName = 1, ModelTexture = 3, InventoryIcon = 5, GeosetGroup = 7, HelmetGeosetVis = 13; }
     namespace CR { constexpr uint32_t ClientPrefix = 6; }
 
     // CreatureDisplayInfoExtra NPCItemDisplay slots.
@@ -54,6 +54,24 @@ void DisplayLooks::Load()
     load(m_races, "ChrRaces.dbc");
     load(m_helmVis, "HelmetGeosetVisData.dbc");
     load(m_animations, "AnimationData.dbc");
+    load(m_factionTemplates, "FactionTemplate.dbc");
+    load(m_factions, "Faction.dbc");
+}
+
+std::string DisplayLooks::FactionName(uint32_t factionTemplate)
+{
+    Load();
+    const auto t = m_factionTemplates.Find(factionTemplate);
+    const auto f = t ? m_factions.Find(m_factionTemplates.U32(*t, 1)) : std::nullopt;   // FactionTemplate.Faction
+    return f ? m_factions.Str(*f, 23) : std::string();                                   // Faction.Name_lang (enUS)
+}
+
+std::string DisplayLooks::ItemIcon(uint32_t itemDisplay)
+{
+    Load();
+    const auto row = m_items.Find(itemDisplay);
+    const std::string icon = row ? m_items.Str(*row, IDI::InventoryIcon) : std::string();
+    return icon.empty() ? icon : "Interface\\Icons\\" + icon + ".blp";
 }
 
 std::string DisplayLooks::AnimationName(uint32_t id)

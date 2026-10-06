@@ -20,4 +20,23 @@ MIT), rebuilt on this editor's renderer and AzerothCore's tables. Needs the worl
 
 Items follow the animated attachment points here (in the world view they stay at the first frame).
 
-Not yet: editing the template, its models or equipment (next step), wireframe / bone view, export.
+## Editing
+
+The **Template** and **Models & gear** tabs edit the open creature. Edits show in the preview at once and are written
+with **Apply** (one undo step for all three tables); **Revert** drops them. Opening another creature with edits
+pending asks first.
+
+| Tab | Edits |
+| --- | --- |
+| Template | `creature_template`: name, subname, cursor, levels, expansion, rank, class, type, faction (its name shown), NPC flags, gossip menu, movement and speeds, aggro range, health / mana / armor / damage / experience multipliers, attack time, regeneration, loot id, money, AI and script name. **All columns** edits any other column as text |
+| Models & gear | `creature_template_model`: display, scale and chance per model (**Add the shown display** adds the one previewed, e.g. picked under View > Skins); `creature_equip_template`: sets with main hand, off hand and ranged items chosen from a searchable list with their icons |
+
+**Duplicate as new NPC** copies the template, its models and its equipment to the next entry of the project's
+`creature_template.entry` range (default 9000000-9099999, File > Project settings); the copy appears in the Catalog to
+place. **Delete** is offered only for entries in that range (undo brings them back; spawns are left alone). Other
+tables keyed by entry (`creature_template_addon`, `_movement`, `_resistance`, `_spell`, locales) are not copied yet.
+
+On a running worldserver, Apply sends `.reload creature_template <entry>` over SOAP for existing templates; models,
+equipment and new templates need a restart (AzerothCore has no reload for them).
+
+Not yet: wireframe / bone view, export.

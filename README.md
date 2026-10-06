@@ -47,7 +47,7 @@ build\Release\wow-world-editor.exe
 | --- | --- |
 | [Creatures and gameobjects](docs/units/spawns.md) | Place and edit spawns in the world database, with their real models |
 | [Paths](docs/units/paths.md) | Draw and edit creature waypoint paths in 3D |
-| [NPC viewer](docs/units/npc-viewer.md) | One creature in its own preview: animations, skins, equipment, geosets, textures |
+| [NPC viewer](docs/units/npc-viewer.md) | One creature in its own preview (animations, skins, equipment, geosets, textures); edit its template, models and equipment, or copy it as a new NPC |
 
 ### Regions
 | Feature | What it does |

@@ -15,11 +15,20 @@ using namespace DirectX;
 namespace
 {
 const ImVec4 kQuiet{ 0.60f, 0.62f, 0.66f, 1.00f };
+const ImVec4 kWarn{ 1.00f, 0.66f, 0.25f, 1.00f };
 constexpr uint32_t kCape = 99;          // NpcView::hidden: the cape (a texture and geoset group 15, not a model)
 constexpr float kFrameMs = 1000.0f / 30;   // one step of the frame buttons
 
 uint32_t U(const std::string& s) { return uint32_t(std::strtoul(s.c_str(), nullptr, 10)); }
 float F(const std::string& s) { return std::strtof(s.c_str(), nullptr); }
+
+/// A column of a row read from the database (column -> text); empty for NULL or missing.
+std::string Col(const nlohmann::json& row, const char* col)
+{
+    if (!row.is_object()) return {};
+    const auto it = row.find(col);
+    return it != row.end() && it->is_string() ? it->get<std::string>() : std::string();
+}
 
 const char* AttachmentName(uint32_t id)
 {
@@ -48,40 +57,32 @@ std::string GeosetGroupName(uint32_t group)
 void App::OpenNpc(uint32_t entry)
 {
     m_showNpc = true;
+    m_npc.focus = true;
+    if (m_npc.dirty && entry != m_npc.entry) { m_npc.pendingOpen = entry; return; }   // asked first (DrawNpcViewer)
+    m_npc.hidden.clear();
+    m_npc.equip = 0;
+    LoadNpc(entry, true);
+}
+
+void App::LoadNpc(uint32_t entry, bool frame)
+{
     NpcView& v = m_npc;
-    v.focus = true;
+    const bool same = v.entry == entry;
     v.entry = entry;
-    v.name.clear();
-    v.models.clear();
-    v.equips.clear();
-    v.equip = 0;
-    v.hidden.clear();
-    const std::string id = std::to_string(entry);
-    std::string error;
-    if (const auto rows = m_db.Query("SELECT name FROM creature_template WHERE entry = " + id, error); rows && !rows->empty())
-        v.name = (*rows)[0][0];
-    if (const auto rows = m_db.Query("SELECT CreatureDisplayID, DisplayScale, Probability FROM creature_template_model WHERE CreatureID = " + id +
-                                     " ORDER BY Idx", error))
-        for (const auto& r : *rows) v.models.push_back({ U(r[0]), F(r[1]), F(r[2]) });
-    if (const auto rows = m_db.Query("SELECT e.ID, e.ItemID1, e.ItemID2, e.ItemID3, COALESCE(i1.displayid, 0), COALESCE(i1.InventoryType, 0), "
-                                     "COALESCE(i2.displayid, 0), COALESCE(i2.InventoryType, 0), COALESCE(i3.displayid, 0), COALESCE(i3.InventoryType, 0) "
-                                     "FROM creature_equip_template e LEFT JOIN item_template i1 ON i1.entry = e.ItemID1 "
-                                     "LEFT JOIN item_template i2 ON i2.entry = e.ItemID2 LEFT JOIN item_template i3 ON i3.entry = e.ItemID3 "
-                                     "WHERE e.CreatureID = " + id + " ORDER BY e.ID", error))
-        for (const auto& r : *rows)
-        {
-            NpcView::Equip e;
-            e.id = U(r[0]);
-            for (int k = 0; k < 3; ++k)
-            {
-                e.items[k] = U(r[1 + k]);
-                e.displays[k] = U(r[4 + k * 2]);
-                e.types[k] = U(r[5 + k * 2]);
-            }
-            v.equips.push_back(e);
-        }
-    if (!error.empty()) Log("NPC viewer: %s", error.c_str());
-    if (v.models.empty())
+    const auto rows = m_npcTemplates.Rows(entry);
+    v.editTemplate = rows.empty() ? nlohmann::json() : rows[0];
+    v.editModels = m_npcModels.Rows(entry);
+    v.editEquips = m_npcEquips.Rows(entry);
+    v.editRevision = m_store.Revision();
+    v.dirty = false;
+    v.name = Col(v.editTemplate, "name");
+    RebuildNpcLists();
+    // Keep showing the same display while it is still one of the template's (after an edit or an undo), else the first.
+    uint32_t display = v.models.empty() ? 0 : v.models[0].displayId;
+    float scale = v.models.empty() ? 1 : v.models[0].scale;
+    for (const auto& m : v.models)
+        if (same && m.displayId == v.displayId) { display = m.displayId; scale = m.scale; }
+    if (!display)
     {
         v.displayId = 0;
         v.look.reset();
@@ -90,7 +91,50 @@ void App::OpenNpc(uint32_t entry)
         v.skins.clear();
         return;
     }
-    SetNpcDisplay(v.models[0].displayId, v.models[0].scale);
+    const bool sameDisplay = same && display == v.displayId;
+    const int sequence = v.sequence;
+    const bool autoCamera = v.autoCamera;
+    v.autoCamera = frame && autoCamera;
+    SetNpcDisplay(display, scale);
+    v.autoCamera = autoCamera;
+    if (sameDisplay && sequence >= 0 && v.info && v.info->skeleton && size_t(sequence) < v.info->skeleton->sequences.size()) SetNpcSequence(sequence);
+}
+
+void App::RebuildNpcLists()
+{
+    NpcView& v = m_npc;
+    v.models.clear();
+    for (const auto& r : v.editModels) v.models.push_back({ U(Col(r, "CreatureDisplayID")), F(Col(r, "DisplayScale")), F(Col(r, "Probability")) });
+    v.equips.clear();
+    for (const auto& r : v.editEquips)
+    {
+        NpcView::Equip e;
+        e.id = U(Col(r, "ID"));
+        for (int k = 0; k < 3; ++k)
+        {
+            e.items[k] = U(Col(r, ("ItemID" + std::to_string(k + 1)).c_str()));
+            const NpcView::Item& item = NpcItem(e.items[k]);
+            e.displays[k] = item.display;
+            e.types[k] = item.type;
+        }
+        v.equips.push_back(e);
+    }
+    if (v.equip >= int(v.equips.size())) v.equip = v.equips.empty() ? -1 : 0;
+    for (const auto& m : v.models)
+        if (m.displayId == v.displayId && m.scale > 0.01f) v.displayScale = m.scale;
+    if (v.displayId) RefreshNpcLook();
+}
+
+const App::NpcView::Item& App::NpcItem(uint32_t entry)
+{
+    static const NpcView::Item kNone;
+    if (!entry) return kNone;
+    if (auto it = m_npc.items.find(entry); it != m_npc.items.end()) return it->second;
+    NpcView::Item& item = m_npc.items[entry];
+    std::string error;
+    if (const auto rows = m_db.Query("SELECT name, displayid, InventoryType FROM item_template WHERE entry = " + std::to_string(entry), error); rows && !rows->empty())
+        item = { (*rows)[0][0], U((*rows)[0][1]), U((*rows)[0][2]), true };
+    return item;
 }
 
 void App::RefreshNpcLook()
@@ -281,6 +325,26 @@ void App::DrawNpcViewer()
         ImGui::End();
         return;
     }
+    if (v.entry && !v.dirty && v.editRevision != m_store.Revision()) LoadNpc(v.entry, false);   // an undo, a redo, another tool's edit
+    if (v.pendingOpen) ImGui::OpenPopup("Unapplied NPC edits");
+    if (ImGui::BeginPopupModal("Unapplied NPC edits", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+    {
+        ImGui::Text("%s (%u) has edits that are not applied.", v.name.c_str(), v.entry);
+        const uint32_t next = v.pendingOpen;
+        auto go = [&](bool apply) {
+            if (apply) ApplyNpc();
+            v.dirty = false;
+            v.pendingOpen = 0;
+            OpenNpc(next);
+            ImGui::CloseCurrentPopup();
+        };
+        if (ImGui::Button("Apply")) go(true);
+        ImGui::SameLine();
+        if (ImGui::Button("Discard")) go(false);
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel")) { v.pendingOpen = 0; ImGui::CloseCurrentPopup(); }
+        ImGui::EndPopup();
+    }
 
     // Left: every creature template, filtered by name or entry.
     const auto& templates = UnitTemplates(SpawnKind::Creature);
@@ -327,7 +391,7 @@ void App::DrawNpcViewer()
     ImGui::SameLine();
 
     // Middle: the preview and the animation bar.
-    const float sideWidth = 320;
+    const float sideWidth = 400;
     const ImGuiStyle& style = ImGui::GetStyle();
     const float barHeight = ImGui::GetFrameHeightWithSpacing() * 2 + style.ItemSpacing.y;
     if (ImGui::BeginChild("##npcmain", { std::max(ImGui::GetContentRegionAvail().x - sideWidth - style.ItemSpacing.x, 100.0f), 0 }))
@@ -390,168 +454,636 @@ void App::DrawNpcViewer()
     // Right: what the model is made of.
     if (ImGui::BeginChild("##npcside", { 0, 0 }, ImGuiChildFlags_Borders))
     {
-        if (ImGui::CollapsingHeader("Preview", ImGuiTreeNodeFlags_DefaultOpen))
+        if (v.dirty)
         {
-            ImGui::Checkbox("Auto camera", &v.autoCamera);
-            ImGui::SetItemTooltip("Frame each model as it opens");
+            ImGui::TextColored(kWarn, "Edits not applied");
             ImGui::SameLine();
-            if (ImGui::SmallButton("Frame now"))
-            {
-                const bool keep = v.autoCamera;
-                v.autoCamera = true;
-                SetNpcDisplay(v.displayId, v.displayScale);
-                v.autoCamera = keep;
-            }
-            ImGui::ColorEdit3("Background", v.background, ImGuiColorEditFlags_NoInputs);
-            ImGui::TextColored(kQuiet, "Left drag turns, right drag pans, wheel zooms.");
-        }
-        if (ImGui::CollapsingHeader("Models", ImGuiTreeNodeFlags_DefaultOpen))
-        {
-            if (v.models.empty()) ImGui::TextColored(kQuiet, "creature_template_model has no rows.");
-            for (size_t i = 0; i < v.models.size(); ++i)
-            {
-                const auto& m = v.models[i];
-                char text[96];
-                snprintf(text, sizeof text, "Display %u   x%.2f   %.0f%%##m%zu", m.displayId, m.scale, m.probability * 100, i);
-                if (ImGui::RadioButton(text, m.displayId == v.displayId)) SetNpcDisplay(m.displayId, m.scale);
-            }
-        }
-        if (ImGui::CollapsingHeader("Skins", ImGuiTreeNodeFlags_DefaultOpen))
-        {
-            ImGui::TextColored(kQuiet, "Displays drawing the same model (preview only).");
-            if (ImGui::BeginChild("##skins", { 0, std::min(float(v.skins.size()) + 0.5f, 8.0f) * ImGui::GetTextLineHeightWithSpacing() }))
-                for (uint32_t id : v.skins)
-                {
-                    bool humanoid = false;
-                    std::string text = std::to_string(id);
-                    const auto names = m_looks.SkinNames(id, &humanoid);
-                    for (const auto& n : names) text += "   " + n;
-                    if (humanoid) text += "   (character)";
-                    if (ImGui::Selectable((text + "##s" + std::to_string(id)).c_str(), id == v.displayId)) SetNpcDisplay(id, v.displayScale);
-                }
-            ImGui::EndChild();
-        }
-        if (ImGui::CollapsingHeader("Equipment", ImGuiTreeNodeFlags_DefaultOpen))
-        {
-            auto setLabel = [&](int i) {
-                if (i < 0 || size_t(i) >= v.equips.size()) return std::string("None");
-                const auto& e = v.equips[size_t(i)];
-                return "Set " + std::to_string(e.id) + ":  " + std::to_string(e.items[0]) + " / " + std::to_string(e.items[1]) + " / " +
-                       std::to_string(e.items[2]);
-            };
-            if (v.equips.empty()) ImGui::TextColored(kQuiet, "creature_equip_template has no sets.");
-            else
-            {
-                ImGui::SetNextItemWidth(-1);
-                if (ImGui::BeginCombo("##equip", setLabel(v.equip).c_str()))
-                {
-                    for (int i = -1; i < int(v.equips.size()); ++i)
-                        if (ImGui::Selectable(setLabel(i).c_str(), i == v.equip)) { v.equip = i; RefreshNpcLook(); }
-                    ImGui::EndCombo();
-                }
-                ImGui::SetItemTooltip("Main hand / off hand / ranged item entries (the ranged one is not drawn)");
-            }
-            bool any = false;
-            auto toggle = [&](uint32_t key, const char* name) {
-                bool shown = !v.hidden.count(key);
-                if (ImGui::Checkbox(name, &shown)) { if (shown) v.hidden.erase(key); else v.hidden.insert(key); }
-                any = true;
-            };
-            if (v.look)
-            {
-                for (const auto& item : v.look->items) toggle(item.attachment, (std::string(AttachmentName(item.attachment)) + "##a" + std::to_string(item.attachment)).c_str());
-                if (v.humanoid && v.look->look.textures.count(2)) toggle(kCape, "Cape");
-            }
-            if (!any) ImGui::TextColored(kQuiet, "Nothing carried.");
-        }
-        if (ImGui::CollapsingHeader("Geosets", ImGuiTreeNodeFlags_DefaultOpen) && v.info)
-        {
-            if (ImGui::SmallButton("All")) v.geosets = v.info->geosets;
+            if (ImGui::SmallButton("Apply")) ApplyNpc();
+            ImGui::SetItemTooltip("Write them to the world database as one undo step");
             ImGui::SameLine();
-            if (ImGui::SmallButton("None")) v.geosets.clear();
-            ImGui::SameLine();
-            if (ImGui::SmallButton("As spawned") && v.look) v.geosets = v.look->look.geosets.empty() ? v.info->geosets : v.look->look.geosets;
-            // One "Group: variant" dropdown per group with a choice to make (wow.export's customization layout); a
-            // group of one submesh, and the base mesh (id 0), are plain checkboxes.
-            auto shown = [&](uint16_t g) { return std::find(v.geosets.begin(), v.geosets.end(), g) != v.geosets.end(); };
-            auto setShown = [&](uint16_t g, bool on) {
-                if (on && !shown(g)) v.geosets.push_back(g);
-                if (!on) std::erase(v.geosets, g);
-            };
-            std::map<uint32_t, std::vector<uint16_t>> groups;
-            for (uint16_t g : v.info->geosets)
-                if (g) groups[g / 100u].push_back(g);
-            auto name = [&](uint32_t group) { return v.humanoid ? GeosetGroupName(group) : "Group " + std::to_string(group); };
-            const float labelWidth = 110;
-            if (std::count(v.info->geosets.begin(), v.info->geosets.end(), uint16_t(0)))
-            {
-                bool on = shown(0);
-                if (ImGui::Checkbox("Base mesh##g0", &on)) setShown(0, on);
-            }
-            for (const auto& [group, ids] : groups)
-            {
-                ImGui::PushID(int(group));
-                if (ids.size() == 1)
-                {
-                    bool on = shown(ids[0]);
-                    if (ImGui::Checkbox((name(group) + "  " + std::to_string(ids[0] % 100)).c_str(), &on)) setShown(ids[0], on);
-                    ImGui::SetItemTooltip("Geoset %u", ids[0]);
-                    ImGui::PopID();
-                    continue;
-                }
-                std::vector<uint16_t> on;
-                for (uint16_t g : ids)
-                    if (shown(g)) on.push_back(g);
-                const std::string current = on.empty() ? "None" : on.size() == ids.size() ? "All" : on.size() == 1 ? std::to_string(on[0] % 100) : "Mixed";
-                ImGui::AlignTextToFramePadding();
-                ImGui::TextUnformatted(name(group).c_str());
-                ImGui::SameLine(labelWidth);
-                ImGui::SetNextItemWidth(-1);
-                if (ImGui::BeginCombo("##group", current.c_str()))
-                {
-                    auto only = [&](std::optional<uint16_t> keep) { for (uint16_t g : ids) setShown(g, keep && g == *keep); };
-                    if (ImGui::Selectable("None", on.empty())) only(std::nullopt);
-                    for (uint16_t g : ids)
-                    {
-                        if (ImGui::Selectable((std::to_string(g % 100) + "##" + std::to_string(g)).c_str(), on.size() == 1 && on[0] == g)) only(g);
-                        ImGui::SameLine(80);
-                        ImGui::TextColored(kQuiet, "geoset %u", g);
-                    }
-                    if (ImGui::Selectable("All", on.size() == ids.size())) for (uint16_t g : ids) setShown(g, true);
-                    ImGui::EndCombo();
-                }
-                ImGui::PopID();
-            }
+            if (ImGui::SmallButton("Revert")) LoadNpc(v.entry, false);
         }
-        if (ImGui::CollapsingHeader("Textures") && v.look)
+        if (ImGui::BeginTabBar("##npctabs"))
         {
-            ImGui::TextColored(kQuiet, "Click a name to copy its path.");
-            auto show = [&](const std::string& label, const std::string& path) {
-                ID3D11ShaderResourceView* tex = m_renderer.TextureFor(path, m_mpq);
-                if (tex) ImGui::Image(ImTextureID(intptr_t(tex)), { 40, 40 });
-                else ImGui::Dummy({ 40, 40 });
-                if (tex && ImGui::BeginItemTooltip())
-                {
-                    ImGui::Image(ImTextureID(intptr_t(tex)), { 256, 256 });
-                    ImGui::EndTooltip();
-                }
-                ImGui::SameLine();
-                ImGui::BeginGroup();
-                ImGui::TextColored(kQuiet, "%s", label.c_str());
-                if (ImGui::Selectable((path + "##" + label).c_str())) ImGui::SetClipboardText(path.c_str());
-                ImGui::EndGroup();
-            };
-            static const std::map<uint32_t, const char*> kTypes = { { 1, "Body" }, { 2, "Cape" }, { 6, "Hair" }, { 8, "Fur" },
-                                                                    { 11, "Skin 1" }, { 12, "Skin 2" }, { 13, "Skin 3" } };
-            for (const auto& [type, path] : v.look->look.textures)
-            {
-                const auto name = kTypes.find(type);
-                show(name != kTypes.end() ? std::string(name->second) : "Type " + std::to_string(type), path);
-            }
-            if (v.info)
-                for (const auto& path : v.info->textures) show("Fixed", path);
+            if (ImGui::BeginTabItem("View")) { DrawNpcViewTab(); ImGui::EndTabItem(); }
+            if (ImGui::BeginTabItem("Template")) { DrawNpcTemplateTab(); ImGui::EndTabItem(); }
+            if (ImGui::BeginTabItem("Models & gear")) { DrawNpcGearTab(); ImGui::EndTabItem(); }
+            ImGui::EndTabBar();
         }
     }
     ImGui::EndChild();
     ImGui::End();
+}
+
+
+void App::DrawNpcViewTab()
+{
+    NpcView& v = m_npc;
+    if (ImGui::CollapsingHeader("Preview", ImGuiTreeNodeFlags_DefaultOpen))
+    {
+        ImGui::Checkbox("Auto camera", &v.autoCamera);
+        ImGui::SetItemTooltip("Frame each model as it opens");
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Frame now"))
+        {
+            const bool keep = v.autoCamera;
+            v.autoCamera = true;
+            SetNpcDisplay(v.displayId, v.displayScale);
+            v.autoCamera = keep;
+        }
+        ImGui::ColorEdit3("Background", v.background, ImGuiColorEditFlags_NoInputs);
+        ImGui::TextColored(kQuiet, "Left drag turns, right drag pans, wheel zooms.");
+    }
+    if (ImGui::CollapsingHeader("Models", ImGuiTreeNodeFlags_DefaultOpen))
+    {
+        if (v.models.empty()) ImGui::TextColored(kQuiet, "creature_template_model has no rows.");
+        for (size_t i = 0; i < v.models.size(); ++i)
+        {
+            const auto& m = v.models[i];
+            char text[96];
+            snprintf(text, sizeof text, "Display %u   x%.2f   %.0f%%##m%zu", m.displayId, m.scale, m.probability * 100, i);
+            if (ImGui::RadioButton(text, m.displayId == v.displayId)) SetNpcDisplay(m.displayId, m.scale);
+        }
+    }
+    if (ImGui::CollapsingHeader("Skins", ImGuiTreeNodeFlags_DefaultOpen))
+    {
+        ImGui::TextColored(kQuiet, "Displays drawing the same model (preview only).");
+        if (ImGui::BeginChild("##skins", { 0, std::min(float(v.skins.size()) + 0.5f, 8.0f) * ImGui::GetTextLineHeightWithSpacing() }))
+            for (uint32_t id : v.skins)
+            {
+                bool humanoid = false;
+                std::string text = std::to_string(id);
+                const auto names = m_looks.SkinNames(id, &humanoid);
+                for (const auto& n : names) text += "   " + n;
+                if (humanoid) text += "   (character)";
+                if (ImGui::Selectable((text + "##s" + std::to_string(id)).c_str(), id == v.displayId)) SetNpcDisplay(id, v.displayScale);
+            }
+        ImGui::EndChild();
+    }
+    if (ImGui::CollapsingHeader("Equipment", ImGuiTreeNodeFlags_DefaultOpen))
+    {
+        auto setLabel = [&](int i) {
+            if (i < 0 || size_t(i) >= v.equips.size()) return std::string("None");
+            const auto& e = v.equips[size_t(i)];
+            return "Set " + std::to_string(e.id) + ":  " + std::to_string(e.items[0]) + " / " + std::to_string(e.items[1]) + " / " +
+                   std::to_string(e.items[2]);
+        };
+        if (v.equips.empty()) ImGui::TextColored(kQuiet, "creature_equip_template has no sets.");
+        else
+        {
+            ImGui::SetNextItemWidth(-1);
+            if (ImGui::BeginCombo("##equip", setLabel(v.equip).c_str()))
+            {
+                for (int i = -1; i < int(v.equips.size()); ++i)
+                    if (ImGui::Selectable(setLabel(i).c_str(), i == v.equip)) { v.equip = i; RefreshNpcLook(); }
+                ImGui::EndCombo();
+            }
+            ImGui::SetItemTooltip("Main hand / off hand / ranged item entries (the ranged one is not drawn)");
+        }
+        bool any = false;
+        auto toggle = [&](uint32_t key, const char* name) {
+            bool shown = !v.hidden.count(key);
+            if (ImGui::Checkbox(name, &shown)) { if (shown) v.hidden.erase(key); else v.hidden.insert(key); }
+            any = true;
+        };
+        if (v.look)
+        {
+            for (const auto& item : v.look->items) toggle(item.attachment, (std::string(AttachmentName(item.attachment)) + "##a" + std::to_string(item.attachment)).c_str());
+            if (v.humanoid && v.look->look.textures.count(2)) toggle(kCape, "Cape");
+        }
+        if (!any) ImGui::TextColored(kQuiet, "Nothing carried.");
+    }
+    if (ImGui::CollapsingHeader("Geosets", ImGuiTreeNodeFlags_DefaultOpen) && v.info)
+    {
+        if (ImGui::SmallButton("All")) v.geosets = v.info->geosets;
+        ImGui::SameLine();
+        if (ImGui::SmallButton("None")) v.geosets.clear();
+        ImGui::SameLine();
+        if (ImGui::SmallButton("As spawned") && v.look) v.geosets = v.look->look.geosets.empty() ? v.info->geosets : v.look->look.geosets;
+        // One "Group: variant" dropdown per group with a choice to make (wow.export's customization layout); a
+        // group of one submesh, and the base mesh (id 0), are plain checkboxes.
+        auto shown = [&](uint16_t g) { return std::find(v.geosets.begin(), v.geosets.end(), g) != v.geosets.end(); };
+        auto setShown = [&](uint16_t g, bool on) {
+            if (on && !shown(g)) v.geosets.push_back(g);
+            if (!on) std::erase(v.geosets, g);
+        };
+        std::map<uint32_t, std::vector<uint16_t>> groups;
+        for (uint16_t g : v.info->geosets)
+            if (g) groups[g / 100u].push_back(g);
+        auto name = [&](uint32_t group) { return v.humanoid ? GeosetGroupName(group) : "Group " + std::to_string(group); };
+        const float labelWidth = 110;
+        if (std::count(v.info->geosets.begin(), v.info->geosets.end(), uint16_t(0)))
+        {
+            bool on = shown(0);
+            if (ImGui::Checkbox("Base mesh##g0", &on)) setShown(0, on);
+        }
+        for (const auto& [group, ids] : groups)
+        {
+            ImGui::PushID(int(group));
+            if (ids.size() == 1)
+            {
+                bool on = shown(ids[0]);
+                if (ImGui::Checkbox((name(group) + "  " + std::to_string(ids[0] % 100)).c_str(), &on)) setShown(ids[0], on);
+                ImGui::SetItemTooltip("Geoset %u", ids[0]);
+                ImGui::PopID();
+                continue;
+            }
+            std::vector<uint16_t> on;
+            for (uint16_t g : ids)
+                if (shown(g)) on.push_back(g);
+            const std::string current = on.empty() ? "None" : on.size() == ids.size() ? "All" : on.size() == 1 ? std::to_string(on[0] % 100) : "Mixed";
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted(name(group).c_str());
+            ImGui::SameLine(labelWidth);
+            ImGui::SetNextItemWidth(-1);
+            if (ImGui::BeginCombo("##group", current.c_str()))
+            {
+                auto only = [&](std::optional<uint16_t> keep) { for (uint16_t g : ids) setShown(g, keep && g == *keep); };
+                if (ImGui::Selectable("None", on.empty())) only(std::nullopt);
+                for (uint16_t g : ids)
+                {
+                    if (ImGui::Selectable((std::to_string(g % 100) + "##" + std::to_string(g)).c_str(), on.size() == 1 && on[0] == g)) only(g);
+                    ImGui::SameLine(80);
+                    ImGui::TextColored(kQuiet, "geoset %u", g);
+                }
+                if (ImGui::Selectable("All", on.size() == ids.size())) for (uint16_t g : ids) setShown(g, true);
+                ImGui::EndCombo();
+            }
+            ImGui::PopID();
+        }
+    }
+    if (ImGui::CollapsingHeader("Textures") && v.look)
+    {
+        ImGui::TextColored(kQuiet, "Click a name to copy its path.");
+        auto show = [&](const std::string& label, const std::string& path) {
+            ID3D11ShaderResourceView* tex = m_renderer.TextureFor(path, m_mpq);
+            if (tex) ImGui::Image(ImTextureID(intptr_t(tex)), { 40, 40 });
+            else ImGui::Dummy({ 40, 40 });
+            if (tex && ImGui::BeginItemTooltip())
+            {
+                ImGui::Image(ImTextureID(intptr_t(tex)), { 256, 256 });
+                ImGui::EndTooltip();
+            }
+            ImGui::SameLine();
+            ImGui::BeginGroup();
+            ImGui::TextColored(kQuiet, "%s", label.c_str());
+            if (ImGui::Selectable((path + "##" + label).c_str())) ImGui::SetClipboardText(path.c_str());
+            ImGui::EndGroup();
+        };
+        static const std::map<uint32_t, const char*> kTypes = { { 1, "Body" }, { 2, "Cape" }, { 6, "Hair" }, { 8, "Fur" },
+                                                                { 11, "Skin 1" }, { 12, "Skin 2" }, { 13, "Skin 3" } };
+        for (const auto& [type, path] : v.look->look.textures)
+        {
+            const auto name = kTypes.find(type);
+            show(name != kTypes.end() ? std::string(name->second) : "Type " + std::to_string(type), path);
+        }
+        if (v.info)
+            for (const auto& path : v.info->textures) show("Fixed", path);
+    }
+}
+
+// ---------------------------------------------------------------------------------------------- editing
+
+void App::ApplyNpc()
+{
+    NpcView& v = m_npc;
+    if (!v.entry || !v.dirty) return;
+    const std::string label = "Edit NPC " + std::to_string(v.entry) + " " + v.name;
+    // Idx follows the list order (the order AzerothCore reads the models in).
+    for (size_t i = 0; i < v.editModels.size(); ++i) v.editModels[i]["Idx"] = std::to_string(i);
+    std::vector<Change> parts;
+    auto add = [&](TableRowsAdapter& table, const std::vector<nlohmann::json>& after) {
+        const auto before = table.Rows(v.entry);
+        if (before == after) return false;
+        Change c = table.MakeChange(v.entry, before, after, label);
+        table.Apply(c);
+        if (!table.LastError().empty()) Log("%s", table.LastError().c_str());
+        parts.push_back(std::move(c));
+        return true;
+    };
+    const bool templateChanged = v.editTemplate.is_object() && add(m_npcTemplates, { v.editTemplate });
+    const bool modelsChanged = add(m_npcModels, v.editModels);
+    const bool equipChanged = add(m_npcEquips, v.editEquips);
+    v.dirty = false;
+    if (parts.empty()) return;
+    m_store.Commit(std::move(parts), label);
+    m_unitTemplatesRead[0] = false;   // the catalog shows names and models
+    v.listedFor = "\x01";
+    m_creatures.Refresh();            // spawns in the world take the new look
+    if (templateChanged && RunServerCommand(".reload creature_template " + std::to_string(v.entry))) Log("%s: creature_template reloaded on the server.", label.c_str());
+    if (modelsChanged || equipChanged) Log("%s: models and equipment reach a running worldserver after a restart.", label.c_str());
+    LoadNpc(v.entry, false);
+}
+
+void App::DuplicateNpc()
+{
+    NpcView& v = m_npc;
+    if (!m_project || !v.editTemplate.is_object() || v.dirty) return;
+    const Project::IdRange r = m_project->Range("creature_template.entry");
+    const auto id = m_npcTemplates.NextKey(r.first, r.last);
+    if (!id) { Log("No free creature_template entry in the project's range %u-%u (File > Project settings).", r.first, r.last); return; }
+    const std::string entry = std::to_string(*id), label = "New NPC " + entry + " (copy of " + std::to_string(v.entry) + ")";
+    nlohmann::json t = v.editTemplate;
+    t["entry"] = entry;
+    t["name"] = v.name + " (copy)";
+    std::vector<nlohmann::json> models = v.editModels, equips = v.editEquips;
+    for (auto& m : models) m["CreatureID"] = entry;
+    for (auto& e : equips) e["CreatureID"] = entry;
+    std::vector<Change> parts;
+    const std::pair<TableRowsAdapter*, std::vector<nlohmann::json>> tables[] = { { &m_npcTemplates, { t } }, { &m_npcModels, models }, { &m_npcEquips, equips } };
+    for (const auto& [table, rows] : tables)
+    {
+        if (rows.empty()) continue;
+        Change c = table->MakeChange(*id, {}, rows, label);
+        table->Apply(c);
+        if (!table->LastError().empty()) Log("%s", table->LastError().c_str());
+        parts.push_back(std::move(c));
+    }
+    m_store.Commit(std::move(parts), label);
+    m_unitTemplatesRead[0] = false;
+    v.listedFor = "\x01";
+    Log("%s. Place it from the Catalog (Creatures); a running worldserver knows it after a restart.", label.c_str());
+    OpenNpc(*id);
+}
+
+void App::DeleteNpc()
+{
+    NpcView& v = m_npc;
+    if (!m_project || !m_project->Owns("creature_template.entry", v.entry)) return;
+    const std::string label = "Delete NPC " + std::to_string(v.entry) + " " + v.name;
+    std::vector<Change> parts;
+    for (TableRowsAdapter* table : { &m_npcTemplates, &m_npcModels, &m_npcEquips })
+    {
+        const auto before = table->Rows(v.entry);
+        if (before.empty()) continue;
+        Change c = table->MakeChange(v.entry, before, {}, label);
+        table->Apply(c);
+        if (!table->LastError().empty()) Log("%s", table->LastError().c_str());
+        parts.push_back(std::move(c));
+    }
+    if (parts.empty()) return;
+    m_store.Commit(std::move(parts), label);
+    m_unitTemplatesRead[0] = false;
+    v.listedFor = "\x01";
+    Log("%s (undo brings it back; its spawns stay in the creature table).", label.c_str());
+    LoadNpc(v.entry, false);
+}
+
+void App::DrawNpcTemplateTab()
+{
+    NpcView& v = m_npc;
+    if (!v.entry) { ImGui::TextColored(kQuiet, "No creature open."); return; }
+    if (!v.editTemplate.is_object()) { ImGui::TextColored(kQuiet, "Entry %u has no creature_template row.", v.entry); return; }
+    const bool owned = m_project && m_project->Owns("creature_template.entry", v.entry);
+    ImGui::BeginDisabled(v.dirty || !m_project);
+    if (ImGui::Button("Duplicate as new NPC")) DuplicateNpc();
+    ImGui::EndDisabled();
+    ImGui::SetItemTooltip(v.dirty ? "Apply or revert the edits first"
+                                  : "Copies the template, its models and equipment sets to the next entry of the project's range (File > Project settings)");
+    ImGui::SameLine();
+    if (owned)
+    {
+        if (ImGui::Button("Delete")) ImGui::OpenPopup("##deletenpc");
+        if (ImGui::BeginPopup("##deletenpc"))
+        {
+            ImGui::Text("Delete %s (%u), its models and equipment?", v.name.c_str(), v.entry);
+            ImGui::TextColored(kQuiet, "Undo brings it back. Its spawns are not deleted.");
+            if (ImGui::Button("Delete")) { DeleteNpc(); ImGui::CloseCurrentPopup(); }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+        }
+    }
+    else
+    {
+        ImGui::TextColored(kQuiet, "stock entry");
+        ImGui::SetItemTooltip("Not in the project's entry range: edits are kept as project changes, exported as SQL with a revert file");
+    }
+
+    nlohmann::json& t = v.editTemplate;
+    auto get = [&](const char* col) { return Col(t, col); };
+    auto set = [&](const char* col, const std::string& value) {
+        if (get(col) == value) return;
+        t[col] = value;
+        v.dirty = true;
+        if (std::string_view(col) == "name") v.name = value;
+    };
+    auto textField = [&](const char* label, const char* col, const char* hint = "") {
+        std::string s = get(col);
+        if (ImGui::InputTextWithHint(label, hint, &s)) set(col, s);
+    };
+    auto intField = [&](const char* label, const char* col, long long lo, long long hi) {
+        int x = int(std::clamp<long long>(std::strtoll(get(col).c_str(), nullptr, 10), INT32_MIN, INT32_MAX));
+        if (ImGui::InputInt(label, &x, 0)) set(col, std::to_string(std::clamp<long long>(x, lo, hi)));
+    };
+    auto floatField = [&](const char* label, const char* col, float lo, float hi) {
+        float x = F(get(col));
+        if (ImGui::InputFloat(label, &x, 0, 0, "%.3g"))
+        {
+            char text[32];
+            snprintf(text, sizeof text, "%g", std::clamp(x, lo, hi));
+            set(col, text);
+        }
+    };
+    auto combo = [&](const char* label, const char* col, const std::vector<std::pair<int, std::string>>& options) {
+        const int x = std::atoi(get(col).c_str());
+        std::string current = std::to_string(x);
+        for (const auto& [value, name] : options)
+            if (value == x) current = name;
+        if (ImGui::BeginCombo(label, current.c_str()))
+        {
+            for (const auto& [value, name] : options)
+                if (ImGui::Selectable(name.c_str(), value == x)) set(col, std::to_string(value));
+            ImGui::EndCombo();
+        }
+    };
+    auto names = [&](const char* label, const char* col, std::initializer_list<const char*> options) {
+        const std::string s = get(col);
+        if (ImGui::BeginCombo(label, s.empty() ? "(none)" : s.c_str()))
+        {
+            if (ImGui::Selectable("(none)", s.empty())) set(col, "");
+            for (const char* o : options)
+                if (ImGui::Selectable(o, s == o)) set(col, o);
+            ImGui::EndCombo();
+        }
+    };
+    auto flags = [&](const char* label, const char* col, std::initializer_list<std::pair<uint32_t, const char*>> bits) {
+        const uint32_t x = uint32_t(std::strtoul(get(col).c_str(), nullptr, 10));
+        std::string summary;
+        for (const auto& [bit, name] : bits)
+            if (x & bit) summary += (summary.empty() ? "" : ", ") + std::string(name);
+        if (ImGui::BeginCombo(label, summary.empty() ? "None" : summary.c_str(), ImGuiComboFlags_HeightLarge))
+        {
+            for (const auto& [bit, name] : bits)
+                if (bool on = (x & bit) != 0; ImGui::Checkbox(name, &on)) set(col, std::to_string(on ? x | bit : x & ~bit));
+            ImGui::EndCombo();
+        }
+        ImGui::SetItemTooltip("%s = %u", col, x);
+    };
+
+    ImGui::PushItemWidth(-120);
+    ImGui::SeparatorText("Identity");
+    textField("Name", "name");
+    textField("Subname", "subname", "e.g. Weapon Merchant");
+    names("Cursor", "IconName", { "Directions", "Gunner", "vehicleCursor", "Driver", "Attack", "Buy", "Speak", "Pickup", "Interact", "Trainer", "Taxi",
+                                  "Repair", "LootAll", "Quest", "PickLock" });
+    ImGui::SeparatorText("Level and kind");
+    intField("Min level", "minlevel", 1, 255);
+    intField("Max level", "maxlevel", 1, 255);
+    combo("Expansion", "exp", { { 0, "Classic" }, { 1, "The Burning Crusade" }, { 2, "Wrath of the Lich King" } });
+    combo("Rank", "rank", { { 0, "Normal" }, { 1, "Elite" }, { 2, "Rare elite" }, { 3, "Boss" }, { 4, "Rare" } });
+    combo("Class", "unit_class", { { 1, "Warrior" }, { 2, "Paladin" }, { 4, "Rogue" }, { 8, "Mage" } });
+    {
+        std::vector<std::pair<int, std::string>> types;
+        for (int i = 0; CreatureTypeName(uint32_t(i)); ++i) types.push_back({ i, CreatureTypeName(uint32_t(i)) });
+        combo("Type", "type", types);
+    }
+    intField("Faction", "faction", 0, 65535);
+    if (const std::string faction = m_looks.FactionName(U(get("faction"))); !faction.empty())
+    {
+        ImGui::SameLine();
+        ImGui::TextColored(kQuiet, "%s", faction.c_str());
+    }
+    ImGui::SeparatorText("Services");
+    flags("NPC flags", "npcflag", { { 0x1, "Gossip" }, { 0x2, "Quest giver" }, { 0x10, "Trainer" }, { 0x20, "Class trainer" }, { 0x40, "Profession trainer" },
+                                    { 0x80, "Vendor" }, { 0x100, "Ammo vendor" }, { 0x200, "Food vendor" }, { 0x400, "Poison vendor" },
+                                    { 0x800, "Reagent vendor" }, { 0x1000, "Repairs" }, { 0x2000, "Flight master" }, { 0x4000, "Spirit healer" },
+                                    { 0x8000, "Spirit guide" }, { 0x10000, "Innkeeper" }, { 0x20000, "Banker" }, { 0x40000, "Petitioner" },
+                                    { 0x80000, "Tabard designer" }, { 0x100000, "Battlemaster" }, { 0x200000, "Auctioneer" }, { 0x400000, "Stable master" },
+                                    { 0x800000, "Guild banker" }, { 0x1000000, "Spell click" }, { 0x4000000, "Mailbox" } });
+    intField("Gossip menu", "gossip_menu_id", 0, INT32_MAX);
+    ImGui::SeparatorText("Movement");
+    combo("Movement", "MovementType", { { 0, "Stay in place" }, { 1, "Wander" }, { 2, "Waypoint path" } });
+    floatField("Walk speed", "speed_walk", 0, 50);
+    floatField("Run speed", "speed_run", 0, 50);
+    floatField("Aggro range", "detection_range", 0, 200);
+    ImGui::SeparatorText("Combat");
+    floatField("Health x", "HealthModifier", 0, 100000);
+    floatField("Mana x", "ManaModifier", 0, 100000);
+    floatField("Armor x", "ArmorModifier", 0, 100000);
+    floatField("Damage x", "DamageModifier", 0, 100000);
+    floatField("Experience x", "ExperienceModifier", 0, 100000);
+    intField("Attack time ms", "BaseAttackTime", 0, 100000);
+    if (bool regen = get("RegenHealth") != "0"; ImGui::Checkbox("Regenerates health", &regen)) set("RegenHealth", regen ? "1" : "0");
+    ImGui::SeparatorText("Loot and money");
+    intField("Loot id", "lootid", 0, INT32_MAX);
+    intField("Min copper", "mingold", 0, INT32_MAX);
+    intField("Max copper", "maxgold", 0, INT32_MAX);
+    ImGui::SeparatorText("Scripts");
+    names("AI", "AIName", { "SmartAI", "NullCreatureAI", "TriggerAI", "AggressorAI", "ReactorAI", "PassiveAI", "CritterAI", "GuardAI", "PetAI", "TotemAI",
+                            "CombatAI", "ArcherAI", "TurretAI", "VehicleAI" });
+    textField("Script", "ScriptName", "C++ ScriptName");
+    ImGui::PopItemWidth();
+
+    if (get("name").empty()) ImGui::TextColored(kWarn, "The name is empty.");
+    if (U(get("minlevel")) > U(get("maxlevel"))) ImGui::TextColored(kWarn, "Min level is above max level.");
+
+    if (ImGui::CollapsingHeader("All columns"))
+    {
+        ImGui::SetNextItemWidth(-1);
+        ImGui::InputTextWithHint("##colfilter", "Filter columns", &v.columnFilter);
+        std::string filter = v.columnFilter;
+        std::transform(filter.begin(), filter.end(), filter.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+        if (ImGui::BeginTable("##columns", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
+        {
+            for (auto& [col, value] : t.items())
+            {
+                std::string lower = col;
+                std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+                if (!filter.empty() && lower.find(filter) == std::string::npos) continue;
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextUnformatted(col.c_str());
+                ImGui::TableNextColumn();
+                ImGui::SetNextItemWidth(-1);
+                std::string s = value.is_string() ? value.get<std::string>() : std::string();
+                ImGui::BeginDisabled(col == "entry");
+                if (ImGui::InputText(("##" + col).c_str(), &s)) set(col.c_str(), s);
+                ImGui::EndDisabled();
+            }
+            ImGui::EndTable();
+        }
+    }
+}
+
+void App::DrawNpcGearTab()
+{
+    NpcView& v = m_npc;
+    if (!v.entry) { ImGui::TextColored(kQuiet, "No creature open."); return; }
+    bool changed = false;
+    const std::string entry = std::to_string(v.entry);
+
+    ImGui::SeparatorText("Models");
+    ImGui::TextColored(kQuiet, "Each spawn gets one, picked by chance.");
+    std::optional<size_t> remove;
+    if (!v.editModels.empty() && ImGui::BeginTable("##models", 5, ImGuiTableFlags_SizingStretchProp))
+    {
+        ImGui::TableSetupColumn("Show", ImGuiTableColumnFlags_WidthFixed);
+        ImGui::TableSetupColumn("Display");
+        ImGui::TableSetupColumn("Scale");
+        ImGui::TableSetupColumn("Chance");
+        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed);
+        ImGui::TableHeadersRow();
+        for (size_t i = 0; i < v.editModels.size(); ++i)
+        {
+            nlohmann::json& m = v.editModels[i];
+            ImGui::PushID(int(i));
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            const uint32_t display = U(Col(m, "CreatureDisplayID"));
+            if (ImGui::RadioButton("##show", display == v.displayId)) SetNpcDisplay(display, F(Col(m, "DisplayScale")));
+            ImGui::TableNextColumn();
+            ImGui::SetNextItemWidth(-1);
+            if (int x = int(display); ImGui::InputInt("##display", &x, 0)) { m["CreatureDisplayID"] = std::to_string(std::max(x, 0)); changed = true; }
+            if (m_looks.SameModel(display).empty()) ImGui::SetItemTooltip("Display %u is not in the client's CreatureDisplayInfo.dbc", display);
+            ImGui::TableNextColumn();
+            ImGui::SetNextItemWidth(-1);
+            if (float x = F(Col(m, "DisplayScale")); ImGui::InputFloat("##scale", &x, 0, 0, "%.2f")) { m["DisplayScale"] = std::to_string(std::clamp(x, 0.0f, 100.0f)); changed = true; }
+            ImGui::TableNextColumn();
+            ImGui::SetNextItemWidth(-1);
+            if (float x = F(Col(m, "Probability")) * 100; ImGui::InputFloat("##chance", &x, 0, 0, "%.0f%%"))
+            {
+                m["Probability"] = std::to_string(std::clamp(x, 0.0f, 100.0f) / 100);
+                changed = true;
+            }
+            ImGui::TableNextColumn();
+            if (ImGui::SmallButton("x")) remove = i;
+            ImGui::SetItemTooltip("Remove this model");
+            ImGui::PopID();
+        }
+        ImGui::EndTable();
+    }
+    if (remove) { v.editModels.erase(v.editModels.begin() + std::ptrdiff_t(*remove)); changed = true; }
+    if (ImGui::Button("Add the shown display"))
+    {
+        nlohmann::json row = { { "CreatureID", entry }, { "CreatureDisplayID", std::to_string(v.displayId) }, { "DisplayScale", "1" },
+                               { "Probability", "1" }, { "VerifiedBuild", "0" } };
+        v.editModels.push_back(std::move(row));
+        changed = true;
+    }
+    ImGui::SetItemTooltip("Adds display %u (pick another under View > Skins first to add that one)", v.displayId);
+    float chances = 0;
+    for (const auto& m : v.editModels) chances += F(Col(m, "Probability"));
+    if (v.editModels.empty()) ImGui::TextColored(kWarn, "No model: the creature cannot spawn.");
+    else if (chances <= 0) ImGui::TextColored(kWarn, "The chances add up to 0.");
+
+    ImGui::SeparatorText("Equipment sets");
+    ImGui::TextColored(kQuiet, "A spawn's equipment_id picks one: 1 the first, -1 random, 0 none.");
+    static const char* const kSlots[3] = { "Main hand", "Off hand", "Ranged" };
+    bool openPicker = false;
+    remove.reset();
+    for (size_t i = 0; i < v.editEquips.size(); ++i)
+    {
+        nlohmann::json& e = v.editEquips[i];
+        ImGui::PushID(int(i) + 1000);
+        ImGui::AlignTextToFramePadding();
+        ImGui::Text("Set");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(70);
+        if (int id = int(U(Col(e, "ID"))); ImGui::InputInt("##id", &id, 1)) { e["ID"] = std::to_string(std::clamp(id, 1, 255)); changed = true; }
+        ImGui::SameLine();
+        if (ImGui::RadioButton("Preview", v.equip == int(i))) { v.equip = int(i); RefreshNpcLook(); }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Remove set")) remove = i;
+        for (int k = 0; k < 3; ++k)
+        {
+            ImGui::PushID(k);
+            const std::string col = "ItemID" + std::to_string(k + 1);
+            const uint32_t item = U(Col(e, col.c_str()));
+            const NpcView::Item& info = NpcItem(item);
+            const std::string icon = m_looks.ItemIcon(info.display);
+            if (ID3D11ShaderResourceView* tex = icon.empty() ? nullptr : m_renderer.TextureFor(icon, m_mpq))
+                ImGui::Image(ImTextureID(intptr_t(tex)), { 22, 22 });
+            else ImGui::Dummy({ 22, 22 });
+            ImGui::SameLine();
+            const std::string text = !item ? std::string("(empty)") : info.found ? info.name : "#" + std::to_string(item) + " (not in item_template)";
+            if (ImGui::Button((text + "##pick").c_str(), { -80, 0 }))
+            {
+                v.pickSet = int(i);
+                v.pickSlot = k;
+                openPicker = true;
+            }
+            ImGui::SetItemTooltip("%s: item %u. Click to choose another.", kSlots[k], item);
+            ImGui::SameLine();
+            ImGui::TextColored(kQuiet, "%s", kSlots[k]);
+            ImGui::PopID();
+        }
+        ImGui::PopID();
+        ImGui::Spacing();
+    }
+    if (remove) { v.editEquips.erase(v.editEquips.begin() + std::ptrdiff_t(*remove)); changed = true; }
+    if (ImGui::Button("Add set"))
+    {
+        uint32_t id = 0;
+        for (const auto& e : v.editEquips) id = std::max(id, U(Col(e, "ID")));
+        v.editEquips.push_back({ { "CreatureID", entry }, { "ID", std::to_string(std::min(id + 1, 255u)) }, { "ItemID1", "0" }, { "ItemID2", "0" },
+                                 { "ItemID3", "0" }, { "VerifiedBuild", "0" } });
+        changed = true;
+    }
+    if (openPicker) ImGui::OpenPopup("##itempick");
+    DrawItemPicker();
+    if (changed)
+    {
+        v.dirty = true;
+        RebuildNpcLists();
+    }
+}
+
+void App::DrawItemPicker()
+{
+    NpcView& v = m_npc;
+    ImGui::SetNextWindowSize({ 440, 420 });
+    if (!ImGui::BeginPopup("##itempick")) return;
+    bool search = ImGui::IsWindowAppearing();
+    if (search) ImGui::SetKeyboardFocusHere();
+    ImGui::SetNextItemWidth(-1);
+    if (ImGui::InputTextWithHint("##query", "Weapons, shields, held items: name or entry", &v.pickQuery)) search = true;
+    if (search)
+    {
+        v.pickHits.clear();
+        // What creature_equip_template accepts: weapons, shields, held-in-off-hand items, ranged weapons.
+        std::string where = "InventoryType IN (13, 14, 15, 17, 21, 22, 23, 25, 26)";
+        if (!v.pickQuery.empty())
+        {
+            const bool number = std::all_of(v.pickQuery.begin(), v.pickQuery.end(), [](unsigned char c) { return std::isdigit(c); });
+            where += " AND (name LIKE " + m_db.Quote("%" + v.pickQuery + "%") + (number ? " OR entry = " + v.pickQuery : "") + ")";
+        }
+        std::string error;
+        if (const auto rows = m_db.Query("SELECT entry, name, displayid, InventoryType FROM item_template WHERE " + where + " ORDER BY name LIMIT 200", error))
+            for (const auto& r : *rows)
+            {
+                const NpcView::Item item{ r[1], U(r[2]), U(r[3]), true };
+                v.items[U(r[0])] = item;
+                v.pickHits.push_back({ U(r[0]), item });
+            }
+        if (!error.empty()) Log("Item search: %s", error.c_str());
+    }
+    std::optional<uint32_t> chosen;
+    if (ImGui::BeginChild("##hits"))
+    {
+        if (ImGui::Selectable("(empty slot)")) chosen = 0;
+        for (const auto& [entry, item] : v.pickHits)
+        {
+            ImGui::PushID(int(entry));
+            const std::string icon = m_looks.ItemIcon(item.display);
+            if (ID3D11ShaderResourceView* tex = icon.empty() ? nullptr : m_renderer.TextureFor(icon, m_mpq)) ImGui::Image(ImTextureID(intptr_t(tex)), { 20, 20 });
+            else ImGui::Dummy({ 20, 20 });
+            ImGui::SameLine();
+            if (ImGui::Selectable(item.name.c_str())) chosen = entry;
+            ImGui::SameLine(360);
+            ImGui::TextColored(kQuiet, "%u", entry);
+            ImGui::PopID();
+        }
+        if (v.pickHits.size() == 200) ImGui::TextColored(kQuiet, "First 200 shown: type more of the name.");
+    }
+    ImGui::EndChild();
+    if (chosen && v.pickSet >= 0 && size_t(v.pickSet) < v.editEquips.size())
+    {
+        v.editEquips[size_t(v.pickSet)]["ItemID" + std::to_string(v.pickSlot + 1)] = std::to_string(*chosen);
+        v.dirty = true;
+        RebuildNpcLists();
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
 }

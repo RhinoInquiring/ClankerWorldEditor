@@ -2992,6 +2992,79 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdLine, int)
         }
         return bad ? 1 : 0;
     }
+    if (cmdLine && wcsstr(cmdLine, L"--npc-check") && __argc >= 3)
+    {
+        // `--npc-check <AC server dir> [entry]`: the NPC editor's tables against the real world database, cleaning up
+        // after itself: copy a template with its models and equipment to a new entry (one batch), edit it, add an
+        // equipment set, undo each step and confirm the database is as it was and the entry is never handed out again.
+        std::string password, note, error;
+        const auto profile = ServerProfile::FromWorldserverConf(std::filesystem::path(__wargv[2]), password, note);
+        if (!profile) { printf("%s\n", note.c_str()); return 1; }
+        Db db;
+        if (!db.Connect(profile->dbHost, profile->dbPort, profile->dbUser, password, profile->worldDb, error)) { printf("db: %s\n", error.c_str()); return 1; }
+        int problems = 0;
+        auto check = [&](bool ok, const char* what) { printf("%s %s\n", ok ? "ok  " : "FAIL", what); problems += !ok; };
+        ChangeStore store;
+        TableRowsAdapter templates(store, "creature_template", "entry"), models(store, "creature_template_model", "CreatureID", "Idx"),
+            equips(store, "creature_equip_template", "CreatureID", "ID");
+        TableRowsAdapter* tables[] = { &templates, &models, &equips };
+        for (TableRowsAdapter* t : tables) { store.Register(*t); t->SetDb(&db); }
+        const uint32_t source = __argc >= 4 ? uint32_t(_wtoi(__wargv[3])) : 823;   // Deputy Willem: a model and a weapon set
+        auto count = [&](const char* table, const char* key, uint32_t id) {
+            const auto r = db.Query(std::string("SELECT COUNT(*) FROM ") + table + " WHERE `" + key + "` = " + std::to_string(id), error);
+            return r && !r->empty() ? std::stoi((*r)[0][0]) : -1;
+        };
+        const auto src = templates.Rows(source);
+        if (src.empty()) { printf("no creature_template %u\n", source); return 1; }
+        const auto id = templates.NextKey(9000000, 9099999);
+        if (!id) { printf("range 9000000-9099999 is full\n"); return 1; }
+        printf("copying %u (%s) to %u\n", source, src[0]["name"].get<std::string>().c_str(), *id);
+        const std::string entry = std::to_string(*id);
+        auto retarget = [&](std::vector<nlohmann::json> rows, const char* key) { for (auto& r : rows) r[key] = entry; return rows; };
+        std::vector<Change> parts;
+        const std::pair<TableRowsAdapter*, std::vector<nlohmann::json>> copies[] = {
+            { &templates, retarget(src, "entry") }, { &models, retarget(models.Rows(source), "CreatureID") }, { &equips, retarget(equips.Rows(source), "CreatureID") } };
+        for (const auto& [t, rows] : copies)
+            if (!rows.empty())
+            {
+                Change c = t->MakeChange(*id, {}, rows, "copy");
+                t->Apply(c);
+                parts.push_back(std::move(c));
+            }
+        store.Commit(std::move(parts), "copy");
+        check(count("creature_template", "entry", *id) == 1, "copy: template row written");
+        check(count("creature_template_model", "CreatureID", *id) == count("creature_template_model", "CreatureID", source), "copy: every model row written");
+        check(count("creature_equip_template", "CreatureID", *id) == count("creature_equip_template", "CreatureID", source), "copy: every equipment set written");
+        for (TableRowsAdapter* t : tables) check(t->LastError().empty(), (t->Table() + ": no write error " + t->LastError()).c_str());
+
+        // Edit the name and add an equipment set in one batch, like Apply.
+        auto edited = templates.Rows(*id);
+        edited[0]["name"] = "npc-check edit";
+        auto sets = equips.Rows(*id);
+        sets.push_back({ { "CreatureID", entry }, { "ID", "9" }, { "ItemID1", "1899" }, { "ItemID2", "0" }, { "ItemID3", "0" }, { "VerifiedBuild", "0" } });
+        std::vector<Change> edit;
+        for (auto [t, after] : { std::pair{ &templates, edited }, std::pair{ &equips, sets } })
+        {
+            Change c = t->MakeChange(*id, t->Rows(*id), after, "edit");
+            t->Apply(c);
+            edit.push_back(std::move(c));
+        }
+        store.Commit(std::move(edit), "edit");
+        const auto name = db.Query("SELECT name FROM creature_template WHERE entry = " + entry, error);
+        check(name && !name->empty() && (*name)[0][0] == "npc-check edit", "edit: name written");
+        check(count("creature_equip_template", "CreatureID", *id) == count("creature_equip_template", "CreatureID", source) + 1, "edit: set added");
+        store.Undo();
+        const auto back = db.Query("SELECT name FROM creature_template WHERE entry = " + entry, error);
+        check(back && !back->empty() && (*back)[0][0] == src[0]["name"].get<std::string>(), "undo edit: name restored");
+        check(count("creature_equip_template", "CreatureID", *id) == count("creature_equip_template", "CreatureID", source), "undo edit: set removed");
+        store.Undo();
+        check(count("creature_template", "entry", *id) == 0 && count("creature_template_model", "CreatureID", *id) == 0 &&
+                  count("creature_equip_template", "CreatureID", *id) == 0, "undo copy: every row gone");
+        const auto next = templates.NextKey(9000000, 9099999);
+        check(next && *next > *id, "the undone entry is not handed out again (redo can bring it back)");
+        printf("%s\n", problems ? "FAILED" : "all passed");
+        return problems ? 1 : 0;
+    }
     if (cmdLine && wcsstr(cmdLine, L"--spawn-check") && __argc >= 3)
     {
         // `--spawn-check <AC server dir>`: the creature and gameobject adapters against the real world database, cleaning up after

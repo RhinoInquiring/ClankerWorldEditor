@@ -2,6 +2,7 @@
 
 #include "Server.hpp"
 
+#include <algorithm>
 #include <fstream>
 
 namespace fs = std::filesystem;
@@ -117,4 +118,25 @@ size_t TableRowsAdapter::Count() const
     size_t n = 0;
     for (const auto& [key, rows] : now) n += rows != original[key];
     return n;
+}
+
+std::optional<uint32_t> TableRowsAdapter::NextKey(uint32_t first, uint32_t last) const
+{
+    // Above every key used in the range: the project's (redo-able ones too) and the database's. Never reused.
+    uint64_t next = first;
+    auto use = [&](uint32_t key) { if (key >= first && key <= last) next = std::max<uint64_t>(next, uint64_t(key) + 1); };
+    for (const auto* list : { &m_store.Done(), &m_store.Undone() })
+        ChangeStore::ForEach(*list, [&](const std::string& domain, const nlohmann::json& data) {
+            if (domain == m_domain) use(data.at("key").get<uint32_t>());
+        });
+    if (Connected())
+    {
+        std::string error;
+        if (auto rows = m_db->Query("SELECT MAX(`" + m_key + "`) FROM " + m_table + " WHERE `" + m_key + "` BETWEEN " + std::to_string(first) + " AND " +
+                                    std::to_string(last), error);
+            rows && !rows->empty() && !(*rows)[0][0].empty())
+            use(uint32_t(std::stoul((*rows)[0][0])));
+    }
+    if (!first || next > last) return std::nullopt;
+    return uint32_t(next);
 }

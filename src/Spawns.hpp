@@ -49,6 +49,8 @@ void EditorToServer(const DirectX::XMFLOAT3& p, float& x, float& y, float& z);
 
 /// gameobject_template.type as its AzerothCore name ("CHEST", "MAILBOX", ...).
 const char* GameObjectTypeName(uint32_t type);
+/// creature_template.type as a name ("Beast", "Humanoid", ...); null when unknown.
+const char* CreatureTypeName(uint32_t type);
 
 /// Creature or gameobject spawns as project changes, written straight to the server's world database.
 ///

@@ -4,6 +4,7 @@
 
 #include <filesystem>
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -42,6 +43,9 @@ public:
     bool ExportSql(const std::filesystem::path& outDir, std::string& error) const;
     /// Keys the project changed.
     size_t Count() const;
+    /// The next key of the range [first, last]: above every key used there by the project (redo-able ones too) or the
+    /// database; null when the range is full or unset. Keys are never reused.
+    std::optional<uint32_t> NextKey(uint32_t first, uint32_t last) const;
     const std::string& LastError() const { return m_lastError; }
 
 private:

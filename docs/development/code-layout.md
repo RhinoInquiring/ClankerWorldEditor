@@ -26,7 +26,7 @@ format code never touches the GPU; the `App*` files are the UI.
 | `src/Blueprint.*` | Blueprints on disk |
 | `src/Areas.*` | DBC row adapters: AreaTable, WMOAreaTable, WorldMapArea, WorldMapOverlay |
 | `src/Spawns.*` | Creature and gameobject spawns in the world database, SQL export |
-| `src/Tables.*` | Rows-by-key adapter: waypoint_data, creature_addon, areatrigger, areatrigger_teleport, instance_template, points_of_interest, game_tele |
+| `src/Tables.*` | Rows-by-key adapter: waypoint_data, creature_addon, areatrigger, areatrigger_teleport, instance_template, points_of_interest, game_tele, creature_template, creature_template_model, creature_equip_template |
 | `src/Paths.*` | A creature's waypoint path as one change |
 | `src/Triggers.*` | Area triggers (shape, inside test, ray hit), teleports, AreaTrigger.dbc and Map.dbc corpse entrance adapters |
 | `src/Pois.*` | Points of interest (landmark, gossip point, teleport) and their rows; AreaPOI.dbc adapter |

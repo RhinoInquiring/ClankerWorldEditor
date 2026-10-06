@@ -130,6 +130,14 @@ void EditorToServer(const DirectX::XMFLOAT3& p, float& x, float& y, float& z)
     z = p.y;
 }
 
+const char* CreatureTypeName(uint32_t type)
+{
+    // CreatureType in AzerothCore SharedDefines.h.
+    static const char* const kNames[] = { "None", "Beast", "Dragonkin", "Demon", "Elemental", "Giant", "Undead", "Humanoid",
+                                          "Critter", "Mechanical", "Not specified", "Totem", "Non-combat pet", "Gas cloud" };
+    return type < std::size(kNames) ? kNames[type] : nullptr;
+}
+
 const char* GameObjectTypeName(uint32_t type)
 {
     // GameobjectTypes in AzerothCore SharedDefines.h.

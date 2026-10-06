@@ -80,7 +80,7 @@ every source for `World\Maps\` paths. Export writes the tiles, the WDT, the WDL,
 `{rows: [{guid, before, after}]}`, each side the whole row as column to text (null = no row). Applied to the world
 database as they happen when a server is linked; exported as SQL with revert scripts.
 
-### world.waypoint_data, world.creature_addon, world.areatrigger, world.areatrigger_teleport, world.instance_template, world.points_of_interest, world.game_tele
+### world.waypoint_data, world.creature_addon, world.areatrigger, world.areatrigger_teleport, world.instance_template, world.points_of_interest, world.game_tele, world.creature_template, world.creature_template_model, world.creature_equip_template
 
 Rows of one key (path id, guid, trigger id, map) before and after, written as delete-then-insert. A path save is a
 batch: points, addon and the creature's movement type in one undo step. A trigger edit is a batch too: its
