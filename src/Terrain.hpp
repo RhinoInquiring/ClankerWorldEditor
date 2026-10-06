@@ -87,6 +87,9 @@ struct TerrainClipboard
     // Objects standing on the copied chunks: x and z relative to the first chunk's corner, y absolute.
     std::vector<DoodadPlacement> doodads;
     std::vector<WmoPlacement> wmos;
+    // Landmarks of another version (AreaPOI): [{"pos": [x, y, z] like the objects, "ground": no height of its own,
+    // "row": the point's AreaPOI fields}]. Filled by the caller; the terrain only moves them with the copy.
+    nlohmann::json pois = nlohmann::json::array();
     int originX = 0, originZ = 0;   // grid cell the first chunk was copied from (for paste in place)
     bool Empty() const { return chunks.empty(); }
     int Width() const { int w = 0; for (const auto& e : chunks) w = std::max(w, e.dx + 1); return w; }
@@ -126,6 +129,7 @@ struct PastePlan
     std::vector<ChunkRef> footprint;
     std::vector<DoodadPlacement> doodads;   // objects to add, world positions (unique ids assigned on apply)
     std::vector<WmoPlacement> wmos;
+    nlohmann::json pois = nlohmann::json::array();   // landmarks to add (TerrainClipboard::pois), world positions
     float widthYards = 0;           // blend width used (the automatic value when PasteOptions said 0)
 };
 

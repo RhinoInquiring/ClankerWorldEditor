@@ -212,6 +212,12 @@ bool App::Init(HWND hwnd, ID3D11Device* device, ID3D11DeviceContext* context, bo
     m_store.Register(m_triggerRows);
     m_store.Register(m_teleports);
     m_store.Register(m_instances);
+    m_store.Register(m_areaPois);
+    m_store.Register(m_gossipPois);
+    m_store.Register(m_teles);
+    m_store.Register(m_taxiNodes);
+    m_store.Register(m_taxiPaths);
+    m_store.Register(m_taxiPoints);
     m_creatures.SetDb(&m_db);
     m_gameobjects.SetDb(&m_db);
     m_waypoints.SetDb(&m_db);
@@ -219,6 +225,8 @@ bool App::Init(HWND hwnd, ID3D11Device* device, ID3D11DeviceContext* context, bo
     m_triggerRows.SetDb(&m_db);
     m_teleports.SetDb(&m_db);
     m_instances.SetDb(&m_db);
+    m_gossipPois.SetDb(&m_db);
+    m_teles.SetDb(&m_db);
 
     char user[64] = {};
     DWORD size = sizeof user;
@@ -243,6 +251,8 @@ bool App::Init(HWND hwnd, ID3D11Device* device, ID3D11DeviceContext* context, bo
         { "Tool: Holes", "H", [this] { m_tool = Tool::Holes; }, always },
         { "Tool: Zones (paint area ids)", "Z", [this] { m_tool = Tool::Zones; }, always },
         { "Tool: Triggers (area triggers, teleports, entrances)", "K", [this] { m_tool = Tool::Triggers; }, always },
+        { "Tool: POIs (map landmarks, gossip points, .tele bookmarks)", "J", [this] { m_tool = Tool::Pois; }, always },
+        { "Tool: Flight paths (taxi nodes and routes)", "Y", [this] { m_tool = Tool::Flights; }, always },
         { "Group: Terrain", "F1", [this] { SetGroup(Group::Terrain); }, always },
         { "Group: Objects", "F2", [this] { SetGroup(Group::Objects); }, always },
         { "Group: Units", "F3", [this] { SetGroup(Group::Units); }, always },
@@ -436,6 +446,15 @@ void App::CloseProject()
     m_mapJob.reset();
     m_triggers.Reset();
     m_mapRows.Reset();
+    m_areaPois.Reset();
+    m_taxiNodes.Reset();
+    m_taxiPaths.Reset();
+    m_taxiPoints.Reset();
+    m_flightNode = m_flightPath = 0;
+    m_flightPoint.reset();
+    m_flightPlace = false;
+    m_poiSel = 0;
+    m_poiPick = PoiPick::None;
     m_triggerSel = 0;
     m_triggerPick = TriggerPick::None;
     m_teleportViewRevision = ~0ull;
@@ -446,6 +465,7 @@ void App::CloseProject()
     m_selection.clear();
     m_hover.reset();
     m_focusTile.reset();
+    m_flyGround.reset();
 }
 
 bool App::Save()
@@ -494,12 +514,12 @@ void App::Export(bool playTest)
         else if (size_t a, c, d; spawns->Counts(a, c, d), a + c + d)
             Log("Spawns: out/server/%s_spawns.sql (+%zu, ~%zu, -%zu) and %s_spawns_revert.sql.", spawns->Table(), a, c, d, spawns->Table());
     }
-    for (const TableRowsAdapter* table : { &m_waypoints, &m_addons, &m_triggerRows, &m_teleports, &m_instances })
+    for (const TableRowsAdapter* table : { &m_waypoints, &m_addons, &m_triggerRows, &m_teleports, &m_instances, &m_gossipPois, &m_teles })
     {
         if (!table->ExportSql(m_project->dir / "out" / "server", error)) Log("%s", error.c_str());
         else if (const size_t n = table->Count()) Log("out/server/%s.sql (%zu changed) and %s_revert.sql.", table->Table().c_str(), n, table->Table().c_str());
     }
-    for (const DbcTable* table : std::initializer_list<const DbcTable*>{ &m_areas, &m_wmoAreas, &m_worldMaps, &m_mapOverlays, &m_triggers, &m_mapRows })
+    for (const DbcTable* table : std::initializer_list<const DbcTable*>{ &m_areas, &m_wmoAreas, &m_worldMaps, &m_mapOverlays, &m_triggers, &m_mapRows, &m_areaPois, &m_taxiNodes, &m_taxiPaths, &m_taxiPoints })
     {
         if (!table->Export({ out / "DBFilesClient", m_project->dir / "out" / "server" / "dbc" }, m_project->dir / "out" / "dbc", error))
             Log("%s", error.c_str());
@@ -658,7 +678,9 @@ void App::CopySelection()
         std::set<std::pair<int, int>> cells;
         for (ChunkRef r : m_selection) cells.insert(m_terrain.GridOf(r));
         m_clipboard = TerrainAdapter::CopyFrom(layer->tiles, cells);
-        Log("Copying from ghost layer %s.", layer->label.c_str());
+        m_clipboard.pois = VersionPois(m_ghosts.Chain(layer->source), layer->map.empty() ? m_terrain.Map() : layer->map, cells, m_clipboard.originX,
+                                       m_clipboard.originZ);
+        Log("Copying from ghost layer %s (%zu landmark(s) on it).", layer->label.c_str(), m_clipboard.pois.size());
         if (m_clipboard.Empty()) { Log("That layer has nothing loaded under the selection."); return; }
     }
     else
@@ -718,7 +740,12 @@ void App::CommitPlacement()
     if (!change) { Log("Nothing pasted: the target chunks are not loaded."); return; }
     Log("%s (%zu chunks changed, %zu objects added).", change->label.c_str(), m_plan.chunks.size(),
         change->data.value("objects", nlohmann::json::array()).size());
-    m_store.Commit(std::move(*change));
+    // Landmarks of another version come along in the same undo step.
+    std::vector<Change> parts = AddPastedPois(m_plan.pois, change->label);
+    if (parts.empty()) { m_store.Commit(std::move(*change)); return; }
+    const std::string label = change->label;
+    parts.insert(parts.begin(), std::move(*change));
+    m_store.Commit(std::move(parts), label);
 }
 
 void App::CancelPin()
@@ -1299,6 +1326,8 @@ void App::DrawSaveBlueprintModal()
         b.notes = m_blueprintNotes;
         b.map = m_terrain.Map() + (from ? " / " + from->label : "");
         b.clip = from ? TerrainAdapter::CopyFrom(from->tiles, cells) : m_terrain.Copy(m_selection);
+        if (from)
+            b.clip.pois = VersionPois(m_ghosts.Chain(from->source), from->map.empty() ? m_terrain.Map() : from->map, cells, b.clip.originX, b.clip.originZ);
         const std::time_t now = std::time(nullptr);
         std::tm local{};
         localtime_s(&local, &now);
@@ -1721,63 +1750,6 @@ XMFLOAT4X4 App::GizmoFrame() const
     return out;
 }
 
-bool App::UpdateGizmo(const ImVec2& origin, const ImVec2& size)
-{
-    if (m_path && m_tool == Tool::Creatures && m_path->sel && *m_path->sel < m_path->points.size()) return UpdatePathGizmo(origin, size);
-    return UpdateObjectGizmo(origin, size);
-}
-
-bool App::UpdateObjectGizmo(const ImVec2& origin, const ImVec2& size)
-{
-    if (m_tool != Tool::Objects || m_objSel.empty() || m_terrain.Map().empty())
-    {
-        if (m_gizmoActive) { m_terrain.CancelObjectEdit(); m_gizmoActive = false; }
-        return false;
-    }
-    ImGuizmo::SetDrawlist(ImGui::GetWindowDrawList());
-    ImGuizmo::SetRect(origin.x, origin.y, size.x, size.y);
-    ImGuizmo::SetOrthographic(false);
-    XMFLOAT4X4 view, proj;
-    XMStoreFloat4x4(&view, m_camera.View());
-    XMStoreFloat4x4(&proj, XMMatrixPerspectiveFovRH(XMConvertToRadians(60.0f), size.x / size.y, 1.0f, 6000.0f));
-    if (!m_gizmoActive) m_gizmoMatrix = GizmoFrame();
-    const XMFLOAT4X4 before = m_gizmoMatrix;
-
-    const ImGuizmo::OPERATION op = m_gizmo == Gizmo::Move ? ImGuizmo::TRANSLATE : m_gizmo == Gizmo::Rotate ? ImGuizmo::ROTATE : ImGuizmo::SCALEU;
-    const bool snapping = m_gizmoSnap != ImGui::GetIO().KeyCtrl;
-    const float snapValue = m_gizmo == Gizmo::Move ? m_snapMove : m_gizmo == Gizmo::Rotate ? m_snapRotate : m_snapScale;
-    const float snap[3] = { snapValue, snapValue, snapValue };
-    ImGuizmo::Manipulate(&view._11, &proj._11, op, m_gizmoLocal ? ImGuizmo::LOCAL : ImGuizmo::WORLD, &m_gizmoMatrix._11, nullptr,
-                         snapping ? snap : nullptr);
-
-    const bool dragging = ImGuizmo::IsUsing();
-    if (dragging && !m_gizmoActive)
-    {
-        m_gizmoStart = before;
-        // Furniture placed on the map inside a selected building moves with it (it is not part of the WMO file).
-        m_gizmoRiders = m_carryInside ? m_terrain.DoodadsInside(m_objSel) : std::set<ObjectRef>{};
-        std::set<ObjectRef> moving = m_objSel;
-        moving.insert(m_gizmoRiders.begin(), m_gizmoRiders.end());
-        m_terrain.BeginObjectEdit(moving);
-    }
-    if (dragging)
-    {
-        // Every object follows the handle: world = original * inverse(start frame) * current frame.
-        const XMMATRIX delta = XMMatrixInverse(nullptr, XMLoadFloat4x4(&m_gizmoStart)) * XMLoadFloat4x4(&m_gizmoMatrix);
-        PreviewObjects([&](float* pos, float* rot, float* scale) {
-            float s = 1;
-            DecomposePlacement(PlacementMatrix(pos, rot, scale ? *scale : 1.0f) * delta, pos, rot, s);
-            if (scale) *scale = std::clamp(s, 1.0f / 1024.0f, 63.0f);   // WMOs cannot scale: theirs is dropped
-        });
-    }
-    if (!dragging && m_gizmoActive)
-        EndObjectEdit(std::string(m_gizmo == Gizmo::Move ? "Move " : m_gizmo == Gizmo::Rotate ? "Rotate " : "Scale ") +
-                      std::to_string(m_objSel.size()) + " object(s)" +
-                      (m_gizmoRiders.empty() ? "" : " with " + std::to_string(m_gizmoRiders.size()) + " inside"));
-    m_gizmoActive = dragging;
-    return dragging || ImGuizmo::IsOver();
-}
-
 std::optional<XMFLOAT3> App::ObjectPosition(const ObjectRef& ref) const
 {
     if (ref.wmo) { if (auto w = m_terrain.FindWmo(ref.uid)) return XMFLOAT3{ w->pos[0], w->pos[1], w->pos[2] }; }
@@ -1817,6 +1789,35 @@ void App::DeleteSelectedObjects()
     m_objSel.clear();
 }
 
+void App::DrawTransformBar(float pw)
+{
+    // The same bar in every tool that moves things: handle mode, world / local, snapping, and what this selection allows.
+    const float x0 = ImGui::GetCursorPosX();
+    Segmented("gizmo", m_gizmo, { { Gizmo::Move, "Move 1" }, { Gizmo::Rotate, "Rotate 2" }, { Gizmo::Scale, "Scale 3" } }, pw);
+    Segmented("space", m_gizmoLocal, { { false, "World" }, { true, "Local  X" } }, pw);
+    ImGui::SetItemTooltip("World: handles follow the map axes. Local: they follow the selection's own axes.");
+    ImGui::Checkbox("Snap", &m_gizmoSnap);
+    ImGui::SetItemTooltip("Hold Ctrl while dragging a handle to flip this");
+    ImGui::SameLine();
+    const float left = pw - (ImGui::GetCursorPosX() - x0);
+    ImGui::SetNextItemWidth(left / 3 - 4);
+    ImGui::SliderFloat("##snapMove", &m_snapMove, 0.1f, 100.0f, "%.1f yd", ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_AlwaysClamp);
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(left / 3 - 4);
+    ImGui::SliderFloat("##snapRotate", &m_snapRotate, 1.0f, 90.0f, "%.0f deg", ImGuiSliderFlags_AlwaysClamp);
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(left / 3 - 4);
+    ImGui::SliderFloat("##snapScale", &m_snapScale, 0.01f, 1.0f, "x%.2f", ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_AlwaysClamp);
+    if (const auto t = ActiveTransform())
+    {
+        const bool blocked = (m_gizmo == Gizmo::Rotate && !t->rotate) || (m_gizmo == Gizmo::Scale && t->scale == Transformable::Scale::None);
+        if (blocked) ImGui::TextColored(kWarn, "%s Pick Move (1).", t->limits.c_str());
+        else if (!t->limits.empty()) ImGui::TextColored(kQuiet, "%s", t->limits.c_str());
+        ImGui::TextColored(kQuiet, "PgUp/PgDn height (Shift: fine)  G ground  Alt+click: move here");
+    }
+    ImGui::Separator();
+}
+
 void App::DrawObjectPanel()
 {
     if (m_tool != Tool::Objects)
@@ -1825,22 +1826,7 @@ void App::DrawObjectPanel()
         if (ImGui::Button("Objects tool  O")) m_tool = Tool::Objects;
         return;
     }
-    const float pw = ImGui::GetContentRegionAvail().x;
-    Segmented("gizmo", m_gizmo, { { Gizmo::Move, "Move 1" }, { Gizmo::Rotate, "Rotate 2" }, { Gizmo::Scale, "Scale 3" } }, pw);
-    Segmented("space", m_gizmoLocal, { { false, "World" }, { true, "Local  X" } }, pw);
-    ImGui::SetItemTooltip("World: handles follow the map axes. Local: they follow the object's own axes.");
-    ImGui::Checkbox("Snap", &m_gizmoSnap);
-    ImGui::SetItemTooltip("Hold Ctrl while dragging a handle to flip this");
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth((pw - ImGui::GetCursorPosX()) / 3 - 4);
-    ImGui::SliderFloat("##snapMove", &m_snapMove, 0.1f, 100.0f, "%.1f yd", ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_AlwaysClamp);
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth((pw - ImGui::GetCursorPosX()) / 2 - 4);
-    ImGui::SliderFloat("##snapRotate", &m_snapRotate, 1.0f, 90.0f, "%.0f deg", ImGuiSliderFlags_AlwaysClamp);
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(pw - ImGui::GetCursorPosX());
-    ImGui::SliderFloat("##snapScale", &m_snapScale, 0.01f, 1.0f, "x%.2f", ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_AlwaysClamp);
-    ImGui::Separator();
+    DrawTransformBar(ImGui::GetContentRegionAvail().x);
 
     if (m_objSel.empty())
     {
@@ -2127,6 +2113,12 @@ void App::Frame(float dt)
             m_focusTile.reset();
         }
         if (stats.texturesMissing) Log("Tile %d_%d: %zu texture(s) missing.", loaded % 64, loaded / 64, stats.texturesMissing);
+        if (m_flyGround)
+            if (const auto h = m_terrain.HeightAt(m_flyGround->first, m_flyGround->second))
+            {
+                m_camera.pos.y = *h + 40;
+                m_flyGround.reset();
+            }
     }
     if (!error.empty()) Log("%s", error.c_str());
 
@@ -2235,45 +2227,14 @@ void App::HandleShortcuts()
     if (ImGui::IsKeyPressed(ImGuiKey_I, false)) m_tool = Tool::Gameobjects;
     if (ImGui::IsKeyPressed(ImGuiKey_Z, false)) m_tool = Tool::Zones;
     if (ImGui::IsKeyPressed(ImGuiKey_K, false)) m_tool = Tool::Triggers;
-    if (m_tool == Tool::Triggers && m_triggerSel && ImGui::IsKeyPressed(ImGuiKey_Delete, false))
-        CommitTrigger(m_triggerSel, std::nullopt, std::nullopt, "Delete trigger " + std::to_string(m_triggerSel));
+    if (ImGui::IsKeyPressed(ImGuiKey_J, false)) m_tool = Tool::Pois;
+    if (ImGui::IsKeyPressed(ImGuiKey_Y, false)) m_tool = Tool::Flights;
     for (int g = 0; g < 4; ++g)   // F1..F4: tool groups
         if (ImGui::IsKeyPressed(ImGuiKey(ImGuiKey_F1 + g), false)) SetGroup(Group(g));
     const bool pathMode = m_path && m_tool == Tool::Creatures;
-    if (SpawnTool() && ImGui::IsKeyPressed(ImGuiKey_Delete, false)) pathMode ? DeletePathPoint() : DeleteSpawns();
     if (pathMode && (ImGui::IsKeyPressed(ImGuiKey_Enter, false) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false))) SavePathEdit();
-    if (pathMode && ImGui::IsKeyPressed(ImGuiKey_G, false)) DropPathPoint();
-    if (m_tool == Tool::Objects && !m_gizmoActive)
-    {
-        if (ImGui::IsKeyPressed(ImGuiKey_1, false)) m_gizmo = Gizmo::Move;
-        if (ImGui::IsKeyPressed(ImGuiKey_2, false)) m_gizmo = Gizmo::Rotate;
-        if (ImGui::IsKeyPressed(ImGuiKey_3, false)) m_gizmo = Gizmo::Scale;
-        if (ImGui::IsKeyPressed(ImGuiKey_X, false)) m_gizmoLocal = !m_gizmoLocal;
-    }
-    if (m_tool == Tool::Objects && !m_objSel.empty() && !m_gizmoActive)
-    {
-        const bool shift = ImGui::GetIO().KeyShift;
-        if (ImGui::IsKeyPressed(ImGuiKey_PageUp) || ImGui::IsKeyPressed(ImGuiKey_PageDown))
-        {
-            const float step = (ImGui::IsKeyPressed(ImGuiKey_PageUp) ? 1.0f : -1.0f) * (shift ? 0.1f : 1.0f);
-            EditObjects("Raise/lower " + std::to_string(m_objSel.size()) + " object(s)", [&](float* pos, float*, float*) { pos[1] += step; });
-        }
-        if (ImGui::IsKeyPressed(ImGuiKey_Equal) || ImGui::IsKeyPressed(ImGuiKey_KeypadAdd) || ImGui::IsKeyPressed(ImGuiKey_Minus) ||
-            ImGui::IsKeyPressed(ImGuiKey_KeypadSubtract))
-        {
-            const bool up = ImGui::IsKeyPressed(ImGuiKey_Equal) || ImGui::IsKeyPressed(ImGuiKey_KeypadAdd);
-            const float factor = up ? (shift ? 1.02f : 1.1f) : 1.0f / (shift ? 1.02f : 1.1f);
-            EditObjects("Scale " + std::to_string(m_objSel.size()) + " object(s)", [&](float*, float*, float* scale) {
-                if (scale) *scale = std::clamp(*scale * factor, 1.0f / 1024.0f, 63.0f);
-            });
-        }
-        if (ImGui::IsKeyPressed(ImGuiKey_G, false))
-            EditObjects("Drop " + std::to_string(m_objSel.size()) + " object(s) to the ground", [&](float* pos, float*, float*) {
-                if (const auto h = m_terrain.HeightAt(pos[0], pos[2])) pos[1] = *h;
-            });
-        if (ImGui::IsKeyPressed(ImGuiKey_Delete, false)) DeleteSelectedObjects();
-    }
-    else if (m_tool != Tool::Objects && ImGui::IsKeyPressed(ImGuiKey_R, false)) RotateClipboard(ImGui::GetIO().KeyShift ? 3 : 1);
+    TransformKeys();   // every tool that moves things: handles, height, scale, ground, delete
+    if (!TransformTool() && ImGui::IsKeyPressed(ImGuiKey_R, false)) RotateClipboard(ImGui::GetIO().KeyShift ? 3 : 1);
     if (ImGui::IsKeyPressed(ImGuiKey_F, false)) FocusTile();
     if (ImGui::IsKeyPressed(ImGuiKey_P, false) && !m_clipboard.Empty()) { m_tool = Tool::Copy; m_placing = !m_placing; m_pin.reset(); }
     // Compare: [ and ] start it on the selection and cycle the versions; Enter pastes the shown one and ends it.
@@ -2304,6 +2265,10 @@ void App::HandleShortcuts()
         if (m_armed) m_armed.reset();                 // stop placing a catalog model
         else if (m_triggerPick != TriggerPick::None) m_triggerPick = TriggerPick::None;   // a pending trigger pick
         else if (m_tool == Tool::Triggers && m_triggerSel) m_triggerSel = 0;
+        else if (m_poiPick != PoiPick::None) m_poiPick = PoiPick::None;
+        else if (m_tool == Tool::Pois && m_poiSel) m_poiSel = 0;
+        else if (m_flightPlace) m_flightPlace = false;
+        else if (m_tool == Tool::Flights && (m_flightNode || m_flightPath)) { m_flightNode = m_flightPath = 0; m_flightPoint.reset(); }
         else if (m_comparing) StopCompare();          // the map comes back as it is
         else if (!m_diffPending.empty()) { EndNewTiles(); m_diffPending.clear(); m_diffActive.clear(); }   // a review still on its way
         else if (m_pin) CancelPin();                  // first Esc: unpin, terrain goes back
@@ -2317,7 +2282,7 @@ void App::HandleShortcuts()
     const std::pair<ImGuiKey, Brush::Mode> modes[] = { { ImGuiKey_1, Brush::Mode::Raise }, { ImGuiKey_2, Brush::Mode::Lower },
                                                        { ImGuiKey_3, Brush::Mode::Flatten }, { ImGuiKey_4, Brush::Mode::Smooth } };
     for (const auto& [key, mode] : modes)
-        if (m_tool != Tool::Objects && ImGui::IsKeyPressed(key, false)) { m_tool = Tool::Sculpt; m_brush.mode = mode; }
+        if (!TransformTool() && ImGui::IsKeyPressed(key, false)) { m_tool = Tool::Sculpt; m_brush.mode = mode; }
 }
 
 void App::DrawMenuBar()
@@ -2542,6 +2507,16 @@ void App::BuildOverlay(std::vector<LineVertex>& lines) const
     if (m_tool == Tool::Triggers)
     {
         BuildTriggerOverlay(lines);
+        return;
+    }
+    if (m_tool == Tool::Pois)
+    {
+        BuildPoiOverlay(lines);
+        return;
+    }
+    if (m_tool == Tool::Flights)
+    {
+        BuildFlightOverlay(lines);
         return;
     }
     auto chunkOutline = [&](ChunkRef ref, XMFLOAT4 color, float lift = 0.3f) {
@@ -2812,9 +2787,17 @@ void App::DrawViewport(float dt)
     {
         TriggersViewport(origin, size, viewProj);
     }
+    else if (m_tool == Tool::Pois)
+    {
+        PoisViewport(origin, size, viewProj);
+    }
+    else if (m_tool == Tool::Flights)
+    {
+        FlightsViewport(origin, size, viewProj);
+    }
     else if (m_tool == Tool::Objects)
     {
-        // Objects: click picks, dragging draws a box; Shift adds, Ctrl removes. The handles move, turn and scale.
+        // Objects: click picks, dragging draws a box; Shift adds, Ctrl removes, Alt+click moves the selection there. The handles move, turn and scale.
         if (ImGui::IsItemActivated() && ImGui::IsMouseDown(ImGuiMouseButton_Left))
         {
             m_boxStart[0] = io.MousePos.x;
@@ -2823,7 +2806,7 @@ void App::DrawViewport(float dt)
             m_objPress = m_objHover;
         }
         const bool leftHeld = ImGui::IsItemActive() && ImGui::IsMouseDown(ImGuiMouseButton_Left);
-        if (leftHeld && std::fabs(io.MousePos.x - m_boxStart[0]) + std::fabs(io.MousePos.y - m_boxStart[1]) > 5) m_boxing = true;
+        if (leftHeld && !io.KeyAlt && std::fabs(io.MousePos.x - m_boxStart[0]) + std::fabs(io.MousePos.y - m_boxStart[1]) > 5) m_boxing = true;
         if (ImGui::IsItemDeactivated() && ImGui::IsMouseReleased(ImGuiMouseButton_Left))
         {
             if (m_boxing)
@@ -2843,6 +2826,8 @@ void App::DrawViewport(float dt)
                 for (const ObjectRef& r : hits)
                     if (io.KeyCtrl) m_objSel.erase(r); else m_objSel.insert(r);
             }
+            else if (io.KeyAlt && !m_objSel.empty() && m_hover)
+                MoveSelectionTo(m_hover->pos);   // Alt+click: the selection goes there, as in every tool that moves things
             else if (m_armed)
                 PlaceFromCatalog(io.KeyShift);
             else if (m_objPress)
@@ -2970,6 +2955,7 @@ void App::DrawViewport(float dt)
     {
         std::vector<LineVertex> solids;
         BuildPathSolids(solids);
+        if (m_tool == Tool::Flights) BuildFlightSolids(solids);
         m_renderer.DrawSolids(viewProj, solids);
     }
     m_renderer.DrawWater(viewProj, m_soloLayer);
@@ -2988,14 +2974,16 @@ void App::DrawViewport(float dt)
     DrawSpawnLabels(dl, origin, size, viewProj);
     DrawPathLabels(dl, origin, size, viewProj);
     if (m_tool == Tool::Triggers) DrawTriggerLabels(dl, origin, size, viewProj);
+    if (m_tool == Tool::Pois) DrawPoiLabels(dl, origin, size, viewProj);
+    if (m_tool == Tool::Flights) DrawFlightLabels(dl, origin, size, viewProj);
 
     // Corner caption and empty state.
     const ImVec2 pad{ origin.x + 12, origin.y + 10 };
     if (!m_terrain.Map().empty())
     {
-        const char* tools[] = { "Select", "Sculpt", "Copy", "Holes", "Objects", "Paint", "Creatures", "Gameobjects", "Zones", "Triggers" };
+        const char* tools[] = { "Select", "Sculpt", "Copy", "Holes", "Objects", "Paint", "Creatures", "Gameobjects", "Zones", "Triggers", "POIs", "Flights" };
         const char* modes[] = { "Raise", "Lower", "Flatten", "Smooth" };
-        char caption[200];
+        char caption[400];
         if (m_tool == Tool::Sculpt)
             snprintf(caption, sizeof caption, "%s   World > Sculpt > %s", m_terrain.Map().c_str(), modes[int(m_brush.mode)]);
         else if (m_tool == Tool::Paint)
@@ -3007,21 +2995,33 @@ void App::DrawViewport(float dt)
         else if (m_tool == Tool::Zones)
             snprintf(caption, sizeof caption, "%s   World > Zones > Paint %s   Alt+click: pick   Ctrl+wheel: radius", m_terrain.Map().c_str(),
                      m_activeArea ? AreaLabel(m_activeArea).c_str() : "(no area)");
-        else if (m_tool == Tool::Triggers)
+        else if (m_tool == Tool::Triggers && m_triggerPick != TriggerPick::None)
         {
-            const char* picks[] = { "click: select   Alt+click: move the selected one here   Del: delete",
-                                    "click the ground: place a new trigger   Shift+click: place and keep going   Esc: stop",
+            const char* picks[] = { "", "click the ground: place a new trigger   Shift+click: place and keep going   Esc: stop",
                                     "click the ground: move the trigger there   Esc: stop", "click the ground: the teleport's arrival point   Esc: stop",
                                     "click the ground: where dead players' spirits appear   Esc: stop" };
             snprintf(caption, sizeof caption, "%s   World > Triggers   %s", m_terrain.Map().c_str(), picks[int(m_triggerPick)]);
         }
+        else if (m_tool == Tool::Flights && m_flightPlace)
+            snprintf(caption, sizeof caption, "%s   World > Flights   click the ground: place a flight node   Shift+click: place and keep going   Esc: stop", m_terrain.Map().c_str());
+        else if (m_tool == Tool::Pois && m_poiPick != PoiPick::None)
+        {
+            const char* picks[] = { "", "click the ground: place a new point   Shift+click: place and keep going   Esc: stop",
+                                    "click the ground: move the point there   Esc: stop" };
+            snprintf(caption, sizeof caption, "%s   World > POIs   %s", m_terrain.Map().c_str(), picks[int(m_poiPick)]);
+        }
         else if (m_tool == Tool::Objects && m_armed)
             snprintf(caption, sizeof caption, "%s   World > Objects > Place %s   click: place   Shift+click: place and keep going   Esc: stop",
                      m_terrain.Map().c_str(), FileOf(m_armed->path).c_str());
-        else if (m_tool == Tool::Objects)
-            snprintf(caption, sizeof caption, "%s   World > Objects > %s (%s)   %zu selected   1 move  2 rotate  3 scale  X world/local  Ctrl snap  G ground  Del",
-                     m_terrain.Map().c_str(), m_gizmo == Gizmo::Move ? "Move" : m_gizmo == Gizmo::Rotate ? "Rotate" : "Scale",
-                     m_gizmoLocal ? "local" : "world", m_objSel.size());
+        else if (TransformTool() && !(SpawnTool() && m_spawnArmed))
+        {
+            // Every tool that moves things: the same caption and keys.
+            const size_t selected = m_tool == Tool::Objects ? m_objSel.size() : SpawnTool() ? m_spawnSel.size()
+                                  : m_tool == Tool::Triggers ? size_t(m_triggerSel != 0) : m_tool == Tool::Flights ? size_t(m_flightNode || m_flightPoint) : size_t(m_poiSel != 0);
+            snprintf(caption, sizeof caption, "%s   World > %s > %s (%s)   %zu selected   %s", m_terrain.Map().c_str(), tools[int(m_tool)],
+                     m_gizmo == Gizmo::Move ? "Move" : m_gizmo == Gizmo::Rotate ? "Rotate" : "Scale", m_gizmoLocal ? "local" : "world", selected,
+                     TransformHint().c_str());
+        }
         else
             snprintf(caption, sizeof caption, "%s   World > %s   %s", m_terrain.Map().c_str(), tools[int(m_tool)],
                      m_tool != Tool::Copy || !m_placing ? (std::to_string(m_selection.size()) + " selected").c_str()
@@ -3114,7 +3114,7 @@ void App::DrawToolsPanel()
         break;
     case Group::Objects: Segmented("tool", m_tool, { { Tool::Objects, "Place and edit  O" } }, w); break;
     case Group::Units: Segmented("tool", m_tool, { { Tool::Creatures, "Creatures N" }, { Tool::Gameobjects, "Gameobjects I" } }, w); break;
-    case Group::Regions: Segmented("tool", m_tool, { { Tool::Zones, "Zones Z" }, { Tool::Triggers, "Triggers K" } }, w); break;
+    case Group::Regions: Segmented("tool", m_tool, { { Tool::Zones, "Zones Z" }, { Tool::Triggers, "Triggers K" }, { Tool::Pois, "POIs J" }, { Tool::Flights, "Flights Y" } }, w); break;
     }
     ImGui::Spacing();
 
@@ -3122,6 +3122,8 @@ void App::DrawToolsPanel()
     BeginSections("##sections" + std::to_string(int(m_tool)));
     if (m_tool == Tool::Zones) DrawZonesPanel(w);
     if (m_tool == Tool::Triggers) DrawTriggersPanel(w);
+    if (m_tool == Tool::Pois) DrawPoisPanel(w);
+    if (m_tool == Tool::Flights) DrawFlightsPanel(w);
     if (SpawnTool()) DrawSpawnsPanel(w);
     if (m_tool == Tool::Objects && Section("Objects"))
     {

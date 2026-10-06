@@ -21,7 +21,7 @@ changes live.
 - **Click** a trigger to select it; **Alt+click** the ground moves the selected one there; **Del** deletes it.
 - **New**: pick sphere or box and its size, then **Place on the ground**. Ids come from the project's
   `areatrigger.id` range. With "Teleports players" on, the next click sets where it sends players.
-- **Selected**: position, shape, size and turn, then **Apply**. One undo step covers the AreaTrigger.dbc row, the
+- **Selected**: position, shape, size and turn, saved when let go (handles and keys as in [Moving things](../concepts/moving-things.md): scale sets a sphere's radius or a box's width, height and length). One undo step covers the AreaTrigger.dbc row, the
   `areatrigger` row and the teleport.
 
 ## Teleports
@@ -29,7 +29,7 @@ changes live.
 In **Selected**, "Sends players somewhere" makes the trigger a teleport: name, target map, arrival point and facing.
 **Pick the arrival on the ground** takes the next click: players arrive there facing where the camera looks. For an
 arrival on another map, open that map in **Maps** first, then click (the trigger stays selected). The pick is saved at
-once, with the name typed in the panel; changes to the other fields need **Apply**.
+once; the other fields are saved when let go. Ticking the box starts the arrival pick.
 
 ## Portal effects
 

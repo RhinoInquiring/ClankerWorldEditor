@@ -20,10 +20,10 @@ area of the chunk they stand on.
 | Click a marker or model | Select |
 | Drag a box | Select every marker in it (Shift adds, Ctrl removes) |
 | Alt+click | Move the selection to the cursor (each to the ground) |
-| Del | Delete |
+| 1 / 2 / 3, X, PgUp / PgDn, G, Del | Handles and keys of [Moving things](../concepts/moving-things.md) (move; rotate turns the facing) |
 | Esc | Clear the selection |
 
-The **Selected** tab edits one spawn or many at once: facing, wander distance, respawn time, drop to the ground,
+The **Selected** tab edits one spawn or many at once: position (one spawn) and facing preview live, as do the handles; wander distance, respawn time, drop to the ground,
 delete. Editing a group is one undo step. The **Inspector** shows every column of the spawn's row and of its
 template.
 

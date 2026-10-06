@@ -60,6 +60,21 @@ std::string App::MapLabel(uint32_t id) const
     return std::to_string(id) + " (not in Map.dbc)";
 }
 
+void App::FlyTo(uint32_t map, float x, float y, float z, bool ground)
+{
+    const XMFLOAT3 p = ServerToEditor(x, y, z);
+    for (const auto& m : m_maps)
+        if (m.id == map && m.directory != m_terrain.Map()) GoToTile(m.directory, int(p.x / kTileSize), int(p.z / kTileSize));
+    m_focusTile.reset();   // the camera height is set here, not snapped to the tile
+    m_flyGround.reset();
+    m_camera.pos = { p.x, p.y + 40, p.z - 60 };
+    m_camera.yaw = 0;
+    m_camera.pitch = -0.55f;
+    if (!ground) return;
+    if (const auto h = m_terrain.HeightAt(p.x, p.z)) m_camera.pos.y = *h + 40;
+    else m_flyGround = { p.x, p.z };   // taken once that ground streams in
+}
+
 const std::vector<Trigger>& App::TriggersOnMap() const
 {
     const std::pair<uint32_t, uint64_t> key{ CurrentMapId(), m_triggers.Version() };
@@ -342,14 +357,7 @@ void App::DrawTriggersPanel(float w)
     const auto& triggers = TriggersOnMap();
     const auto& teleports = TeleportsView();
     const bool editable = m_project && m_db.Connected() && !m_terrain.Map().empty();
-    auto flyTo = [&](uint32_t toMap, float x, float y, float z) {
-        const XMFLOAT3 p = ServerToEditor(x, y, z);
-        for (const auto& m : m_maps)
-            if (m.id == toMap && m.directory != m_terrain.Map()) GoToTile(m.directory, int(p.x / kTileSize), int(p.z / kTileSize));
-        m_camera.pos = { p.x, p.y + 40, p.z - 60 };
-        m_camera.yaw = 0;
-        m_camera.pitch = -0.55f;
-    };
+    auto flyTo = [&](uint32_t toMap, float x, float y, float z) { FlyTo(toMap, x, y, z); };
     auto mapCombo = [&](const char* label, uint32_t& value) {
         bool changed = false;
         if (ImGui::BeginCombo(label, MapLabel(value).c_str(), ImGuiComboFlags_HeightLarge))
@@ -382,6 +390,7 @@ void App::DrawTriggersPanel(float w)
                 if (ImGui::Selectable(label.c_str(), t.id == m_triggerSel, ImGuiSelectableFlags_AllowDoubleClick))
                 {
                     m_triggerSel = t.id;
+                    m_triggerTabId = t.id;   // a list click keeps the list in front (so a double-click reaches it and flies there)
                     if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) flyTo(t.map, t.x, t.y, t.z);
                 }
                 ImGui::SetItemTooltip("Double-click: fly there");
@@ -430,8 +439,11 @@ void App::DrawTriggersPanel(float w)
     m_triggerTabId = m_triggerSel;
     if (m_triggerSel && m_triggerEdit.id == m_triggerSel && Section("Selected", selectedNow))
     {
+        // As objects: the handles and these fields show at once; each change is saved (one undo step) when let go.
+        DrawTransformBar(w);
         Trigger& t = m_triggerEdit;
         ImGui::Text("Trigger #%u on %s", t.id, MapLabel(t.map).c_str());
+        ImGui::BeginDisabled(!editable);
         float pos[3] = { t.x, t.y, t.z };
         ImGui::SetNextItemWidth(w - 90);
         if (ImGui::DragFloat3("Position", pos, 0.1f, 0, 0, "%.1f")) std::tie(t.x, t.y, t.z) = std::tuple(pos[0], pos[1], pos[2]);
@@ -451,16 +463,16 @@ void App::DrawTriggersPanel(float w)
             if (ImGui::SliderFloat("Turn", &deg, 0, 360, "%.1f deg", ImGuiSliderFlags_AlwaysClamp)) t.yaw = std::fmod(deg + 360.0f, 360.0f) * kTwoPi / 360.0f;
             ImGui::SetItemTooltip("Which way Length runs: the arrow in the viewport. The game fires from any side.");
         }
-        ImGui::BeginDisabled(!editable);
-        if (ImGui::Button(m_triggerPick == TriggerPick::Move ? "Click the ground  (Esc)" : "Move: click the ground (or Alt+click)", { w, 0 }))
-            m_triggerPick = m_triggerPick == TriggerPick::Move ? TriggerPick::None : TriggerPick::Move;
-        ImGui::EndDisabled();
 
         ImGui::SeparatorText("Teleport");
         bool teleport = m_teleportEdit.has_value();
         if (ImGui::Checkbox("Sends players somewhere", &teleport))
         {
-            if (teleport) m_teleportEdit = Teleport{ t.id, t.map, "", t.x, t.y, t.z, 0 };
+            if (teleport)
+            {
+                m_teleportEdit = Teleport{ t.id, t.map, "", t.x, t.y, t.z, 0 };
+                m_triggerPick = TriggerPick::Target;   // next: where it sends them
+            }
             else m_teleportEdit.reset();
         }
         if (m_teleportEdit)
@@ -476,33 +488,30 @@ void App::DrawTriggersPanel(float w)
             float deg = tp.o * 360.0f / kTwoPi;
             ImGui::SetNextItemWidth(w - 90);
             if (ImGui::SliderFloat("Facing", &deg, 0, 360, "%.1f deg", ImGuiSliderFlags_AlwaysClamp)) tp.o = std::fmod(deg + 360.0f, 360.0f) * kTwoPi / 360.0f;
-            ImGui::BeginDisabled(!editable);
             if (ImGui::Button(m_triggerPick == TriggerPick::Target ? "Click the arrival point  (Esc)" : "Pick the arrival on the ground", { (w - 8) / 2, 0 }))
                 m_triggerPick = m_triggerPick == TriggerPick::Target ? TriggerPick::None : TriggerPick::Target;
-            ImGui::EndDisabled();
-            ImGui::SetItemTooltip("Saved at once. Players face where the camera looks.\nAnother map: open it in Maps, then click.");
+            ImGui::SetItemTooltip("Players face where the camera looks.\nAnother map: open it in Maps, then click.");
             ImGui::SameLine();
             if (ImGui::Button("Go to arrival", { (w - 8) / 2, 0 })) flyTo(tp.map, tp.x, tp.y, tp.z);
         }
+        ImGui::EndDisabled();
 
         ImGui::SeparatorText("Portal effect");
         ImGui::TextColored(kQuiet, "Catalog > Portal effects: click one to put it here.");
 
         ImGui::Separator();
-        const auto saved = m_triggers.Find(t.id);
-        const auto savedTp = teleports.find(t.id);
-        const bool changed = !saved || t.ToDbcRow() != saved->ToDbcRow() || m_teleportEdit.has_value() != (savedTp != teleports.end()) ||
-                             (m_teleportEdit && m_teleportEdit->ToRow() != savedTp->second.ToRow());
-        ImGui::BeginDisabled(!editable || !changed);
-        if (ImGui::Button("Apply", { (w - 8) / 2, 0 })) CommitTrigger(t.id, t, m_teleportEdit, "Edit trigger " + std::to_string(t.id));
-        ImGui::SameLine();
-        if (ImGui::Button("Revert", { (w - 8) / 2, 0 })) m_triggerEditRevision = ~0ull;
-        ImGui::EndDisabled();
         if (ImGui::Button("Go to trigger", { (w - 8) / 2, 0 })) flyTo(t.map, t.x, t.y, t.z);
         ImGui::SameLine();
         ImGui::BeginDisabled(!editable);
         if (ImGui::Button("Delete  Del", { (w - 8) / 2, 0 })) CommitTrigger(t.id, std::nullopt, std::nullopt, "Delete trigger " + std::to_string(t.id));
         ImGui::EndDisabled();
+
+        // Saved once nothing is being dragged or typed (undo puts it back).
+        const auto saved = m_triggers.Find(t.id);
+        const auto savedTp = teleports.find(t.id);
+        const bool changed = !saved || t.ToDbcRow() != saved->ToDbcRow() || m_teleportEdit.has_value() != (savedTp != teleports.end()) ||
+                             (m_teleportEdit && m_teleportEdit->ToRow() != savedTp->second.ToRow());
+        if (changed && editable && !ImGui::IsAnyItemActive() && !m_gizmoActive) CommitTrigger(t.id, t, m_teleportEdit, "Edit trigger " + std::to_string(t.id));
     }
 
     if (Section("Entrance"))

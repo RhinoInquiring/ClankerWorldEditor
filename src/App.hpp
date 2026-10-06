@@ -18,6 +18,8 @@
 #include "Spawns.hpp"
 #include "Tables.hpp"
 #include "Terrain.hpp"
+#include "Flights.hpp"
+#include "Pois.hpp"
 #include "Triggers.hpp"
 
 #include <d3d11.h>
@@ -50,14 +52,14 @@ public:
     bool WantsQuit() const { return m_quit; }
 
 private:
-    enum class Tool { Select, Sculpt, Copy, Holes, Objects, Paint, Creatures, Gameobjects, Zones, Triggers };
+    enum class Tool { Select, Sculpt, Copy, Holes, Objects, Paint, Creatures, Gameobjects, Zones, Triggers, Pois, Flights };
     /// Tools come in groups (the toolbar's buttons); a group remembers the tool last used in it.
     enum class Group { Terrain, Objects, Units, Regions };
     static constexpr const char* kGroupNames[4] = { "Terrain", "Objects", "Units", "Regions" };
     static Group GroupOf(Tool t)
     {
         return t == Tool::Objects ? Group::Objects : t == Tool::Creatures || t == Tool::Gameobjects ? Group::Units
-             : t == Tool::Zones || t == Tool::Triggers ? Group::Regions : Group::Terrain;
+             : t == Tool::Zones || t == Tool::Triggers || t == Tool::Pois || t == Tool::Flights ? Group::Regions : Group::Terrain;
     }
     void SetGroup(Group g) { m_tool = m_groupTool[int(g)]; }
     Tool m_groupTool[4] = { Tool::Sculpt, Tool::Objects, Tool::Creatures, Tool::Zones };
@@ -196,6 +198,36 @@ private:
     std::string MapLabel(uint32_t id) const;
     /// Ids, teleports without a trigger or into a missing map, arrivals inside another teleport, instances without a way out.
     void CheckTriggers(std::vector<Problem>& problems) const;
+    /// Camera above a point (server coordinates), opening its map first when another one is open.
+    /// `ground`: the point has no height of its own; the camera goes above the ground there (once it streams in).
+    void FlyTo(uint32_t map, float x, float y, float z, bool ground = false);
+
+    // regions: points of interest: world map landmarks, gossip map flags, .tele bookmarks (AppPois.cpp)
+    void DrawPoisPanel(float width);
+    /// POIs tool in the viewport: click picks a point of the listed kind, Alt+click moves the selected one, an armed
+    /// pick (place, move) takes the next click on the ground.
+    void PoisViewport(const ImVec2& origin, const ImVec2& size, DirectX::FXMMATRIX viewProj);
+    void BuildPoiOverlay(std::vector<LineVertex>& lines) const;
+    void DrawPoiLabels(ImDrawList* dl, const ImVec2& origin, const ImVec2& size, DirectX::FXMMATRIX viewProj);
+    /// One undo step setting a point's row (nullopt removes it). Table kinds need the database and reload over SOAP.
+    void CommitPoi(PoiKind kind, uint32_t id, const std::optional<Poi>& after, const std::string& label);
+    /// FlyTo the point (gossip points: on the open map; no height: above the ground).
+    void FlyToPoi(const Poi& p);
+    /// Landmarks of another version standing on `cells`: AreaPOI rows of map folder `mapDir` in `chain` (any client build),
+    /// as TerrainClipboard::pois relative to grid cell (originX, originZ). Empty for the open map itself.
+    nlohmann::json VersionPois(const MpqChain& chain, const std::string& mapDir, const std::set<std::pair<int, int>>& cells, int originX, int originZ) const;
+    /// AreaPOI rows (applied changes, for the caller's undo step) for pasted landmarks (world positions) the open map lacks:
+    /// one of the same name within 150 yards counts as there already.
+    std::vector<Change> AddPastedPois(const nlohmann::json& pois, const std::string& label);
+    /// Points of the listed kind on the open map (gossip points: all of them), cached.
+    const std::vector<Poi>& PoisOnMap() const;
+    /// Where a point stands, editor axes: its own height, or the ground's when it has none (gossip points); nullopt when
+    /// that ground is not loaded.
+    std::optional<DirectX::XMFLOAT3> PoiPoint(const Poi& p) const;
+    /// An icon of Interface\Minimap\POIIcons as an ImGui image; false when the texture is missing.
+    bool PoiIcon(uint32_t icon, float size);
+    /// Project rows inside the ranges, tele names used twice, gossip points no gossip option shows.
+    void CheckPois(std::vector<Problem>& problems);
 
     // populate: creature waypoint paths (AppPaths.cpp)
     CreaturePath PathOf() { return { m_creatures, m_waypoints, m_addons }; }
@@ -205,8 +237,6 @@ private:
     void DeletePathPoint();
     /// The selected point onto the terrain under it.
     void DropPathPoint();
-    /// Translate handles on the selected path point; true while the cursor is on them (the viewport then ignores clicks).
-    bool UpdatePathGizmo(const ImVec2& origin, const ImVec2& size);
     /// Solid spheres for the shown path's points and the walk preview ball.
     void BuildPathSolids(std::vector<LineVertex>& triangles) const;
     /// Centre of a point's sphere (it sits on the point).
@@ -294,11 +324,92 @@ private:
     const AdtChunk* ShownChunk(ChunkRef ref) const;
     /// Places the armed catalog model at the cursor; keeps it armed with Shift.
     void PlaceFromCatalog(bool keepArmed);
-    /// Move / rotate / scale handles on the selected objects; true while the mouse is over or dragging one.
+    // Move, rotate and scale (AppTransform.cpp): one set of handles, keys and panel controls for every tool whose
+    // selection can be moved. A tool takes part by returning its selection from ActiveTransform; a future tool that
+    // moves things adds a case there and gets the same handles, snapping, keys and undo for free.
+
+    /// The active tool's selection as the shared move / rotate / scale controls see it.
+    struct Transformable
+    {
+        bool rotate = true, yawOnly = false;              // rotation: none, about the vertical only, or free
+        enum class Scale { None, Uniform, Axes } scale = Scale::None;
+        DirectX::XMFLOAT4X4 frame{};                      // the handles: the item's own frame (one item) or the selection's centre
+        std::string what;                                 // "3 creature(s)": for undo labels
+        std::string limits;                               // why rotate / scale are limited ("creatures turn about the vertical only")
+        std::function<void()> begin;                      // a change starts: remember the items as they are
+        std::function<void(DirectX::FXMMATRIX delta)> preview;   // live: each item = as it was at begin, then `delta` (editor space)
+        std::function<void(const std::string& label)> commit;    // the change ends: one undo step
+        std::function<void()> cancel;                     // drop the preview
+        std::function<void()> ground;                     // every item onto the ground, one undo step (null: not offered)
+        std::function<void()> remove;                     // delete the selection (null: not offered)
+    };
+    /// The active tool's selection, if it has one that can be moved.
+    std::optional<Transformable> ActiveTransform();
+    /// Whether the tool moves things with the shared controls (1 / 2 / 3 pick the handle, not a sculpt brush).
+    bool TransformTool() const { return m_tool == Tool::Objects || SpawnTool() || m_tool == Tool::Triggers || m_tool == Tool::Pois || m_tool == Tool::Flights; }
+    /// Move / rotate / scale handles on the selection; true while the mouse is over or dragging one.
     bool UpdateGizmo(const ImVec2& origin, const ImVec2& size);
-    bool UpdateObjectGizmo(const ImVec2& origin, const ImVec2& size);
-    /// The handles' frame: the object's own (one object) or the selection's centre (several).
+    /// begin, preview(delta), commit in one go: keys, Alt+click and typed values.
+    void ApplyTransform(const Transformable& t, DirectX::FXMMATRIX delta, const std::string& label);
+    /// 1 / 2 / 3 handle, X world / local, PgUp / PgDn height, + / - scale, G ground, Del delete.
+    void TransformKeys();
+    /// Alt+click: the selection's handle point goes to `at`, the items keep their layout.
+    void MoveSelectionTo(const DirectX::XMFLOAT3& at);
+    /// Handle mode, world / local and snapping, plus what the selection allows; at the top of each tool's selection panel.
+    void DrawTransformBar(float width);
+    /// Viewport caption hint for the shared keys.
+    std::string TransformHint() const;
+    /// The objects' handle frame: the object's own (one object) or the selection's centre (several).
     DirectX::XMFLOAT4X4 GizmoFrame() const;
+    std::optional<Transformable> ObjectTransform();
+    std::optional<Transformable> SpawnTransform();
+    std::optional<Transformable> TriggerTransform();
+    std::optional<Transformable> PoiTransform();
+    std::optional<Transformable> PathPointTransform();
+    std::optional<Transformable> FlightTransform();
+
+    // regions: flight paths: taxi nodes, the paths between them and their points (AppFlights.cpp)
+    void DrawFlightsPanel(float width);
+    /// Flights tool in the viewport: click picks a node or a path point, a click on the ground with a point selected
+    /// inserts one after it, an armed pick places a node.
+    void FlightsViewport(const ImVec2& origin, const ImVec2& size, DirectX::FXMMATRIX viewProj);
+    void BuildFlightOverlay(std::vector<LineVertex>& lines) const;
+    void BuildFlightSolids(std::vector<LineVertex>& triangles) const;
+    void DrawFlightLabels(ImDrawList* dl, const ImVec2& origin, const ImVec2& size, DirectX::FXMMATRIX viewProj) const;
+    /// DBC rows set (null: removed) as one undo step; rows that do not change are left out.
+    void CommitDbc(std::vector<std::tuple<DbcTable*, uint32_t, nlohmann::json>> rows, const std::string& label);
+    /// `count` ids of `table` free in the project's range `kind` (fewer when it runs out).
+    std::vector<uint32_t> FreeDbcIds(const DbcTable& table, const std::string& kind, size_t count);
+    /// Nodes on the open map and the paths with a point on it or an end at one of them.
+    struct FlightView { std::vector<TaxiNode> nodes; std::vector<TaxiPath> paths; };
+    const FlightView& FlightsOnMap() const;
+    /// A flight master of the open map (creature with npcflag 0x2000) and the node it serves per team, as AzerothCore
+    /// picks it: the nearest node on the map with a mount for that team ([0] Horde, [1] Alliance; 0 = none).
+    struct FlightMaster { uint32_t guid = 0; std::string name; DirectX::XMFLOAT3 pos{}; uint32_t node[2] = {}; };
+    /// Reads the open map's flight masters again when the map, connection or project changes.
+    void RefreshFlightMasters();
+    /// A node and every path end that sat on it (within 30 yards), moved by `delta` (editor space), as one undo step.
+    void CommitNodeMove(const TaxiNode& before, const TaxiNode& after, const std::string& label);
+    /// Paths from `from` to `to` (and back when `both`) with planned points.
+    void CreateFlightPath(uint32_t from, uint32_t to, bool both);
+    /// What a new flight must clear at a spot (server x, y): the ground (or the map's low-detail heights where tiles are not
+    /// loaded) and the top of any loaded building, tree or other model there.
+    std::optional<float> FlightFloor(float x, float y) const;
+    /// How flights leave `node`, copied from its existing paths (their first ~200 yards, or the last of those arriving,
+    /// reversed): the one heading most towards `other`; empty when no path touches the node.
+    std::vector<TaxiPoint> FlightDeparture(const TaxiNode& node, const TaxiNode& other) const;
+    /// Deletes a path and its points, or a node with every path from or to it.
+    void DeleteFlightPath(uint32_t path);
+    void DeleteFlightNode(uint32_t node);
+    /// Inserts a point after point `after` of the selected path; removes point `index`.
+    void InsertFlightPoint(size_t after, const DirectX::XMFLOAT3& at);
+    void DeleteFlightPoint(size_t index);
+    /// The selected path's points (empty when none).
+    const std::vector<TaxiPoint>& FlightPoints() const;
+    /// Ids, nodes no team can fly from or no flight master serves, paths that do not start and end on their nodes.
+    void CheckFlights(std::vector<Problem>& problems);
+    /// The zone and area of the chunk a spawn stands on.
+    void SetSpawnArea(Spawn& s) const;
     /// Grid cell the clipboard's first chunk goes to so the copied area is centred on the hovered chunk.
     std::pair<int, int> PasteAnchor() const;
     /// Tiles the clipboard would touch at the current anchor, blend band included (kept loaded while placing).
@@ -330,6 +441,7 @@ private:
     Camera m_camera;
     int m_loadRadius = 2;
     std::optional<int> m_focusTile;   // tile key whose height the camera snaps to once it streams in
+    std::optional<std::pair<float, float>> m_flyGround;   // FlyTo: editor x, z whose ground height the camera takes once loaded
     DrawOptions m_drawOptions;
     Tool m_tool = Tool::Sculpt;
     Brush m_brush;
@@ -341,7 +453,14 @@ private:
     Gizmo m_gizmo = Gizmo::Move;
     bool m_gizmoLocal = false, m_gizmoSnap = false;    // Ctrl inverts snapping while dragging a handle
     float m_snapMove = 1.0f, m_snapRotate = 15.0f, m_snapScale = 0.1f;
-    bool m_gizmoActive = false;                         // a handle is being dragged (one object edit)
+    bool m_gizmoActive = false;                         // a handle is being dragged (one edit)
+    std::function<void()> m_gizmoCancel;                // the dragged selection's cancel, should the tool change mid-drag
+    std::map<uint32_t, Spawn> m_spawnStart, m_spawnPreview;   // spawns being moved: as they were, as they show now (by guid)
+    Trigger m_triggerStart;                             // the trigger being moved, as it was
+    Poi m_poiStart;                                     // the point being moved, as it was
+    std::optional<DirectX::XMFLOAT3> m_poiStartPoint;   // where it stood (editor axes)
+    PathPoint m_pathStart;                              // the path point being moved, as it was
+    bool m_fieldEditing = false;                        // a panel position / facing field is previewing (commits on release)
     bool m_carryInside = true;                          // map doodads inside a moved building move with it
     std::set<ObjectRef> m_gizmoRiders;                  // those doodads, for the drag in progress
     DirectX::XMFLOAT4X4 m_gizmoMatrix{}, m_gizmoStart{};
@@ -509,7 +628,6 @@ private:
     std::map<int, size_t> m_spawnEvents;                 // events of the spawns around the camera -> spawn count
     std::optional<std::map<int, std::string>> m_eventNames;   // game_event descriptions, loaded on first use
     std::optional<SpawnAdapter::Template> m_spawnArmed;  // template placed by clicking the ground
-    std::optional<float> m_spawnPending;                 // facing being dragged, committed on release
     std::string m_spawnQuery;
     std::vector<SpawnAdapter::Template> m_spawnResults;
     DisplayLooks m_looks{ m_mpq };                       // display ids -> models (client DBCs)
@@ -555,6 +673,49 @@ private:
     mutable std::pair<uint32_t, uint64_t> m_triggerViewKey{ ~0u, ~0ull };   // map + AreaTrigger version it was made for
     std::string m_entranceKey;                            // map + revision + connection m_entranceInstance was read for
     std::vector<nlohmann::json> m_entranceInstance;       // instance_template row of the Entrance tab's map
+    AreaPoiAdapter m_areaPois{ m_mpq, m_store };          // AreaPOI.dbc: world map landmarks
+    TableRowsAdapter m_gossipPois{ m_store, "points_of_interest", "ID" }, m_teles{ m_store, "game_tele", "id" };
+    PoiKind m_poiKind = PoiKind::MapIcon;                 // POIs tool: the kind listed, placed and selected
+    uint32_t m_poiSel = 0;                                // selected point id of m_poiKind (0 = none)
+    std::optional<uint32_t> m_poiHover;
+    bool m_poiShowSelected = false;                       // bring the Selected tab forward (a viewport pick; not a list click)
+    enum class PoiPick { None, Place, Move };
+    PoiPick m_poiPick = PoiPick::None;                    // what the next click on the ground does
+    Poi m_poiNew;                                         // New tab: fields of the next point placed (per kind on switch)
+    Poi m_poiEdit;                                        // Selected tab: the selected point being edited
+    std::pair<int, uint32_t> m_poiEditKey{ -1, 0 };       // kind + id m_poiEdit was read from
+    uint64_t m_poiEditRevision = ~0ull;
+    std::string m_poiFilter;
+    std::string m_poiUsesKey;                             // id + revision m_poiUses was read for
+    std::vector<std::string> m_poiUses;                   // gossip options showing the selected gossip point
+    mutable std::vector<Poi> m_poiView;
+    mutable std::string m_poiViewKey;                     // kind, map, revision, AreaPOI version, connection
+    TaxiNodesAdapter m_taxiNodes{ m_mpq, m_store };      // TaxiNodes.dbc: flight points
+    TaxiPathAdapter m_taxiPaths{ m_mpq, m_store };       // TaxiPath.dbc: one way between two of them
+    TaxiPathNodeAdapter m_taxiPoints{ m_mpq, m_store };  // TaxiPathNode.dbc: the points a path flies through
+    uint32_t m_flightNode = 0, m_flightPath = 0;         // selected node, or selected path (one at a time)
+    std::optional<size_t> m_flightPoint;                 // selected point of the selected path (index)
+    struct FlightHit { uint32_t node = 0, path = 0; size_t point = 0; };
+    std::optional<FlightHit> m_flightHover;
+    bool m_flightPlace = false;                          // the next click on the ground places a node
+    bool m_flightShowSelected = false;                   // bring the Selected tab forward (a viewport pick)
+    TaxiNode m_flightNew;                                // New tab: the next node's name and mounts
+    uint32_t m_flightTo = 0;                             // Selected node: the node a new path goes to
+    bool m_flightBoth = true;                            // ... and a path back
+    int m_flightCost = 100;                              // ... costing this much copper
+    float m_flightCruise = 40;                           // ... flying this high above the ground
+    bool m_flightAll = true;                             // draw every path of the map, not only the selected one
+    TaxiNode m_flightNodeStart;                          // being moved: as it was
+    TaxiPoint m_flightPointStart;
+    std::optional<TaxiNode> m_flightNodePreview;         // being moved: as it shows now
+    std::optional<TaxiPoint> m_flightPointPreview;
+    std::string m_flightFilter;
+    std::vector<FlightMaster> m_flightMasters;
+    std::string m_flightMastersKey;                      // map, connection and revision they were read for
+    mutable FlightView m_flightView;
+    mutable std::string m_flightViewKey;
+    mutable std::vector<std::vector<int16_t>> m_flightWdl;   // the open map's WDL (FlightFloor where tiles are not loaded)
+    mutable std::string m_flightWdlMap;
     float m_portalScale = 1;                              // Catalog > Portal effects: scale of the next one placed
     std::vector<std::string> m_portalModels;              // Catalog > Portal effects: the models offered
     size_t m_portalModelsKey = ~size_t(0);                // catalog doodad count they were found for

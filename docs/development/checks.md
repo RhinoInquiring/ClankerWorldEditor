@@ -62,6 +62,9 @@ Direct3D device. Checks that write files use a temporary folder and remove it.
 | `--unit-catalog-check <server folder> <Data>` | Every creature and gameobject template and its model |
 | `--area-check <Data>` | AreaTable, WMOAreaTable and world map adapters on the real DBCs |
 | `--triggers-check <Data>` | AreaTrigger.dbc and Map.dbc adapters on the real DBCs: layout, shapes, export changes only the edited fields |
+| `--poi-check <Data> [<AC server dir>]` | AreaPOI.dbc adapter on the real DBC (row stats, export changes only the edited fields); with a server, game_tele and points_of_interest rows written, read back, undone |
+| `--poi-read <Data> <map folder>` | The landmarks a client of any build (1.x, 2.x, 3.3.5) has on a map, as copies from that version pick them up |
+| `--taxi-check <Data>` | TaxiNodes / TaxiPath / TaxiPathNode on the real DBCs (ids, mounts, path ends on their nodes), a planned path, add + move + export round trip |
 
 ## Tools
 

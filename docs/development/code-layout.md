@@ -26,9 +26,11 @@ format code never touches the GPU; the `App*` files are the UI.
 | `src/Blueprint.*` | Blueprints on disk |
 | `src/Areas.*` | DBC row adapters: AreaTable, WMOAreaTable, WorldMapArea, WorldMapOverlay |
 | `src/Spawns.*` | Creature and gameobject spawns in the world database, SQL export |
-| `src/Tables.*` | Rows-by-key adapter: waypoint_data, creature_addon, areatrigger, areatrigger_teleport, instance_template |
+| `src/Tables.*` | Rows-by-key adapter: waypoint_data, creature_addon, areatrigger, areatrigger_teleport, instance_template, points_of_interest, game_tele |
 | `src/Paths.*` | A creature's waypoint path as one change |
 | `src/Triggers.*` | Area triggers (shape, inside test, ray hit), teleports, AreaTrigger.dbc and Map.dbc corpse entrance adapters |
+| `src/Pois.*` | Points of interest (landmark, gossip point, teleport) and their rows; AreaPOI.dbc adapter |
+| `src/Flights.*` | Taxi node, path and point rows; TaxiNodes / TaxiPath / TaxiPathNode adapters; planning a new path |
 
 ## Versions
 
@@ -64,8 +66,20 @@ format code never touches the GPU; the `App*` files are the UI.
 | `src/AppPopulate.cpp` | Creatures and Gameobjects tools, unit catalog |
 | `src/AppPaths.cpp` | Path editing |
 | `src/AppZones.cpp` | Zones tool, buildings' room names |
+| `src/AppTransform.cpp` | Shared move / rotate / scale: each tool's selection as a `Transformable`, the gizmo, keys, Alt+click move, transform bar |
 | `src/AppTriggers.cpp` | Triggers tool: triggers, teleports, entrances, their checks |
+| `src/AppPois.cpp` | POIs tool: landmarks, gossip points, teleports, their checks |
+| `src/AppFlights.cpp` | Flights tool: nodes, paths, points, flight masters, their checks |
 | `src/AppWorldMap.cpp` | World map drawing |
 | `src/AppInspect.cpp` | Inspector |
 | `src/AppServer.cpp` | Server setup, Server panel, Problems |
 | `src/main.cpp` | Window and device, frame loop, the [command-line checks](checks.md) |
+
+## Adding a tool that moves things
+
+Do not write a gizmo, nudge keys or an Apply button for it. Return its selection from `App::ActiveTransform`
+(`AppTransform.cpp`) as a `Transformable`: the handles' frame, what it allows (rotate free / vertical only, scale
+none / uniform / per axis, with a `limits` note), and `begin` / `preview(delta)` / `commit` / `cancel` / `ground` /
+`remove`. Add the tool to `TransformTool()`, call `DrawTransformBar` at the top of its selection panel, and make its
+fields preview live and save when let go (no Apply). It then gets the same handles, snapping, keys, Alt+click move,
+caption and undo as every other tool. `TransformSelfTest` (in `--selftest`) covers the shared math.

@@ -176,27 +176,6 @@ void App::PathViewport(const ImVec2& origin, const ImVec2& size, FXMMATRIX viewP
     }
 }
 
-bool App::UpdatePathGizmo(const ImVec2& origin, const ImVec2& size)
-{
-    PathPoint& p = m_path->points[*m_path->sel];
-    ImGuizmo::SetDrawlist(ImGui::GetWindowDrawList());
-    ImGuizmo::SetRect(origin.x, origin.y, size.x, size.y);
-    ImGuizmo::SetOrthographic(false);
-    XMFLOAT4X4 view, proj, frame;
-    XMStoreFloat4x4(&view, m_camera.View());
-    XMStoreFloat4x4(&proj, XMMatrixPerspectiveFovRH(XMConvertToRadians(60.0f), size.x / size.y, 1.0f, 6000.0f));
-    const XMFLOAT3 at = Editor(p);
-    XMStoreFloat4x4(&frame, XMMatrixTranslation(at.x, at.y, at.z));
-    const bool snapping = m_gizmoSnap != ImGui::GetIO().KeyCtrl;
-    const float snap[3] = { m_snapMove, m_snapMove, m_snapMove };
-    if (ImGuizmo::Manipulate(&view._11, &proj._11, ImGuizmo::TRANSLATE, ImGuizmo::WORLD, &frame._11, nullptr, snapping ? snap : nullptr))
-    {
-        EditorToServer({ frame._41, frame._42, frame._43 }, p.x, p.y, p.z);
-        m_path->dirty = true;
-    }
-    return ImGuizmo::IsUsing() || ImGuizmo::IsOver();
-}
-
 void App::DropPathPoint()
 {
     if (!m_path || !m_path->sel || *m_path->sel >= m_path->points.size()) return;
@@ -319,6 +298,7 @@ void App::DrawPathPanel(float w)
     }
     PathEdit& e = *m_path;
     ImGui::TextColored(kWarn, "Editing the path of %s", e.name.c_str());
+    DrawTransformBar(w);   // the selected point: the same handles and keys as everything else that moves
     ImGui::TextColored(kQuiet, "Click the ground: add a point after the selected one\nClick a ball: select it; the handles move it (Ctrl snaps)\n"
                                "G: drop it to the ground   Del: delete it\nEnter: save   Esc: cancel");
     ImGui::Checkbox("Walk preview", &m_pathPreview);

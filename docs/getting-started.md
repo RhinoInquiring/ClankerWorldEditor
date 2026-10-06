@@ -58,7 +58,7 @@ Tools are grouped; **F1 to F4** switch groups, and each group remembers its last
 | F1 Terrain | Select (V), Sculpt (B), Paint (T), Holes (H), Copy (C) |
 | F2 Objects | Objects (O) |
 | F3 Units | Creatures (N), Gameobjects (I) |
-| F4 Regions | Zones (Z), Triggers (K) |
+| F4 Regions | Zones (Z), Triggers (K), POIs (J), Flights (Y) |
 
 ## Camera
 

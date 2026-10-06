@@ -46,12 +46,15 @@ add_executable(wow-world-editor WIN32
     src/AppPopulate.cpp
     src/AppCompare.cpp
     src/AppDifferences.cpp
+    src/AppFlights.cpp
     src/Differences.cpp
     src/AppInspect.cpp
     src/AppPaths.cpp
+    src/AppPois.cpp
     src/AppServer.cpp
     src/AppSources.cpp
     src/AppWorldMap.cpp
+    src/AppTransform.cpp
     src/AppTriggers.cpp
     src/AppZones.cpp
     src/Areas.cpp
@@ -60,6 +63,7 @@ add_executable(wow-world-editor WIN32
     src/Blueprint.cpp
     src/Catalog.cpp
     src/Changes.cpp
+    src/Flights.cpp
     src/Formats.cpp
     src/Ghosts.cpp
     src/Loader.cpp
@@ -74,6 +78,7 @@ add_executable(wow-world-editor WIN32
     src/Spawns.cpp
     src/Tables.cpp
     src/Paths.cpp
+    src/Pois.cpp
     src/Terrain.cpp
     src/Triggers.cpp)
 target_compile_definitions(wow-world-editor PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)

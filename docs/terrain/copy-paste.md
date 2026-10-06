@@ -40,6 +40,8 @@ the client never shows a gap. **Problems** reports any open edge left anyway.
 Objects standing on the copied chunks come along, keeping their place on the copy, turned with it, and get fresh
 unique ids. In the Copy tool an object belongs to the chunk its origin stands on, so copying one chunk of a city does
 not drag the whole city model along. ([Compare](../versions/compare.md) uses buildings' bounds instead.)
+Copied from another version (a ghost layer), the [landmarks](../regions/pois.md#landmarks-from-other-versions) on the
+copied chunks come along too, with **Objects**.
 
 ## Rotate in place
 

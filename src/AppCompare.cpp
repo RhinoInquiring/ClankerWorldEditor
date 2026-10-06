@@ -228,6 +228,8 @@ void App::UpdateCompare()
         m_placing = false;
         return;
     }
+    // Landmarks: the paste skips the ones the map has already (AddPastedPois).
+    clip.pois = VersionPois(m_ghosts.Chain(l->source), l->map.empty() ? m_terrain.Map() : l->map, cells, clip.originX, clip.originZ);
     // Objects: only the ones the map lacks. The rest already stand there, and pasting them would double them.
     clip.doodads.clear();
     clip.wmos.clear();

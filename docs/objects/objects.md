@@ -12,7 +12,7 @@ Click an object (picking is exact to its triangles); drag a box to select every 
 
 ## Move, turn, scale
 
-A standard gizmo sits on the selection:
+A standard gizmo sits on the selection; every tool that moves things shares it ([Moving things](../concepts/moving-things.md)):
 
 | Key | Action |
 | --- | --- |
@@ -22,6 +22,7 @@ A standard gizmo sits on the selection:
 | PgUp / PgDn | Raise / lower 1 yd (Shift: 0.1) |
 | + / - | Scale up / down (Shift: finer) |
 | G | Drop to the ground |
+| Alt+click the ground | Move the selection there |
 | Del | Delete |
 
 The **Object** panel shows and edits position, rotation and scale; a drag of any field is one undo step. Buildings

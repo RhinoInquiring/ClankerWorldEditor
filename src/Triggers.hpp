@@ -59,3 +59,5 @@ public:
 
 /// Contains and Hit against AzerothCore's formulas on synthetic triggers; false on a mismatch.
 bool TriggersSelfTest();
+/// The shared move / rotate / scale math (AppTransform.cpp): facings, trigger frames; false on a mismatch.
+bool TransformSelfTest();

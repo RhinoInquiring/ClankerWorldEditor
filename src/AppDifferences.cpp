@@ -157,8 +157,20 @@ void App::AddDifferenceTiles()
     if (!change) return;
     const size_t added = change->data.at("tiles").size();
     std::set<int> done;
-    for (const auto& e : change->data.at("tiles")) done.insert(TileKey(e[0], e[1]));
-    m_store.Commit(std::move(*change));
+    std::set<std::pair<int, int>> cells;   // every chunk of the added tiles: their landmarks come along in the same undo step
+    for (const auto& e : change->data.at("tiles"))
+    {
+        done.insert(TileKey(e[0], e[1]));
+        for (int i = 0; i < 256; ++i) cells.insert({ e[0].get<int>() * 16 + i % 16, e[1].get<int>() * 16 + i / 16 });
+    }
+    std::vector<Change> parts = AddPastedPois(VersionPois(chain, map, cells, 0, 0), change->label);
+    if (parts.empty()) m_store.Commit(std::move(*change));
+    else
+    {
+        const std::string label = change->label;
+        parts.insert(parts.begin(), std::move(*change));
+        m_store.Commit(std::move(parts), label);
+    }
     // Chunks on the added tiles are done; the rest of the area (on tiles the map had) is compared as usual.
     std::vector<std::pair<int, int>> pasted, rest;
     for (const auto& cell : m_diffPending) (done.count(TileKey(cell.first / 16, cell.second / 16)) ? pasted : rest).push_back(cell);

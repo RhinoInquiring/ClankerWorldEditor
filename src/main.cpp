@@ -23,6 +23,8 @@
 #include "Spawns.hpp"
 #include "Tables.hpp"
 #include "Terrain.hpp"
+#include "Flights.hpp"
+#include "Pois.hpp"
 #include "Triggers.hpp"
 
 #include <imgui.h>
@@ -2355,6 +2357,341 @@ namespace
     /// `--triggers-check <data dir>`: AreaTrigger.dbc and Map.dbc read through their adapters (layout, shapes), then a
     /// trigger moved and turned, one added and a corpse entrance moved, exported and read back: only those fields differ,
     /// and the mod-dbc-patch files list one add and the modifies.
+    int PoisCheck()
+    {
+        // `--poi-check <Data>`: AreaPOI.dbc read, what its client rows hold, and an edit + add round trip through export.
+        if (__argc < 3 || !__wargv) return 2;
+        setvbuf(stdout, nullptr, _IONBF, 0);
+        namespace fs = std::filesystem;
+        char buf[1024] = {};
+        WideCharToMultiByte(CP_ACP, 0, __wargv[2], -1, buf, sizeof buf, nullptr, nullptr);
+        int problems = 0;
+        auto expect = [&](bool ok, const std::string& what) { printf("  %-66s %s\n", what.c_str(), ok ? "ok" : "FAILED"); problems += !ok; };
+        MpqChain chain;
+        chain.Open(std::string(buf));
+        ChangeStore store;
+        AreaPoiAdapter pois(chain, store);
+        store.Register(pois);
+
+        const auto rows = pois.Rows();
+        std::map<uint32_t, size_t> icons, importance, flags, maps;
+        size_t mixed = 0, states = 0, links = 0, named = 0;
+        for (const auto& [id, row] : rows)
+        {
+            const Poi p = Poi::FromDbcRow(row);
+            ++icons[p.icon];
+            ++importance[p.importance];
+            ++flags[p.flags];
+            ++maps[p.map];
+            states += p.worldState != 0;
+            links += row.value("WorldMapLink", 0u) != 0;
+            named += !p.name.empty();
+            for (int i = 1; i < 9; ++i) mixed += row.value("Icon[" + std::to_string(i) + "]", 0u) != p.icon ? 1 : 0;
+        }
+        auto dump = [](const char* what, const std::map<uint32_t, size_t>& m) {
+            printf("  %s:", what);
+            for (const auto& [k, n] : m) printf(" %u:%zu", k, n);
+            printf("\n");
+        };
+        printf("  %zu rows, ids %u-%u, %zu named, %zu with a world state, %zu with a map link, %zu Icon[1-8] slots differ from Icon[0]\n", rows.size(),
+               rows.empty() ? 0 : rows.begin()->first, rows.empty() ? 0 : rows.rbegin()->first, named, states, links, mixed);
+        dump("Icon[0]", icons);
+        dump("Importance", importance);
+        dump("Flags", flags);
+        dump("maps", maps);
+        int shown = 0;
+        for (const auto& [id, row] : rows)
+            if (!row.value("WorldStateID", 0u) && shown++ < 8)
+            {
+                printf("  #%u %s pos %.1f %.1f %.1f area %u ws %u imp %u flags %u icons", id, row.value("Name_lang", std::string()).c_str(), row.value("Pos[0]", 0.0f), row.value("Pos[1]", 0.0f), row.value("Pos[2]", 0.0f), row.value("AreaID", 0u), row.value("WorldStateID", 0u),
+                       row.value("Importance", 0u), row.value("Flags", 0u));
+                for (int i = 0; i < 9; ++i) printf(" %u", row.value("Icon[" + std::to_string(i) + "]", 0u));
+                printf("\n");
+            }
+        for (const auto& [id, row] : rows)
+            if (row.value("WorldStateID", 0u))
+            {
+                printf("  e.g. #%u %s ws %u icons", id, row.value("Name_lang", std::string()).c_str(), row.value("WorldStateID", 0u));
+                for (int i = 0; i < 9; ++i) printf(" %u", row.value("Icon[" + std::to_string(i) + "]", 0u));
+                printf("\n");
+                break;
+            }
+        expect(rows.size() > 50 && named * 10 >= rows.size() * 9, "AreaPOI.dbc read, rows named");
+
+        const nlohmann::json first = rows.begin()->second;
+        Poi moved = Poi::FromDbcRow(first);
+        moved.x += 10;
+        moved.name = "Moved landmark";
+        pois.Commit(moved.id, moved.ToDbcRow(first), "move");
+        Poi added = moved;
+        added.id = 60000;
+        added.name = "New landmark";
+        added.description = "A test";
+        pois.Commit(added.id, added.ToDbcRow(pois.NewRow()), "add");
+        expect(Poi::FromDbcRow(pois.Row(60000)).description == "A test" && pois.Row(60000)["Name_lang_flags"] == first["Name_lang_flags"],
+               "added row: fields and the client's string flags");
+
+        const fs::path t = fs::temp_directory_path() / "wow-world-editor-poicheck";
+        std::error_code ec;
+        fs::remove_all(t, ec);
+        std::string error;
+        expect(pois.Export({ t / "dbc" }, t / "patch", error), "exported " + error);
+        Dbc a, b;
+        std::ifstream f(t / "dbc" / "AreaPOI.dbc", std::ios::binary);
+        std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(f)), {});
+        if (a.Load(*chain.Read("DBFilesClient\\AreaPOI.dbc")) && b.Load(bytes))
+        {
+            size_t differ = 0;
+            for (uint32_t r = 0; r < a.Rows(); ++r)
+                if (const auto rb = b.Find(a.U32(r, 0)))
+                    for (uint32_t c = 0; c < 54; ++c)
+                        if (a.U32(r, c) != b.U32(*rb, c) && !(a.U32(r, 0) == moved.id && (c == 12 || c == 18)) && ++differ < 5) printf("  differs: #%u field %u: %u -> %u\n", a.U32(r, 0), c, a.U32(r, c), b.U32(*rb, c));
+            const auto row = b.Find(60000);
+            expect(b.Rows() == a.Rows() + 1 && differ == 0 && row && b.Str(*row, 35) == "A test" && b.Str(*b.Find(moved.id), 18) == "Moved landmark",
+                   "AreaPOI.dbc: one row added, only x and name of the moved one differ");
+        }
+        else expect(false, "AreaPOI.dbc read back");
+        fs::remove_all(t, ec);
+
+        // `--poi-check <Data> <AC server dir>`: game_tele and points_of_interest rows written, read back, undone.
+        if (__argc >= 4)
+        {
+            std::string password, note;
+            const auto profile = ServerProfile::FromWorldserverConf(fs::path(__wargv[3]), password, note);
+            Db db;
+            if (!profile || !db.Connect(profile->dbHost, profile->dbPort, profile->dbUser, password, profile->worldDb, error))
+            {
+                printf("db: %s%s\n", note.c_str(), error.c_str());
+                return 1;
+            }
+            TableRowsAdapter teles(store, "game_tele", "id"), gossip(store, "points_of_interest", "ID");
+            store.Register(teles);
+            store.Register(gossip);
+            teles.SetDb(&db);
+            gossip.SetDb(&db);
+            for (const PoiKind kind : { PoiKind::Tele, PoiKind::Gossip })
+            {
+                TableRowsAdapter& table = kind == PoiKind::Tele ? teles : gossip;
+                const std::string name = kind == PoiKind::Tele ? "game_tele" : "points_of_interest";
+                const auto taken = db.Query("SELECT COUNT(*) FROM " + name + " WHERE " + (kind == PoiKind::Tele ? "id" : "ID") + " = 60999", error);
+                if (!taken || (*taken)[0][0] != "0") { expect(false, name + " id 60999 is free for the test"); continue; }
+                Poi p;
+                p.kind = kind;
+                p.id = 60999;
+                p.map = 0;
+                p.x = -8913.5f; p.y = -136.25f; p.z = 82.5f; p.o = 1.5f;
+                p.name = "WweCheck";
+                p.icon = 7; p.flags = 99;
+                const nlohmann::json row = kind == PoiKind::Tele ? p.ToTeleRow() : p.ToGossipRow();
+                Change c = table.MakeChange(p.id, {}, { row }, "add");
+                table.Apply(c);
+                store.Commit(std::move(c));
+                const auto back = table.Rows(p.id);
+                table.SetDb(nullptr);   // Rows from the database, not the project
+                table.SetDb(&db);
+                const auto rows = db.QueryRows("SELECT * FROM " + name + " WHERE " + (kind == PoiKind::Tele ? "id" : "ID") + " = 60999", error);
+                const bool same = rows && rows->size() == 1 &&
+                                  (kind == PoiKind::Tele ? Poi::FromTeleRow((*rows)[0]).ToTeleRow() == row : Poi::FromGossipRow((*rows)[0]).ToGossipRow() == row);
+                expect(back.size() == 1 && same && table.LastError().empty(), name + ": added row reads back the same " + table.LastError());
+                store.Undo();
+                const auto gone = db.Query("SELECT COUNT(*) FROM " + name + " WHERE " + (kind == PoiKind::Tele ? "id" : "ID") + " = 60999", error);
+                expect(gone && (*gone)[0][0] == "0", name + ": undo removes it");
+            }
+        }
+        printf("poi check: %d problem(s)\n", problems);
+        return problems ? 1 : 0;
+    }
+
+    int TaxiCheck()
+    {
+        // `--taxi-check <Data>`: the taxi DBCs read, what Blizzard's rows hold (ids, mounts), a planned path, and a node +
+        // path + points added and moved, exported, read back.
+        if (__argc < 3 || !__wargv) return 2;
+        setvbuf(stdout, nullptr, _IONBF, 0);
+        namespace fs = std::filesystem;
+        char buf[1024] = {};
+        WideCharToMultiByte(CP_ACP, 0, __wargv[2], -1, buf, sizeof buf, nullptr, nullptr);
+        int problems = 0;
+        auto expect = [&](bool ok, const std::string& what) { printf("  %-66s %s\n", what.c_str(), ok ? "ok" : "FAILED"); problems += !ok; };
+        MpqChain chain;
+        chain.Open(std::string(buf));
+        ChangeStore store;
+        TaxiNodesAdapter nodes(chain, store);
+        TaxiPathAdapter paths(chain, store);
+        TaxiPathNodeAdapter points(chain, store);
+        store.Register(nodes);
+        store.Register(paths);
+        store.Register(points);
+
+        const auto all = nodes.All();
+        std::map<std::pair<uint32_t, uint32_t>, size_t> mounts;
+        uint32_t maxNode = 0, free = 0;
+        std::set<uint32_t> used;
+        for (const TaxiNode& n : all) { used.insert(n.id); maxNode = std::max(maxNode, n.id); ++mounts[{ n.mount[0], n.mount[1] }]; }
+        for (uint32_t i = 1; i <= kTaxiMaxNode; ++i) free += !used.count(i);
+        printf("  %zu nodes, max id %u, %u free ids <= %u\n  mounts (horde, alliance):", all.size(), maxNode, free, kTaxiMaxNode);
+        for (const auto& [m, count] : mounts) if (count > 4) printf(" %u/%u x%zu", m.first, m.second, count);
+        printf("\n");
+        for (const TaxiNode& n : all)
+            if (n.id == 2 || n.id == 23) printf("  node %u %s map %u (%.1f %.1f %.1f) mounts %u/%u\n", n.id, n.name.c_str(), n.map, n.x, n.y, n.z, n.mount[0], n.mount[1]);
+        const auto allPaths = paths.All();
+        const auto& byPath = points.ByPath();
+        uint32_t maxPath = 0, maxPoint = 0;
+        size_t pointCount = 0, maxLen = 0;
+        for (const TaxiPath& p : allPaths) maxPath = std::max(maxPath, p.id);
+        for (const auto& [path, list] : byPath) { pointCount += list.size(); maxLen = std::max(maxLen, list.size()); for (const TaxiPoint& p : list) maxPoint = std::max(maxPoint, p.id); }
+        printf("  %zu paths (max id %u), %zu points (max id %u), longest path %zu points\n", allPaths.size(), maxPath, pointCount, maxPoint, maxLen);
+        expect(all.size() > 100 && allPaths.size() > 500 && pointCount > 5000, "taxi DBCs read");
+        size_t starts = 0, ends = 0, checked = 0;   // do Blizzard's paths start and end on their nodes?
+        std::map<uint32_t, TaxiNode> byId;
+        for (const TaxiNode& n : all) byId[n.id] = n;
+        for (const TaxiPath& p : allPaths)
+            if (const auto it = byPath.find(p.id); it != byPath.end() && byId.count(p.from) && byId.count(p.to) && it->second.size() > 1)
+            {
+                ++checked;
+                const TaxiPoint &a = it->second.front(), &b = it->second.back();
+                starts += std::hypot(a.x - byId[p.from].x, a.y - byId[p.from].y) < 30;
+                ends += std::hypot(b.x - byId[p.to].x, b.y - byId[p.to].y) < 30;
+            }
+        printf("  of %zu paths: %zu start within 30 yd of their node, %zu end within 30 yd of theirs\n", checked, starts, ends);
+        if (getenv("WWE_TAXI_SHAPES"))   // how Blizzard's flights leave a node: horizontal distance / height above it, per point
+            for (const TaxiPath& p : allPaths)
+                if (p.from == 2 || p.from == 23)
+                    if (const auto it = byPath.find(p.id); it != byPath.end())
+                    {
+                        printf("  path %u from %u:", p.id, p.from);
+                        for (size_t i = 0; i < std::min<size_t>(10, it->second.size()); ++i)
+                            printf(" %.0f/%.0f", std::hypot(it->second[i].x - byId[p.from].x, it->second[i].y - byId[p.from].y), it->second[i].z - byId[p.from].z);
+                        printf("\n");
+                    }
+
+        // Planned paths: as few points as will do, never under what they must clear (synthetic ground, 40 yd clearance).
+        const TaxiNode a{ 1, 0, 0, 0, 0 };
+        auto flat = [](float, float) { return std::optional<float>(0.0f); };
+        // Every leg, sampled, over max(floor + 5 (less while climbing off an end), min(floor + 40, the climb off either end)).
+        auto clears = [](const std::vector<TaxiPoint>& route, const std::function<std::optional<float>(float, float)>& floor) {
+            const float total = std::hypot(route.back().x - route.front().x, route.back().y - route.front().y);
+            for (size_t i = 0; i + 1 < route.size(); ++i)
+                for (int k = 0; k <= 40; ++k)
+                {
+                    const float t = k / 40.0f, x = route[i].x + (route[i + 1].x - route[i].x) * t, z = route[i].z + (route[i + 1].z - route[i].z) * t;
+                    const float d = x - route.front().x, under = *floor(x, 0);
+                    if (d < 1 || d > total - 1) continue;   // the nodes themselves stand where they stand
+                    const float climb = std::min(route.front().z + 0.5f * d, route.back().z + 0.5f * (total - d));
+                    if (const float want = std::max(under + std::min(5.0f, 0.5f * std::min(d, total - d)), std::min(under + 40, climb)); z < want - 0.01f)
+                    {
+                        if (getenv("WWE_TAXI_SHAPES")) printf("    under at x %.1f: %.2f < %.2f (leg %zu of %zu)\n", x, z, want, i, route.size());
+                        return false;
+                    }
+                }
+            return true;
+        };
+        {
+            const TaxiNode b{ 2, 0, 300, 0, 0 };
+            const auto plan = PlanTaxiPoints(a, b, 40, flat);
+            expect(plan.size() == 4 && plan.front().z == 0 && plan.back().x == 300 && plan.back().index == 3 && clears(plan, flat),
+                   "flat ground: climb, one level leg, descend (" + std::to_string(plan.size()) + " points)");
+            // High nodes over a valley: nothing to clear, one straight leg.
+            const TaxiNode high{ 1, 0, 0, 0, 100 }, high2{ 2, 0, 500, 0, 100 };
+            expect(PlanTaxiPoints(high, high2, 40, flat).size() == 2, "nothing in the way: a single straight leg");
+        }
+        {
+            // A 300 yd tall building between x 140 and 160: cleared on every leg, still few points.
+            auto floor = [](float x, float) { return std::optional<float>(x >= 140 && x <= 160 ? 300.0f : 0.0f); };
+            const TaxiNode distant{ 2, 0, 600, 0, 0 };
+            const auto over = PlanTaxiPoints(a, distant, 40, floor);
+            expect(clears(over, floor) && over.size() <= 5, "a building in the way is cleared (" + std::to_string(over.size()) + " points)");
+            // A rounded hill 150 yd high: cleared with a handful of points, not one per sample.
+            auto hill = [](float x, float) { return std::optional<float>(150.0f * std::exp(-(x - 300) * (x - 300) / (2 * 80.0f * 80.0f))); };
+            const auto across = PlanTaxiPoints(a, distant, 40, hill);
+            expect(clears(across, hill) && across.size() <= 6, "a rounded hill is cleared with few points (" + std::to_string(across.size()) + ")");
+            // Copied takeoff and landing are kept, less their straight-through points; the middle joins them.
+            std::vector<TaxiPoint> takeoff(4), landing(2);
+            takeoff[1].x = 30; takeoff[1].y = 20; takeoff[1].z = 10;   // a bend: kept
+            takeoff[2].x = 65; takeoff[2].y = 10; takeoff[2].z = 30;   // halfway along a straight leg: dropped
+            takeoff[3].x = 100; takeoff[3].z = 50;
+            landing[0].x = 520; landing[0].z = 60; landing[1].x = 600;
+            const auto joined = PlanTaxiPoints(a, distant, 40, floor, takeoff, landing);
+            expect(joined[1].y == 20 && joined[2].x == 100 && joined[2].z == 50 && joined[joined.size() - 2].x == 520 && joined.back().x == 600 &&
+                       std::none_of(joined.begin(), joined.end(), [](const TaxiPoint& p) { return p.x == 65; }) && joined.back().index == joined.size() - 1,
+                   "copied takeoff and landing kept (straight-through points dropped), middle between them");
+            // A real departure: Blizzard's points up to the first one 200 yd out.
+            if (const auto it = byPath.find(6); it != byPath.end())
+            {
+                const auto dep = TaxiDeparture(it->second, 200);
+                const float last = std::hypot(dep.back().x - dep.front().x, dep.back().y - dep.front().y);
+                const float before = std::hypot(dep[dep.size() - 2].x - dep.front().x, dep[dep.size() - 2].y - dep.front().y);
+                expect(dep.size() >= 3 && last >= 200 && before < 200, "departure of path 6 (Stormwind): " + std::to_string(dep.size()) + " points to 200 yd out");
+            }
+        }
+
+        TaxiNode added{ 448, 0, -9000, 400, 60, "Editor Test Field" };
+        added.mount[1] = all.front().mount[1];
+        nodes.Commit(added.id, added.ToRow(nodes.NewRow()), "add node");
+        TaxiNode moved = all.front();
+        moved.x += 3;
+        nodes.Commit(moved.id, moved.ToRow(nodes.Row(moved.id)), "move node");
+        const TaxiPath newPath{ 9000, added.id, moved.id, 150 };
+        paths.Commit(newPath.id, newPath.ToRow(nlohmann::json::object()), "add path");
+        uint32_t pid = 90000;
+        for (TaxiPoint p : PlanTaxiPoints(added, moved, 40, [](float, float) { return std::nullopt; }))
+        {
+            p.id = pid++;
+            p.path = newPath.id;
+            points.Commit(p.id, p.ToRow(nlohmann::json::object()), "add point");
+        }
+        expect(points.ByPath().at(newPath.id).size() >= 2, "added path's points read back in order");
+        const fs::path t = fs::temp_directory_path() / "wow-world-editor-taxicheck";
+        std::error_code ec;
+        fs::remove_all(t, ec);
+        std::string error;
+        expect(nodes.Export({ t / "dbc" }, t / "patch", error) && paths.Export({ t / "dbc" }, t / "patch", error) && points.Export({ t / "dbc" }, t / "patch", error),
+               "exported " + error);
+        auto readBack = [&](const std::string& name) {
+            Dbc d;
+            std::ifstream f(t / "dbc" / (name + ".dbc"), std::ios::binary);
+            d.Load(std::vector<uint8_t>((std::istreambuf_iterator<char>(f)), {}));
+            return d;
+        };
+        const Dbc n = readBack("TaxiNodes"), p = readBack("TaxiPath"), q = readBack("TaxiPathNode");
+        expect(n.Find(448) && n.Str(*n.Find(448), 5) == "Editor Test Field" && std::fabs(n.F32(*n.Find(moved.id), 2) - moved.x) < 1e-3f, "TaxiNodes.dbc: added node named, moved one moved");
+        expect(p.Find(9000) && p.U32(*p.Find(9000), 1) == 448 && p.U32(*p.Find(9000), 3) == 150, "TaxiPath.dbc: added path from the new node, its cost");
+        expect(q.Find(90000) && q.U32(*q.Find(90000), 1) == 9000 && q.Rows() == uint32_t(pointCount + (pid - 90000)), "TaxiPathNode.dbc: added points, every old one kept");
+        fs::remove_all(t, ec);
+        printf("taxi check: %d problem(s)\n", problems);
+        return problems ? 1 : 0;
+    }
+
+    int PoisRead()
+    {
+        // `--poi-read <Data> <map folder>`: the landmarks another client (any build) has on a map, as copies pick them up.
+        if (__argc < 4 || !__wargv) return 2;
+        setvbuf(stdout, nullptr, _IONBF, 0);
+        char buf[1024] = {}, dir[256] = {};
+        WideCharToMultiByte(CP_ACP, 0, __wargv[2], -1, buf, sizeof buf, nullptr, nullptr);
+        WideCharToMultiByte(CP_ACP, 0, __wargv[3], -1, dir, sizeof dir, nullptr, nullptr);
+        MpqChain chain;
+        chain.Open(std::string(buf));
+        const auto mapDbc = chain.Read("DBFilesClient\\Map.dbc");
+        const auto poiDbc = chain.Read("DBFilesClient\\AreaPOI.dbc");
+        Dbc d;
+        printf("AreaPOI.dbc: %s, %u fields\n", poiDbc ? "found" : "missing", poiDbc && d.Load(*poiDbc) ? d.Fields() : 0);
+        std::optional<uint32_t> map;
+        if (mapDbc)
+            for (const MapEntry& m : ParseMapDbc(*mapDbc))
+                if (_stricmp(m.directory.c_str(), dir) == 0) map = m.id;
+        if (!map) { printf("no map %s in Map.dbc\n", dir); return 1; }
+        const auto pois = ReadAreaPois(chain, *map);
+        printf("map %s = %u: %zu landmark(s)\n", dir, *map, pois.size());
+        for (size_t i = 0; i < pois.size(); i += std::max<size_t>(1, pois.size() / 12))
+        {
+            const Poi& p = pois[i];
+            printf("  #%u %-28s %9.1f %9.1f %7.1f icon %u imp %u flags %u area %u ws %u  %s\n", p.id, p.name.c_str(), p.x, p.y, p.z, p.icon,
+                   p.importance, p.flags, p.area, p.worldState, p.description.c_str());
+        }
+        return pois.empty() ? 1 : 0;
+    }
+
     int TriggersCheck()
     {
         if (__argc < 3 || !__wargv) return 2;
@@ -2455,6 +2792,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdLine, int)
     if (cmdLine && wcsstr(cmdLine, L"--sources-check")) return SourcesCheck();
     if (cmdLine && wcsstr(cmdLine, L"--scan-check")) return ScanCheck();
     if (cmdLine && wcsstr(cmdLine, L"--triggers-check")) return TriggersCheck();
+    if (cmdLine && wcsstr(cmdLine, L"--poi-check")) return PoisCheck();
+    if (cmdLine && wcsstr(cmdLine, L"--poi-read")) return PoisRead();
+    if (cmdLine && wcsstr(cmdLine, L"--taxi-check")) return TaxiCheck();
     if (cmdLine && wcsstr(cmdLine, L"--diff-objects")) return DiffObjects();
     if (cmdLine && wcsstr(cmdLine, L"--blueprint-check")) return BlueprintCheck();
     if (cmdLine && wcsstr(cmdLine, L"--asset-check")) return AssetCheck();
@@ -3401,7 +3741,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdLine, int)
         return problems ? 1 : 0;
     }
     if (cmdLine && wcsstr(cmdLine, L"--rewrite-check")) return RewriteCheck();
-    if (cmdLine && wcsstr(cmdLine, L"--selftest")) return FormatsSelfTest() && ChangesSelfTest() && TerrainSelfTest() && BlendSelfTest() && CatalogSelfTest() && BlueprintSelfTest() && TriggersSelfTest() ? 0 : 1;
+    if (cmdLine && wcsstr(cmdLine, L"--selftest")) return FormatsSelfTest() && ChangesSelfTest() && TerrainSelfTest() && BlendSelfTest() && CatalogSelfTest() && BlueprintSelfTest() && TriggersSelfTest() && TransformSelfTest() ? 0 : 1;
     if (cmdLine && wcsstr(cmdLine, L"--check")) return Check();
 
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);

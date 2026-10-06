@@ -24,7 +24,12 @@ struct Project
                                                 { "area.id", { 20000, 20999 } },        // AreaTable; creature.zoneId is 16-bit
                                                 { "wmoarea.id", { 700000, 709999 } },     // WMOAreaTable (client max 665483)
                                                 { "worldmaparea.id", { 9000, 9099 } }, { "worldmapoverlay.id", { 90000, 90999 } },
-                                                { "areatrigger.id", { 60000, 60999 } } };   // AreaTrigger.dbc + areatrigger (client max ~5900)
+                                                { "areatrigger.id", { 60000, 60999 } },     // AreaTrigger.dbc + areatrigger (client max ~5900)
+                                                { "areapoi.id", { 60000, 60999 } },         // AreaPOI.dbc (client max 2392)
+                                                { "points_of_interest.id", { 60000, 60999 } }, { "game_tele.id", { 60000, 60999 } },
+                                                { "taxinode.id", { 1, 448 } },              // TaxiNodes: AzerothCore's taxi mask ends at 448 (client max 440, gaps used)
+                                                { "taxipath.id", { 5000, 5999 } },          // TaxiPath (client max 1978)
+                                                { "taxipathnode.id", { 60000, 69999 } } };  // TaxiPathNode (client max 46874)
     IdRange Range(const std::string& kind) const { auto it = idRanges.find(kind); return it == idRanges.end() ? IdRange{} : it->second; }
     bool Owns(const std::string& kind, uint32_t id) const { const IdRange r = Range(kind); return id >= r.first && id <= r.last && r.first; }
     std::string serverProfile;   // name of the user's ServerProfile (Server.hpp); credentials never live here

@@ -59,7 +59,9 @@ void App::UpdateSpawnView()
         for (const Spawn& s : spawns->Around(CurrentMapId(), minX, minY, maxX, maxY))
         {
             for (int e : s.events) ++m_spawnEvents[std::abs(e)];
-            if (!m_spawnEvent || s.InWorld(*m_spawnEvent)) m_spawnView.push_back(s);
+            if (m_spawnEvent && !s.InWorld(*m_spawnEvent)) continue;
+            const auto moving = m_spawnPreview.find(s.guid);   // being moved: shown where the handles have it
+            m_spawnView.push_back(moving != m_spawnPreview.end() && moving->second.kind == s.kind ? moving->second : s);
         }
     RefreshPathView();
 }
@@ -426,6 +428,7 @@ void App::DrawSpawnsPanel(float w)
     else if (sel.empty()) ImGui::TextColored(kQuiet, "None. Click a spawn or drag a box in the viewport.");
     else
     {
+        if (!m_path) DrawTransformBar(w);   // editing a path: the path panel has it, for its points
         const Spawn& first = *sel.front();
         if (sel.size() == 1)
         {
@@ -446,13 +449,34 @@ void App::DrawSpawnsPanel(float w)
             ImGui::TextWrapped("%s", summary.c_str());
             ImGui::TextColored(kQuiet, "Fields show the first; editing one sets it on all %zu.", sel.size());
         }
-        // Edits show at once in the field; the change (one database write per spawn, one undo step) happens on release.
+        // Position and facing preview live (models move) and commit as one undo step on release, as objects do.
         const std::string what = sel.size() == 1 ? "spawn " + std::to_string(first.guid) : std::to_string(sel.size()) + " spawns";
+        auto preview = [&](const std::function<void(Spawn&)>& set) {
+            const auto t = SpawnTransform();
+            if (!t) return;
+            if (!m_fieldEditing) { t->begin(); m_fieldEditing = true; }
+            m_spawnPreview.clear();
+            for (auto [guid, s] : m_spawnStart) { set(s); m_spawnPreview[guid] = s; }
+            m_spawnModelVersion[0] = m_spawnModelVersion[1] = ~0u;
+        };
+        auto release = [&](const std::string& label) {
+            if (!ImGui::IsItemDeactivated() || !m_fieldEditing) return;
+            m_fieldEditing = false;
+            if (const auto t = SpawnTransform()) t->commit(label);
+        };
+        if (sel.size() == 1)
+        {
+            float pos[3] = { first.x, first.y, first.z };
+            ImGui::SetNextItemWidth(w - 110);
+            if (ImGui::DragFloat3("Position", pos, 0.1f, 0, 0, "%.2f")) preview([&](Spawn& s) { s.x = pos[0]; s.y = pos[1]; s.z = pos[2]; });
+            ImGui::SetItemTooltip("Server coordinates: x north, y west, z up");
+            release("Move " + what);
+        }
         float degrees = first.orientation * 360.0f / kTwoPi;
         ImGui::SetNextItemWidth(w - 110);
-        if (ImGui::SliderFloat("Facing", &degrees, 0, 360, "%.0f deg")) m_spawnPending = degrees * kTwoPi / 360.0f;
-        if (ImGui::IsItemDeactivatedAfterEdit() && m_spawnPending)
-            EditSpawns("Turn " + what, [o = *m_spawnPending](Spawn& s) { s.orientation = o; });
+        if (ImGui::SliderFloat("Facing", &degrees, 0, 360, "%.0f deg", ImGuiSliderFlags_AlwaysClamp))
+            preview([o = degrees * kTwoPi / 360.0f](Spawn& s) { s.orientation = o; });
+        release("Turn " + what);
         if (creature)
         {
             float wander = first.wander;

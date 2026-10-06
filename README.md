@@ -54,11 +54,14 @@ build\Release\wow-world-editor.exe
 | [Zones](docs/regions/zones.md) | Paint area ids onto the ground, edit AreaTable rows, name buildings' rooms (WMOAreaTable) |
 | [World maps](docs/regions/world-maps.md) | Draw a zone's world map and its explored-area overlays from the terrain |
 | [Triggers and entrances](docs/regions/triggers.md) | Area triggers (client DBC and server row together), teleports and their arrival points, instance entrances and exits |
+| [Points of interest](docs/regions/pois.md) | World map landmarks (AreaPOI.dbc), gossip map flags, `.tele` bookmarks |
+| [Flight paths](docs/regions/flight-paths.md) | Taxi nodes, the routes between them and their points; which flight master serves which node |
 
 ### Map versions
 | Feature | What it does |
 | --- | --- |
 | [Sources](docs/concepts/sources.md) | Where game files come from: client folders, single MPQs, unpacked folders, mixed folders, in layers |
+| [Moving things](docs/concepts/moving-things.md) | One set of handles, keys and live fields for everything that moves: objects, spawns, triggers, points, path points |
 | [Ghost layers](docs/versions/ghost-layers.md) | Show other versions of the map over yours; see every version of a tile, patch history included |
 | [Compare](docs/versions/compare.md) | Flip a selected area through every other version in place, with what each would cost to paste |
 | [Differences](docs/versions/differences.md) | Scan a whole other version, review its edits as cards, approve or reject each; new tiles included |

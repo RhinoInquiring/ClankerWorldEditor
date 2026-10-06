@@ -138,6 +138,7 @@ public:
     std::string Str(uint32_t row, uint32_t field) const;
     /// Row index of an id, if present.
     std::optional<uint32_t> Find(uint32_t id) const;
+    uint32_t Fields() const { return m_fields; }
 
 private:
     std::vector<uint8_t> m_data;

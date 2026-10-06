@@ -1217,7 +1217,7 @@ nlohmann::json TerrainClipboard::ToJson() const
                                { "layers", e.layers }, { "holes", e.holes }, { "liquids", e.liquids } });
     for (const auto& d : doodads) doodadsJson.push_back(::ToJson(d));
     for (const auto& w : wmos) wmosJson.push_back(::ToJson(w));
-    return { { "origin", { originX, originZ } }, { "chunks", chunksJson }, { "doodads", doodadsJson }, { "wmos", wmosJson } };
+    return { { "origin", { originX, originZ } }, { "chunks", chunksJson }, { "doodads", doodadsJson }, { "wmos", wmosJson }, { "pois", pois } };
 }
 
 TerrainClipboard TerrainClipboard::FromJson(const nlohmann::json& j)
@@ -1237,6 +1237,7 @@ TerrainClipboard TerrainClipboard::FromJson(const nlohmann::json& j)
     }
     for (const auto& d : j.value("doodads", nlohmann::json::array())) clip.doodads.push_back(DoodadFrom(d));
     for (const auto& w : j.value("wmos", nlohmann::json::array())) clip.wmos.push_back(WmoFrom(w));
+    clip.pois = j.value("pois", nlohmann::json::array());
     return clip;
 }
 
@@ -1342,6 +1343,13 @@ void TerrainClipboard::RotateClockwise()
         w.extMin[2] = minX;
         w.extMax[2] = maxX;
         w.rot[1] = std::fmod(w.rot[1] - 90.0f + 360.0f, 360.0f);
+    }
+    for (auto& p : pois)
+    {
+        auto& pos = p.at("pos");
+        const float x = pos[0];
+        pos[0] = span - pos[2].get<float>();
+        pos[2] = x;
     }
 }
 
@@ -1523,6 +1531,13 @@ PastePlan TerrainAdapter::PlanPaste(const TerrainClipboard& clip, int gx, int gz
                 reaches = reaches || (w.extMax[0] >= cell.first * kChunkSize && w.extMin[0] < (cell.first + 1) * kChunkSize &&
                                       w.extMax[2] >= cell.second * kChunkSize && w.extMin[2] < (cell.second + 1) * kChunkSize);
             if (reaches) plan.wmos.push_back(std::move(w));
+        }
+        for (nlohmann::json p : clip.pois)
+        {
+            float rel[3] = { p.at("pos")[0], p.at("pos")[1], p.at("pos")[2] };
+            const float dy = p.value("ground", false) ? 0.0f : lift(rel);
+            p["pos"] = { rel[0] + originX, rel[1] + dy, rel[2] + originZ };
+            if (onPaste(rel[0] + originX, rel[2] + originZ)) plan.pois.push_back(std::move(p));
         }
     }
 
@@ -2453,6 +2468,16 @@ bool TerrainSelfTest()
         const XMMATRIX expect = before * turn;
         for (int r = 0; r < 4; ++r)
             if (XMVectorGetX(XMVector4LengthEst(XMVectorSubtract(after.r[r], expect.r[r]))) > 1e-2f) return false;
+        // A landmark turns the same way, its fields untouched, and survives the blueprint JSON.
+        TerrainClipboard marks;
+        marks.chunks = { { 0, 0 }, { 0, 1 } };   // depth 2, as objs before its turn
+        marks.pois.push_back({ { "pos", { 10.0f, 5.0f, 20.0f } }, { "ground", true }, { "row", { { "Name_lang", "Town" } } } });
+        marks.RotateClockwise();
+        const TerrainClipboard back = TerrainClipboard::FromJson(marks.ToJson());
+        const auto& pos = back.pois.at(0).at("pos");
+        if (std::fabs(pos[0].get<float>() - (span - 20)) > 1e-3f || std::fabs(pos[2].get<float>() - 10) > 1e-3f || pos[1] != 5.0f ||
+            back.pois[0]["row"]["Name_lang"] != "Town" || !back.pois[0]["ground"].get<bool>())
+            return false;
     }
 
     for (int i = 0; i < 3; ++i) clip.RotateClockwise();
