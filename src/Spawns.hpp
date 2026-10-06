@@ -81,6 +81,8 @@ public:
     /// until the box changes or Refresh.
     const std::vector<Spawn>& Around(uint32_t map, float minX, float minY, float maxX, float maxY);
     void Refresh() { m_aroundKey.clear(); }
+    /// Every spawn of a map, the database's with the project's over them (not cached: for lists).
+    std::vector<Spawn> OnMap(uint32_t map) const;
     /// Bumped whenever Around recomputes its list.
     uint32_t Version() const { return m_version; }
 
@@ -125,6 +127,8 @@ public:
 private:
     /// Template rows matching an SQL condition on the template table (alias t), by name; limit 0 = all.
     std::vector<Template> Templates(const std::string& where, size_t limit, std::string& error) const;
+    /// The spawns of a map inside a server-coordinate box (database rows, then the project's), up to `limit` rows.
+    std::vector<Spawn> Collect(uint32_t map, float minX, float minY, float maxX, float maxY, size_t limit) const;
     struct RowChange { uint32_t guid; const nlohmann::json* before; const nlohmann::json* after; };
     /// The rows a change touches, in order.
     static std::vector<RowChange> Rows(const nlohmann::json& data);

@@ -27,6 +27,11 @@ The **Selected** tab edits one spawn or many at once: position (one spawn) and f
 delete. Editing a group is one undo step. The **Inspector** shows every column of the spawn's row and of its
 template.
 
+**On this map** (a tab of the Creatures and Gameobjects tools) lists every spawn of the open map, grouped by
+template, most spawned first, with a filter by name or entry. Open a group to see its spawns; click one to fly there
+(close in, for dungeons) and select it. Right-click a group to select every one of them, or open it in the NPC viewer.
+Dungeons list their whole instance.
+
 With one creature selected, the **Inspector** shows the [NPC viewer](npc-viewer.md)'s editing tabs for its template
 (Template, Models & gear, Appearance, Loot, Dialogue), after a **Spawn** tab with the spawn's own row. They are the
 same edits as the viewer's, applied with **Apply** as one undo step; selecting another creature while edits are not

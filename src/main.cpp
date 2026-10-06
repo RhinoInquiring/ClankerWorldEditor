@@ -3367,6 +3367,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdLine, int)
                         found = std::find(s.events.begin(), s.events.end(), std::stoi(r["eventEntry"].get<std::string>())) != s.events.end();
                 check(found, "Around: an event spawn carries its event");
             }
+            // The whole-map list (Tools > On this map): every spawn of a dungeon map, as many as the database has.
+            for (const uint32_t map : { 34u, 389u })   // the Stockade, Ragefire Chasm
+                if (const auto n = db.Query("SELECT COUNT(*) FROM " + table + " WHERE map = " + std::to_string(map), error); n && !n->empty())
+                    check(spawns.OnMap(map).size() == size_t(std::stoul((*n)[0][0])),
+                          ("OnMap " + std::to_string(map) + ": " + std::to_string(spawns.OnMap(map).size()) + " of " + (*n)[0][0]).c_str());
         }
         auto commit = [&](const std::optional<nlohmann::json>& b, const std::optional<nlohmann::json>& a, const char* label) {
             Change c = spawns.MakeChange(b, a, label);

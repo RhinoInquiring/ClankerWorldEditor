@@ -214,7 +214,18 @@ const std::vector<Spawn>& SpawnAdapter::Around(uint32_t map, float minX, float m
     if (m_aroundKey == key) return m_around;
     m_aroundKey = key;
     ++m_version;
-    m_around.clear();
+    m_around = Collect(map, minX, minY, maxX, maxY, 20000);
+    return m_around;
+}
+
+std::vector<Spawn> SpawnAdapter::OnMap(uint32_t map) const
+{
+    return Collect(map, -1e9f, -1e9f, 1e9f, 1e9f, 200000);
+}
+
+std::vector<Spawn> SpawnAdapter::Collect(uint32_t map, float minX, float minY, float maxX, float maxY, size_t limit) const
+{
+    std::vector<Spawn> out;
     std::map<uint32_t, Spawn> found;
     std::string error;
     if (Connected())
@@ -232,7 +243,7 @@ const std::vector<Spawn>& SpawnAdapter::Around(uint32_t map, float minX, float m
                                    "LEFT JOIN item_template i1 ON i1.entry = e.ItemID1 LEFT JOIN item_template i2 ON i2.entry = e.ItemID2"
                                  : "t.displayId, t.size, t.name FROM gameobject c LEFT JOIN gameobject_template t ON t.entry = c.id") +
             " WHERE c.map = " + std::to_string(map) + " AND c.position_x BETWEEN " + Num(minX) + " AND " + Num(maxX) +
-            " AND c.position_y BETWEEN " + Num(minY) + " AND " + Num(maxY) + " LIMIT 20000";
+            " AND c.position_y BETWEEN " + Num(minY) + " AND " + Num(maxY) + " LIMIT " + std::to_string(limit);
         if (auto rows = m_db->QueryRows(sql, error))
             for (const auto& r : *rows) { Spawn s = Spawn::FromRow(r, m_kind); found[s.guid] = s; }
     }
@@ -254,8 +265,8 @@ const std::vector<Spawn>& SpawnAdapter::Around(uint32_t map, float minX, float m
         }
         found[guid] = s;
     }
-    for (auto& [guid, s] : found) m_around.push_back(std::move(s));
-    return m_around;
+    for (auto& [guid, s] : found) out.push_back(std::move(s));
+    return out;
 }
 
 std::vector<SpawnAdapter::Template> SpawnAdapter::Search(const std::string& text, std::string& error) const

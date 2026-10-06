@@ -11,6 +11,14 @@ using namespace DirectX;
 namespace
 {
 const ImVec4 kQuiet{ 0.60f, 0.62f, 0.66f, 1.00f };
+
+/// Whether `text` contains `query`, ignoring case.
+bool ContainsNoCase(const std::string& text, const char* query)
+{
+    std::string a = text, b = query;
+    for (auto* s : { &a, &b }) std::transform(s->begin(), s->end(), s->begin(), [](unsigned char c) { return char(std::tolower(c)); });
+    return a.find(b) != std::string::npos;
+}
 const ImVec4 kWarn{ 1.00f, 0.66f, 0.25f, 1.00f };
 constexpr float kTwoPi = 6.2831853f;
 
@@ -499,5 +507,75 @@ void App::DrawSpawnsPanel(float w)
         ImGui::SameLine();
         if (ImGui::Button("Delete  Del", { (w - 8) / 2, 0 })) DeleteSpawns();
     }
+    if (Section(("On this map###onmap"))) DrawSpawnList(w);
     if (creature && (m_path || sel.size() == 1)) DrawPathPanel(w);
+}
+
+void App::DrawSpawnList(float w)
+{
+    SpawnAdapter& spawns = Spawns();
+    const uint32_t map = CurrentMapId();
+    const std::string key = std::to_string(map) + " " + spawns.Table() + " " + std::to_string(m_store.Revision()) + " " + std::to_string(m_db.Connected());
+    if (key != m_spawnListKey)
+    {
+        m_spawnListKey = key;
+        m_spawnList = spawns.OnMap(map);
+    }
+    const char* what = m_spawnKind == SpawnKind::Creature ? "creature" : "gameobject";
+    // Grouped by template, most spawned first; the filter matches names and entries.
+    std::map<uint32_t, std::vector<const Spawn*>> byEntry;
+    for (const Spawn& s : m_spawnList)
+        if (m_spawnListFilter.empty() || ContainsNoCase(s.name, m_spawnListFilter.c_str()) || std::to_string(s.entry) == m_spawnListFilter)
+            byEntry[s.entry].push_back(&s);
+    std::vector<const std::vector<const Spawn*>*> groups;
+    for (const auto& [entry, list] : byEntry) groups.push_back(&list);
+    std::stable_sort(groups.begin(), groups.end(), [](const auto* a, const auto* b) {
+        return a->size() != b->size() ? a->size() > b->size() : a->front()->name < b->front()->name;
+    });
+    ImGui::TextColored(kQuiet, "%zu %s spawns of %zu kinds on %s", m_spawnList.size(), what, byEntry.size(), m_terrain.Map().c_str());
+    ImGui::SetNextItemWidth(w);
+    ImGui::InputTextWithHint("##spawnlistfilter", "Filter: name or entry", &m_spawnListFilter);
+    // Go there: close in (dungeons are tight), looking at it from the south, and select it.
+    auto go = [&](const Spawn& s) {
+        FlyTo(map, s.x, s.y, s.z, false);
+        const XMFLOAT3 p = ServerToEditor(s.x, s.y, s.z);
+        m_camera.pos = { p.x, p.y + 7, p.z - 14 };
+        m_camera.pitch = -0.4f;
+        m_spawnSel = { s.guid };
+    };
+    if (ImGui::BeginChild("##spawnlist", { w, 0 }))
+    {
+        for (const auto* list : groups)
+        {
+            const Spawn& first = *list->front();
+            ImGui::PushID(int(first.entry));
+            const bool open = ImGui::TreeNodeEx("##g", ImGuiTreeNodeFlags_SpanAvailWidth, "%s  x%zu", first.name.empty() ? "?" : first.name.c_str(), list->size());
+            ImGui::SameLine();
+            ImGui::TextColored(kQuiet, "%u", first.entry);
+            if (ImGui::BeginPopupContextItem("##ctx"))
+            {
+                if (ImGui::MenuItem("Select every one"))
+                {
+                    m_spawnSel.clear();
+                    for (const Spawn* s : *list) m_spawnSel.insert(s->guid);
+                }
+                if (m_spawnKind == SpawnKind::Creature && ImGui::MenuItem("Open in NPC viewer")) OpenNpc(first.entry);
+                ImGui::EndPopup();
+            }
+            if (open)
+            {
+                for (const Spawn* s : *list)
+                {
+                    char text[160];
+                    snprintf(text, sizeof text, "guid %u   %.0f, %.0f, %.0f%s##%u", s->guid, s->x, s->y, s->z, s->events.empty() ? "" : "   (event)", s->guid);
+                    if (ImGui::Selectable(text, m_spawnSel.count(s->guid) != 0)) go(*s);
+                    ImGui::SetItemTooltip("Go there and select it");
+                }
+                ImGui::TreePop();
+            }
+            ImGui::PopID();
+        }
+        if (groups.empty()) ImGui::TextColored(kQuiet, m_spawnList.empty() ? "None on this map." : "Nothing matches.");
+    }
+    ImGui::EndChild();
 }

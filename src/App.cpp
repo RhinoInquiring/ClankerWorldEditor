@@ -2745,7 +2745,9 @@ void App::BuildOverlay(std::vector<LineVertex>& lines) const
         return;
     }
 
-    // Brush: outer ring at the radius, inner ring where the falloff is half.
+    // Brush: outer ring at the radius, inner ring where the falloff is half. Only the brush tools have one; tools that
+    // pick things (units, triggers, points, nodes) show their own hover instead.
+    if (m_tool != Tool::Sculpt && m_tool != Tool::Paint) return;
     const XMFLOAT4 ringColors[2] = { { 1, 1, 1, 0.9f }, { 1, 1, 1, 0.35f } };
     const float radius = m_tool == Tool::Paint ? m_paint.radius : m_brush.radius;
     const float radii[2] = { radius, m_tool == Tool::Paint ? std::max(radius * m_paint.hardness, 0.5f) : radius * 0.5f };

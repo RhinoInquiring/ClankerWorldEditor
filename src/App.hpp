@@ -165,6 +165,11 @@ private:
     void BuildSpawnOverlay(std::vector<LineVertex>& lines) const;
     void DrawSpawnLabels(ImDrawList* dl, const ImVec2& origin, const ImVec2& size, DirectX::FXMMATRIX viewProj) const;
     void DrawSpawnsPanel(float width);
+    /// Tools > On this map: every spawn of the open map by template; click one to go there and select it.
+    void DrawSpawnList(float w);
+    std::vector<Spawn> m_spawnList;                  // the open map's spawns of m_spawnKind
+    std::string m_spawnListKey;                      // map + kind + store revision it was read for
+    std::string m_spawnListFilter;
     /// "12 Hallow's End" from game_event (just the number when unknown).
     std::string EventName(int event);
     /// The game event filter (combo): which spawns the viewport shows.
