@@ -11,6 +11,7 @@
 namespace
 {
 const ImVec4 kQuiet{ 0.60f, 0.62f, 0.66f, 1.00f };
+const ImVec4 kWarn{ 1.00f, 0.66f, 0.25f, 1.00f };
 const ImVec4 kAccent{ 0.30f, 0.62f, 1.00f, 1.00f };
 
 std::string Lower(std::string s)
@@ -89,6 +90,31 @@ bool App::InspectSpawn()
         if (m_db.Connected())
             if (const auto rows = m_db.QueryRows(std::string("SELECT * FROM ") + table + "_template WHERE entry = " + std::to_string(s.entry), error); rows && !rows->empty())
                 m_inspectTemplate = (*rows)[0];
+    }
+    // A creature: the NPC viewer's editing tabs for its template, with the spawn's own row as the first tab.
+    if (m_spawnKind == SpawnKind::Creature && m_creatures.Connected())
+    {
+        // Its template becomes the edited NPC when it is selected, or whenever nothing is pending (asked first if another
+        // NPC has unapplied edits; after Cancel the tabs keep that one).
+        if (m_npc.entry != s.entry && !m_npc.pendingOpen && (m_npcSpawnGuid != s.guid || !m_npc.dirty)) OpenNpc(s.entry, false);
+        m_npcSpawnGuid = s.guid;
+        ImGui::TextColored(kAccent, "%s", s.name.c_str());
+        ImGui::SameLine();
+        ImGui::TextColored(kQuiet, "guid %u   entry %u", s.guid, s.entry);
+        if (m_npc.entry != s.entry) ImGui::TextColored(kWarn, "The tabs show %s (%u): its edits are not applied.", m_npc.name.c_str(), m_npc.entry);
+        static std::string spawnFilter;
+        DrawNpcEditor(false, [&] {
+            if (!ImGui::BeginTabItem("Spawn")) return;
+            const auto look = m_looks.SpawnLook(s);
+            ImGui::TextColored(kQuiet, "display %u: %s", s.displayId, look ? look->look.model.c_str() : "(no model)");
+            ImGui::TextColored(kQuiet, "zone %s   area %s", AreaLabel(s.zoneId).c_str(), AreaLabel(s.areaId).c_str());
+            ImGui::TextColored(kQuiet, "Position, facing, wander, respawn and its path: Tools > Selected.");
+            ImGui::SetNextItemWidth(-1);
+            ImGui::InputTextWithHint("##spawnfilter", "Filter fields", &spawnFilter);
+            RowTable("##spawnrow", m_inspectRow, spawnFilter);
+            ImGui::EndTabItem();
+        });
+        return true;
     }
     ImGui::TextColored(kAccent, "%s", s.name.c_str());
     ImGui::TextColored(kQuiet, "%s guid %u   entry %u", table, s.guid, s.entry);

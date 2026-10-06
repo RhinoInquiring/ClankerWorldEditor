@@ -637,6 +637,7 @@ private:
         std::string pickQuery;
         std::vector<std::pair<uint32_t, Item>> pickHits;
         uint32_t pendingOpen = 0;                        // asked to open this entry while edits were not applied
+        bool pendingShow = false;                        // ... in the viewer window
         // Appearance: a project character display (CreatureDisplayInfo + CreatureDisplayInfoExtra rows) as edited.
         uint32_t appearanceId = 0;                       // the display editDisplay / editExtra are for (0 none)
         nlohmann::json editDisplay, editExtra;
@@ -666,8 +667,13 @@ private:
     } m_npc;
     bool m_showNpc = false;
     void DrawNpcViewer();
-    /// Opens the viewer on a creature template (reads its models and equipment sets).
-    void OpenNpc(uint32_t entry);
+    /// Makes a creature template the one the NPC tabs edit (reads its rows); `show` also opens the viewer window.
+    void OpenNpc(uint32_t entry, bool show = true);
+    /// Every frame, viewer open or not: re-read after an undo or redo, and ask before dropping unapplied edits.
+    void UpdateNpc();
+    /// The Apply / Revert line and the editing tabs (View only in the viewer); `first` draws extra tabs before them.
+    void DrawNpcEditor(bool view, const std::function<void()>& first = {});
+    uint32_t m_npcSpawnGuid = 0;   // the creature spawn the Inspector last opened in the NPC tabs
     /// Reads the template's rows into the edit buffers (dropping edits) and refreshes the preview; `frame` re-aims the camera.
     void LoadNpc(uint32_t entry, bool frame);
     /// The preview's model and equipment lists from the edit buffers.

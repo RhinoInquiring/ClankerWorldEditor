@@ -2305,6 +2305,7 @@ void App::Frame(float dt)
         ImGui::SetNextWindowDockID(inspector->DockId, ImGuiCond_FirstUseEver);
     DrawVersions();
     DrawSources();
+    UpdateNpc();
     DrawNpcViewer();
     DrawShortcuts();
     DrawChangesPanel();
@@ -3600,7 +3601,7 @@ void App::DrawMapsPanel()
 void App::DrawInspector()
 {
     if (!ImGui::Begin("Inspector")) { ImGui::End(); return; }
-    if (m_terrain.Tiles().empty()) { ImGui::TextColored(kQuiet, "Nothing loaded."); ImGui::End(); return; }
+    if (m_terrain.Tiles().empty() && !m_terrain.GlobalWmo()) { ImGui::TextColored(kQuiet, "Nothing loaded."); ImGui::End(); return; }
     // What the current tool works on: a spawn, an object, an area. Otherwise the terrain chunk.
     if ((SpawnTool() && InspectSpawn()) || (m_tool == Tool::Objects && InspectObject()) || (m_tool == Tool::Zones && InspectArea()))
     {

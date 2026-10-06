@@ -62,11 +62,14 @@ std::string GeosetGroupName(uint32_t group)
 }
 }
 
-void App::OpenNpc(uint32_t entry)
+void App::OpenNpc(uint32_t entry, bool show)
 {
-    m_showNpc = true;
-    m_npc.focus = true;
-    if (m_npc.dirty && entry != m_npc.entry) { m_npc.pendingOpen = entry; return; }   // asked first (DrawNpcViewer)
+    if (show)
+    {
+        m_showNpc = true;
+        m_npc.focus = true;
+    }
+    if (m_npc.dirty && entry != m_npc.entry) { m_npc.pendingOpen = entry; m_npc.pendingShow = show; return; }   // asked first (UpdateNpc)
     m_npc.hidden.clear();
     m_npc.equip = 0;
     LoadNpc(entry, true);
@@ -337,26 +340,6 @@ void App::DrawNpcViewer()
         ImGui::End();
         return;
     }
-    if (v.entry && !v.dirty && v.editRevision != m_store.Revision()) LoadNpc(v.entry, false);   // an undo, a redo, another tool's edit
-    if (v.pendingOpen) ImGui::OpenPopup("Unapplied NPC edits");
-    if (ImGui::BeginPopupModal("Unapplied NPC edits", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
-    {
-        ImGui::Text("%s (%u) has edits that are not applied.", v.name.c_str(), v.entry);
-        const uint32_t next = v.pendingOpen;
-        auto go = [&](bool apply) {
-            if (apply) ApplyNpc();
-            v.dirty = false;
-            v.pendingOpen = 0;
-            OpenNpc(next);
-            ImGui::CloseCurrentPopup();
-        };
-        if (ImGui::Button("Apply")) go(true);
-        ImGui::SameLine();
-        if (ImGui::Button("Discard")) go(false);
-        ImGui::SameLine();
-        if (ImGui::Button("Cancel")) { v.pendingOpen = 0; ImGui::CloseCurrentPopup(); }
-        ImGui::EndPopup();
-    }
 
     // Left: every creature template, filtered by name or entry.
     const auto& templates = UnitTemplates(SpawnKind::Creature);
@@ -465,30 +448,60 @@ void App::DrawNpcViewer()
     ImGui::SameLine();
 
     // Right: what the model is made of.
-    if (ImGui::BeginChild("##npcside", { 0, 0 }, ImGuiChildFlags_Borders))
-    {
-        if (v.dirty)
-        {
-            ImGui::TextColored(kWarn, "Edits not applied");
-            ImGui::SameLine();
-            if (ImGui::SmallButton("Apply")) ApplyNpc();
-            ImGui::SetItemTooltip("Write them to the world database as one undo step");
-            ImGui::SameLine();
-            if (ImGui::SmallButton("Revert")) LoadNpc(v.entry, false);
-        }
-        if (ImGui::BeginTabBar("##npctabs", ImGuiTabBarFlags_FittingPolicyScroll | ImGuiTabBarFlags_TabListPopupButton))
-        {
-            if (ImGui::BeginTabItem("View")) { DrawNpcViewTab(); ImGui::EndTabItem(); }
-            if (ImGui::BeginTabItem("Template")) { DrawNpcTemplateTab(); ImGui::EndTabItem(); }
-            if (ImGui::BeginTabItem("Models & gear")) { DrawNpcGearTab(); ImGui::EndTabItem(); }
-            if (ImGui::BeginTabItem("Appearance")) { DrawNpcAppearanceTab(); ImGui::EndTabItem(); }
-            if (ImGui::BeginTabItem("Loot")) { DrawNpcLootTab(); ImGui::EndTabItem(); }
-            if (ImGui::BeginTabItem("Dialogue")) { DrawNpcDialogueTab(); ImGui::EndTabItem(); }
-            ImGui::EndTabBar();
-        }
-    }
+    if (ImGui::BeginChild("##npcside", { 0, 0 }, ImGuiChildFlags_Borders)) DrawNpcEditor(true);
     ImGui::EndChild();
     ImGui::End();
+}
+
+void App::DrawNpcEditor(bool view, const std::function<void()>& first)
+{
+    NpcView& v = m_npc;
+    if (v.dirty)
+    {
+        ImGui::TextColored(kWarn, "Edits not applied");
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Apply")) ApplyNpc();
+        ImGui::SetItemTooltip("Write them to the world database as one undo step");
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Revert")) LoadNpc(v.entry, false);
+    }
+    if (ImGui::BeginTabBar(view ? "##npctabs" : "##npctabsinspector", ImGuiTabBarFlags_FittingPolicyScroll | ImGuiTabBarFlags_TabListPopupButton))
+    {
+        if (first) first();
+        if (view && ImGui::BeginTabItem("View")) { DrawNpcViewTab(); ImGui::EndTabItem(); }
+        if (ImGui::BeginTabItem("Template")) { DrawNpcTemplateTab(); ImGui::EndTabItem(); }
+        if (ImGui::BeginTabItem("Models & gear")) { DrawNpcGearTab(); ImGui::EndTabItem(); }
+        if (ImGui::BeginTabItem("Appearance")) { DrawNpcAppearanceTab(); ImGui::EndTabItem(); }
+        if (ImGui::BeginTabItem("Loot")) { DrawNpcLootTab(); ImGui::EndTabItem(); }
+        if (ImGui::BeginTabItem("Dialogue")) { DrawNpcDialogueTab(); ImGui::EndTabItem(); }
+        ImGui::EndTabBar();
+    }
+}
+
+void App::UpdateNpc()
+{
+    NpcView& v = m_npc;
+    if (v.entry && !v.dirty && v.editRevision != m_store.Revision() && m_creatures.Connected()) LoadNpc(v.entry, false);   // an undo, a redo, another tool's edit
+    if (v.pendingOpen) ImGui::OpenPopup("Unapplied NPC edits");
+    if (ImGui::BeginPopupModal("Unapplied NPC edits", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+    {
+        ImGui::Text("%s (%u) has edits that are not applied.", v.name.c_str(), v.entry);
+        const uint32_t next = v.pendingOpen;
+        const bool show = v.pendingShow;
+        auto go = [&](bool apply) {
+            if (apply) ApplyNpc();
+            v.dirty = false;
+            v.pendingOpen = 0;
+            OpenNpc(next, show);
+            ImGui::CloseCurrentPopup();
+        };
+        if (ImGui::Button("Apply")) go(true);
+        ImGui::SameLine();
+        if (ImGui::Button("Discard")) go(false);
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel")) { v.pendingOpen = 0; ImGui::CloseCurrentPopup(); }
+        ImGui::EndPopup();
+    }
 }
 
 
@@ -972,9 +985,10 @@ void App::DrawNpcGearTab()
     if (!v.editModels.empty() && ImGui::BeginTable("##models", 5, ImGuiTableFlags_SizingStretchProp))
     {
         ImGui::TableSetupColumn("Show", ImGuiTableColumnFlags_WidthFixed);
-        ImGui::TableSetupColumn("Display");
-        ImGui::TableSetupColumn("Scale");
-        ImGui::TableSetupColumn("Chance");
+        // Equal shares (proportional sizing gave the chance column most of the row).
+        ImGui::TableSetupColumn("Display", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+        ImGui::TableSetupColumn("Scale", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+        ImGui::TableSetupColumn("Chance", ImGuiTableColumnFlags_WidthStretch, 1.0f);
         ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed);
         ImGui::TableHeadersRow();
         for (size_t i = 0; i < v.editModels.size(); ++i)
