@@ -184,6 +184,8 @@ ModelRenderer::GpuMesh* ModelRenderer::Mesh(const std::string& name, bool wmo, c
         gpu->batches.back().uvAnim = b.uvAnim;
         gpu->batches.back().weight = b.weight;
         gpu->batches.back().color = b.color;
+        if (!b.texture.empty() && std::find(gpu->textureNames.begin(), gpu->textureNames.end(), b.texture) == gpu->textureNames.end())
+            gpu->textureNames.push_back(b.texture);
         if (b.liquid)
         {
             auto& out = gpu->batches.back();
@@ -600,12 +602,18 @@ void ModelRenderer::Submit(const std::vector<Run>& runs, FXMMATRIX viewProj)
     const uint32_t now = uint32_t(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - m_start).count());
     std::vector<XMFLOAT4X4> palette(1);
     XMStoreFloat4x4(&palette[0], XMMatrixIdentity());
-    std::unordered_map<const GpuMesh*, UINT> boneBase;
+    // A run with its own pose (the NPC viewer) is posed by that skeleton at its own time.
+    auto skeletonOf = [](const Run& run) -> const ModelSkeleton* {
+        const ModelSkeleton* own = run.mesh->skeleton.get();
+        return own && run.pose && run.pose->bones.size() == own->bones.size() ? run.pose : own;
+    };
+    auto timeOf = [&](const Run& run) { return skeletonOf(run) == run.pose && run.pose ? run.timeMs : now; };
+    std::map<std::pair<const GpuMesh*, const ModelSkeleton*>, UINT> boneBase;
     std::vector<XMFLOAT4X4> pose;
     for (const Run& run : runs)
-        if (run.mesh->skeleton && boneBase.emplace(run.mesh, UINT(palette.size())).second)
+        if (const ModelSkeleton* skel = skeletonOf(run); skel && boneBase.emplace(std::pair(run.mesh, skel), UINT(palette.size())).second)
         {
-            PoseBones(*run.mesh->skeleton, now, pose);
+            PoseBones(*skel, timeOf(run), pose);
             palette.insert(palette.end(), pose.begin(), pose.end());
         }
     if (palette.size() > m_boneCapacity)
@@ -654,7 +662,9 @@ void ModelRenderer::Submit(const std::vector<Run>& runs, FXMMATRIX viewProj)
             const UINT strides[2] = { sizeof(ModelVertex), sizeof(XMFLOAT4X4) }, offsets[2] = { 0, 0 };
             m_context->IASetVertexBuffers(0, 2, buffers, strides, offsets);
             m_context->IASetIndexBuffer(run.mesh->indices.Get(), DXGI_FORMAT_R32_UINT, 0);
-            auto base = boneBase.find(run.mesh);
+            const ModelSkeleton* skel = skeletonOf(run);
+            const uint32_t time = timeOf(run);
+            auto base = boneBase.find(std::pair(run.mesh, skel));
             setBase(base == boneBase.end() ? 0 : base->second);
             for (const auto& b : run.mesh->batches)
             {
@@ -667,9 +677,8 @@ void ModelRenderer::Submit(const std::vector<Run>& runs, FXMMATRIX viewProj)
                     texture = look->textures[b.textureType];
                 if (b.frames && !b.frames->empty()) texture = (*b.frames)[m_textures->LiquidFrame(b.frames->size())];
                 // Texture animation (scrolling, fading) from the model's animation clock.
-                const ModelSkeleton* skel = run.mesh->skeleton.get();
-                const float alpha = skel && (b.weight >= 0 || b.color >= 0) ? BatchAlpha(*skel, b.weight, b.color, now) : 1.0f;
-                const XMFLOAT4 uv = skel && b.uvAnim >= 0 ? UvTransform(*skel, b.uvAnim, now) : XMFLOAT4{ 1, 1, 0, 0 };
+                const float alpha = skel && (b.weight >= 0 || b.color >= 0) ? BatchAlpha(*skel, b.weight, b.color, time) : 1.0f;
+                const XMFLOAT4 uv = skel && b.uvAnim >= 0 ? UvTransform(*skel, b.uvAnim, time) : XMFLOAT4{ 1, 1, 0, 0 };
                 if (alpha <= 0.001f) continue;
                 setMode(b.blend == ModelMesh::Blend::AlphaTest ? 0.5f : 0.0f, b.liquid ? (b.rawLiquid ? 1.0f : 0.72f) : 0.0f, b.rawLiquid ? 1.0f : 0.0f, alpha, uv);
                 m_context->OMSetBlendState(!blended ? nullptr : b.blend == ModelMesh::Blend::Additive ? m_additive.Get() : m_alphaBlend.Get(),
@@ -685,19 +694,58 @@ void ModelRenderer::Submit(const std::vector<Run>& runs, FXMMATRIX viewProj)
     m_context->VSSetShaderResources(1, 1, &none);
 }
 
-std::optional<XMFLOAT4X4> ModelRenderer::AttachmentMatrix(const std::string& model, uint32_t id, const MpqChain& mpq)
+std::optional<XMFLOAT4X4> ModelRenderer::AttachmentMatrix(const std::string& model, uint32_t id, const MpqChain& mpq,
+                                                          const ModelSkeleton* pose, uint32_t timeMs)
 {
     const GpuMesh* mesh = Mesh(M2Name(model), false, mpq);
     if (!mesh || !mesh->skeleton) return std::nullopt;
-    for (const auto& a : mesh->skeleton->attachments)
+    const ModelSkeleton& skel = pose && pose->bones.size() == mesh->skeleton->bones.size() ? *pose : *mesh->skeleton;
+    for (const auto& a : skel.attachments)
         if (a.id == id)
         {
             std::vector<XMFLOAT4X4> palette;
-            PoseBones(*mesh->skeleton, 0, palette);
+            PoseBones(skel, &skel == pose ? timeMs : 0, palette);
             const XMFLOAT3 p = FromWowAxes(a.pos.x, a.pos.y, a.pos.z);
             XMFLOAT4X4 out;
             XMStoreFloat4x4(&out, XMMatrixTranslation(p.x, p.y, p.z) * XMLoadFloat4x4(&palette[a.bone]));
             return out;
         }
     return std::nullopt;
+}
+
+void ModelRenderer::DrawParts(const std::vector<Part>& parts, FXMMATRIX viewProj, const MpqChain& mpq)
+{
+    if (!m_instanceBuffer)
+    {
+        m_instanceCapacity = 1024;
+        D3D11_BUFFER_DESC desc{ UINT(m_instanceCapacity * sizeof(XMFLOAT4X4)), D3D11_USAGE_DYNAMIC, D3D11_BIND_VERTEX_BUFFER, D3D11_CPU_ACCESS_WRITE };
+        m_device->CreateBuffer(&desc, nullptr, &m_instanceBuffer);
+    }
+    std::vector<Run> runs;
+    std::vector<XMFLOAT4X4> worlds;
+    for (const Part& p : parts)
+    {
+        const bool wmo = Lower(p.look.model).ends_with(".wmo");
+        GpuMesh* mesh = Mesh(wmo ? p.look.model : M2Name(p.look.model), wmo, mpq);
+        if (!mesh || worlds.size() >= m_instanceCapacity) continue;
+        runs.push_back({ mesh, UINT(worlds.size()), 1, ResolveLook(p.look, mpq), p.pose, p.timeMs });
+        worlds.push_back(p.world);
+    }
+    D3D11_MAPPED_SUBRESOURCE mapped;
+    if (runs.empty() || !m_instanceBuffer || FAILED(m_context->Map(m_instanceBuffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return;
+    memcpy(mapped.pData, worlds.data(), worlds.size() * sizeof(XMFLOAT4X4));
+    m_context->Unmap(m_instanceBuffer.Get(), 0);
+    Submit(runs, viewProj);
+}
+
+std::optional<ModelRenderer::ModelInfo> ModelRenderer::Info(const std::string& model, const MpqChain& mpq)
+{
+    const bool wmo = Lower(model).ends_with(".wmo");
+    const GpuMesh* mesh = Mesh(wmo ? model : M2Name(model), wmo, mpq);
+    if (!mesh) return std::nullopt;
+    ModelInfo info{ mesh->skeleton, {}, mesh->textureNames, mesh->boundsMin, mesh->boundsMax };
+    for (const auto& b : mesh->batches) info.geosets.push_back(b.geoset);
+    std::sort(info.geosets.begin(), info.geosets.end());
+    info.geosets.erase(std::unique(info.geosets.begin(), info.geosets.end()), info.geosets.end());
+    return info;
 }

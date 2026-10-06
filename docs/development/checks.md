@@ -27,7 +27,7 @@ Direct3D device. Checks that write files use a temporary folder and remove it.
 | `--water-check <Data> <map> <x> <y>` | Dry over wet and back, undo/redo, rotation, export of water |
 | `--blueprint-check <Data> <map> <x> <y> <out.png>` | Save, load and draw a blueprint |
 | `--model-check <Data> <map> <x> <y>` | Every model a tile places loads, boxes fit |
-| `--anim-check <Data> <model.m2> [...]` | Skeletons animate without flying apart |
+| `--anim-check <Data> <model.m2> [...]` | Skeletons animate without flying apart; every animation (incl. `.anim` files) loads and Walk differs from Stand |
 | `--catalog-check <Data> <out.png>` | Catalog build time, search, thumbnails |
 | `--asset-check <Data> <other client> <map> <x> <y>` | Paste from another client, cracks, the asset closure |
 | `--render <Data> <map> <x> <y> <out.png> [yaw pitch above fx fz]` | Draws a view to a PNG |

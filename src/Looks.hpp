@@ -38,6 +38,14 @@ public:
     /// The gameobject's model path (empty: none).
     std::string GameObjectModel(uint32_t displayId);
 
+    /// NPC viewer: an animation's name from AnimationData.dbc ("Stand", "Walk", ...; "Anim <id>" when unknown).
+    std::string AnimationName(uint32_t animationId);
+    /// Every CreatureDisplayInfo id drawing the same model as `displayId` (itself included), ascending: its skins.
+    std::vector<uint32_t> SameModel(uint32_t displayId);
+    /// A creature display's skin names (TextureVariation, empty ones left out) and whether it is a humanoid
+    /// (CreatureDisplayInfoExtra) display.
+    std::vector<std::string> SkinNames(uint32_t displayId, bool* humanoid = nullptr);
+
 private:
     void Load();
     std::optional<SpawnModel> CreatureLook(const Spawn& spawn);
@@ -50,7 +58,7 @@ private:
 
     const MpqChain& m_mpq;
     bool m_loaded = false;
-    Dbc m_displayInfo, m_modelData, m_goDisplay, m_extra, m_sections, m_hair, m_facial, m_items, m_races, m_helmVis;
+    Dbc m_displayInfo, m_modelData, m_goDisplay, m_extra, m_sections, m_hair, m_facial, m_items, m_races, m_helmVis, m_animations;
 };
 
 /// Placement of a spawn's model at editor position `p`: server orientation o turns the model's +x to the server

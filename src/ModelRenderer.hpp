@@ -62,7 +62,25 @@ public:
     bool Corners(bool wmo, uint32_t uid, DirectX::XMFLOAT3 corners[8]) const;
     /// Where an M2 attachment point (helmet 11, hands 1 / 2, ...) sits in the model, posed at its first animation
     /// frame: attachment offset x bone pose, in editor axes. Null when the model or the point is missing.
-    std::optional<DirectX::XMFLOAT4X4> AttachmentMatrix(const std::string& model, uint32_t id, const MpqChain& mpq);
+    /// `pose` / `timeMs`: posed by that skeleton at that time instead (the NPC viewer).
+    std::optional<DirectX::XMFLOAT4X4> AttachmentMatrix(const std::string& model, uint32_t id, const MpqChain& mpq,
+                                                        const ModelSkeleton* pose = nullptr, uint32_t timeMs = 0);
+
+    /// One model of a preview scene (the NPC viewer), posed by `pose` at `timeMs` instead of the shared clock
+    /// (null pose: the model's own animation on the shared clock).
+    struct Part { ModelLook look; DirectX::XMFLOAT4X4 world; const ModelSkeleton* pose = nullptr; uint32_t timeMs = 0; };
+    /// Draws parts into the render target bound now (the caller sets it, its viewport, and clears it).
+    void DrawParts(const std::vector<Part>& parts, DirectX::FXMMATRIX viewProj, const MpqChain& mpq);
+    /// What the NPC viewer lists about a model: its own skeleton (with the animation list), submesh ids, fixed
+    /// textures and bounds (model space, editor axes). Null when it cannot be loaded.
+    struct ModelInfo
+    {
+        std::shared_ptr<const ModelSkeleton> skeleton;
+        std::vector<uint16_t> geosets;      // sorted, once each
+        std::vector<std::string> textures;  // fixed textures
+        DirectX::XMFLOAT3 boundsMin{}, boundsMax{};
+    };
+    std::optional<ModelInfo> Info(const std::string& model, const MpqChain& mpq);
     /// Every loaded object (previews excluded) with its box centre in the world.
     void ForEachObject(const std::function<void(bool wmo, uint32_t uid, const DirectX::XMFLOAT3& center)>& fn) const;
 
@@ -110,6 +128,7 @@ private:
         std::shared_ptr<const ModelSkeleton> skeleton;   // posed every frame when set
         std::vector<ModelMesh::Doodad> doodads;           // WMO: its doodads and sets (see ModelMesh)
         std::vector<ModelMesh::DoodadSet> doodadSets;
+        std::vector<std::string> textureNames;            // the batches' fixed textures, once each
     };
     struct Look;
     struct Instance
@@ -140,7 +159,7 @@ private:
     struct Thumb;
     /// Renders meshes (each with a world matrix and look) into a fresh thumbnail, framed on the first one.
     void RenderThumb(Thumb& thumb, const std::vector<std::tuple<GpuMesh*, DirectX::XMFLOAT4X4, const Look*>>& parts);
-    struct Run { GpuMesh* mesh; UINT first, count; const Look* look = nullptr; };
+    struct Run { GpuMesh* mesh; UINT first, count; const Look* look = nullptr; const ModelSkeleton* pose = nullptr; uint32_t timeMs = 0; };
     /// Draws runs of instances already written to the instance buffer: opaque pass, then blended pass.
     void Submit(const std::vector<Run>& runs, DirectX::FXMMATRIX viewProj);
     void AddInstance(int tile, const std::string& key, GpuMesh* mesh, DirectX::FXMMATRIX world, float scale, uint32_t uid, int layer,

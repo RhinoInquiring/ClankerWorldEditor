@@ -49,6 +49,7 @@ add_executable(wow-world-editor WIN32
     src/AppFlights.cpp
     src/Differences.cpp
     src/AppInspect.cpp
+    src/AppNpc.cpp
     src/AppPaths.cpp
     src/AppPois.cpp
     src/AppServer.cpp

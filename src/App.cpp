@@ -1117,6 +1117,24 @@ void App::DrawCatalog()
     ImGui::End();
 }
 
+const std::vector<SpawnAdapter::Template>& App::UnitTemplates(SpawnKind kind)
+{
+    const int k = kind == SpawnKind::Creature ? 0 : 1;
+    SpawnAdapter& adapter = kind == SpawnKind::Creature ? m_creatures : m_gameobjects;
+    if (!m_unitTemplatesRead[k] && adapter.Connected())
+    {
+        m_unitTemplatesRead[k] = true;
+        const char* table = kind == SpawnKind::Creature ? "creature_template" : "gameobject_template";
+        std::string error;
+        const auto start = std::chrono::steady_clock::now();
+        m_unitTemplates[k] = adapter.All(error);
+        if (!error.empty()) Log("%s: %s", table, error.c_str());
+        else Log("Catalog: %zu %s rows in %.0f ms.", m_unitTemplates[k].size(), table,
+                 std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - start).count());
+    }
+    return m_unitTemplates[k];
+}
+
 void App::DrawUnitCatalog(SpawnKind kind)
 {
     const int k = kind == SpawnKind::Creature ? 0 : 1;
@@ -1127,16 +1145,7 @@ void App::DrawUnitCatalog(SpawnKind kind)
         ImGui::TextColored(kQuiet, "Connect the world database (File > Server setup) to list %s.", table);
         return;
     }
-    if (!m_unitTemplatesRead[k])
-    {
-        m_unitTemplatesRead[k] = true;
-        std::string error;
-        const auto start = std::chrono::steady_clock::now();
-        m_unitTemplates[k] = adapter.All(error);
-        if (!error.empty()) Log("%s: %s", table, error.c_str());
-        else Log("Catalog: %zu %s rows in %.0f ms.", m_unitTemplates[k].size(), table,
-                 std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - start).count());
-    }
+    UnitTemplates(kind);
     // Folders: creature types (CreatureType in AzerothCore SharedDefines.h), gameobject types.
     static const char* const kCreatureTypes[] = { "None", "Beast", "Dragonkin", "Demon", "Elemental", "Giant", "Undead", "Humanoid",
                                                   "Critter", "Mechanical", "Not specified", "Totem", "Non-combat pet", "Gas cloud" };
@@ -1249,12 +1258,13 @@ void App::DrawUnitCatalog(SpawnKind kind)
                                              : ImGui::Button(m_models.ThumbnailFailed("look:" + thumbKey) ? "no model" : "...",
                                                              { thumb + style.FramePadding.x * 2, thumb + style.FramePadding.y * 2 });
                     if (picked) ImGui::PopStyleColor();
+                    if (kind == SpawnKind::Creature && ImGui::IsItemClicked(ImGuiMouseButton_Right)) OpenNpc(t.entry);
                     if (ImGui::BeginItemTooltip())
                     {
                         ImGui::Text("%s  #%u", t.name.c_str(), t.entry);
                         ImGui::TextColored(kQuiet, "%s   %s   display %u", t.detail.c_str(), categoryName(t.category).c_str(), t.displayId);
                         if (const auto n = nearby.find(t.entry); n != nearby.end()) ImGui::TextColored(kQuiet, "%d spawned around the camera", n->second);
-                        ImGui::TextColored(kQuiet, "Click to place it");
+                        ImGui::TextColored(kQuiet, kind == SpawnKind::Creature ? "Click to place it, right-click for the NPC viewer" : "Click to place it");
                         ImGui::EndTooltip();
                     }
                     if (clicked && picked) m_spawnArmed.reset();   // clicking the one being placed again stops placing it
@@ -2185,6 +2195,7 @@ void App::Frame(float dt)
         ImGui::SetNextWindowDockID(inspector->DockId, ImGuiCond_FirstUseEver);
     DrawVersions();
     DrawSources();
+    DrawNpcViewer();
     DrawChangesPanel();
     DrawProblemsPanel();
     if (ImGuiWindow* log = ImGui::FindWindowByName("Log"); log && log->DockId) ImGui::SetNextWindowDockID(log->DockId, ImGuiCond_FirstUseEver);
@@ -2331,6 +2342,7 @@ void App::DrawMenuBar()
         if (ImGui::MenuItem("Focus camera on tile", "F", false, !m_terrain.Tiles().empty())) FocusTile();
         ImGui::Separator();
         ImGui::MenuItem("Sources", nullptr, &m_showSources);
+        ImGui::MenuItem("NPC viewer", nullptr, &m_showNpc);
         if (ImGui::MenuItem("Reset panel layout")) m_buildLayout = true;
         ImGui::EndMenu();
     }

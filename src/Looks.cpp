@@ -53,6 +53,40 @@ void DisplayLooks::Load()
     load(m_items, "ItemDisplayInfo.dbc");
     load(m_races, "ChrRaces.dbc");
     load(m_helmVis, "HelmetGeosetVisData.dbc");
+    load(m_animations, "AnimationData.dbc");
+}
+
+std::string DisplayLooks::AnimationName(uint32_t id)
+{
+    Load();
+    const auto row = m_animations.Find(id);
+    const std::string name = row ? m_animations.Str(*row, 1) : std::string();
+    return name.empty() ? "Anim " + std::to_string(id) : name;
+}
+
+std::vector<uint32_t> DisplayLooks::SameModel(uint32_t displayId)
+{
+    Load();
+    std::vector<uint32_t> out;
+    const auto row = m_displayInfo.Find(displayId);
+    if (!row) return out;
+    const uint32_t model = m_displayInfo.U32(*row, CDI::ModelID);
+    for (uint32_t r = 0; r < m_displayInfo.Rows(); ++r)
+        if (m_displayInfo.U32(r, CDI::ModelID) == model) out.push_back(m_displayInfo.U32(r, 0));
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+std::vector<std::string> DisplayLooks::SkinNames(uint32_t displayId, bool* humanoid)
+{
+    Load();
+    std::vector<std::string> out;
+    const auto row = m_displayInfo.Find(displayId);
+    if (humanoid) *humanoid = row && m_displayInfo.U32(*row, CDI::ExtendedDisplayInfoID) != 0;
+    if (!row) return out;
+    for (uint32_t i = 0; i < 3; ++i)
+        if (std::string skin = m_displayInfo.Str(*row, CDI::TextureVariation + i); !skin.empty()) out.push_back(std::move(skin));
+    return out;
 }
 
 std::optional<DisplayLooks::SpawnModel> DisplayLooks::SpawnLook(const Spawn& s)

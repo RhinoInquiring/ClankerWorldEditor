@@ -2951,6 +2951,36 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdLine, int)
                        u1.z, u1.w, BatchAlpha(s, b.weight, b.color, 0), BatchAlpha(s, b.weight, b.color, 1000));
             }
             bad += !ok;
+            // Every other animation (the NPC viewer's list): each loads with the same bones, poses inside the model,
+            // and Walk (id 4) moves the model differently from Stand.
+            {
+                const FileReader read = [&mpq](const std::string& path) { return mpq.Read(path); };
+                size_t external = 0, failed = 0;
+                float walkDiff = -1;
+                for (size_t q = 0; q < s.sequences.size(); ++q)
+                {
+                    const auto other = LoadSkeleton(M2Name(name), read, int(q));
+                    external += !(s.sequences[q].flags & 0x20);
+                    if (!other || other->bones.size() != s.bones.size()) { ++failed; continue; }
+                    std::vector<XMFLOAT4X4> pa, pb;
+                    PoseBones(s, 250, pa);
+                    PoseBones(*other, 250, pb);
+                    float diff = 0, reach = 0;
+                    for (const ModelVertex& v : mesh->vertices)
+                    {
+                        const XMVECTOR p = XMLoadFloat3(&v.pos);
+                        const XMVECTOR x = XMVector3TransformCoord(p, XMLoadFloat4x4(&pa[v.bones[0]])), y = XMVector3TransformCoord(p, XMLoadFloat4x4(&pb[v.bones[0]]));
+                        diff = std::max(diff, XMVectorGetX(XMVector3Length(x - y)));
+                        reach = std::max(reach, XMVectorGetX(XMVector3Length(y - p)));
+                    }
+                    if (reach > size * 4) ++failed;   // flew apart
+                    if (s.sequences[q].id == 4 && walkDiff < 0) walkDiff = diff;
+                }
+                const bool seqOk = failed == 0 && (walkDiff < 0 || walkDiff > 0.0001f);
+                printf("     %s %zu animations (%zu in .anim files), %zu failed, Walk vs Stand %.3f\n", seqOk ? "ok  " : "FAIL", s.sequences.size(), external,
+                       failed, walkDiff);
+                bad += !seqOk;
+            }
             if (std::getenv("WWE_GEOSETS"))
             {
                 std::set<std::pair<uint16_t, uint32_t>> sets;

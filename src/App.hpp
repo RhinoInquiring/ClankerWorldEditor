@@ -569,6 +569,53 @@ private:
     void DrawUnitCatalog(SpawnKind kind);
     std::vector<SpawnAdapter::Template> m_unitTemplates[2];   // creature_template, gameobject_template (read on first view)
     bool m_unitTemplatesRead[2] = {};
+    /// The template list of a kind, read from the world database on first use (empty without one).
+    const std::vector<SpawnAdapter::Template>& UnitTemplates(SpawnKind kind);
+
+    // NPC viewer (AppNpc.cpp): one creature template in a preview of its own, after wow.export's Creatures tab:
+    // animations, skins, equipment, geosets, textures.
+    struct NpcView
+    {
+        uint32_t entry = 0;
+        std::string name;
+        struct Model { uint32_t displayId = 0; float scale = 1, probability = 0; };
+        std::vector<Model> models;                       // creature_template_model, by Idx
+        struct Equip { uint32_t id = 0, items[3] = {}, displays[3] = {}, types[3] = {}; };
+        std::vector<Equip> equips;                       // creature_equip_template sets
+        int equip = 0;                                   // index into equips, -1 none
+        uint32_t displayId = 0;                          // shown
+        float displayScale = 1;
+        std::vector<uint32_t> skins;                     // displays sharing the model
+        std::optional<DisplayLooks::SpawnModel> look;
+        std::optional<ModelRenderer::ModelInfo> info;
+        std::vector<uint16_t> geosets;                   // shown submeshes
+        std::set<uint32_t> hidden;                       // items hidden, by attachment id (99 = cape)
+        int sequence = -1;                               // index into info->skeleton->sequences
+        std::shared_ptr<const ModelSkeleton> pose;
+        float timeMs = 0, speed = 1;
+        bool paused = false, autoCamera = true;
+        float yaw = 0.6f, pitch = 0.25f, distance = 6, center[3] = {};
+        float background[3] = { 0.16f, 0.17f, 0.20f };
+        bool humanoid = false;                           // a CreatureDisplayInfoExtra display (character model)
+        bool focus = false;                              // bring the window forward next frame
+        std::string filter, listedFor = "\x01";          // template list filter; the filter `listed` was built for
+        std::vector<size_t> listed;                      // indices into UnitTemplates(Creature) passing the filter
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> color, depth;
+        Microsoft::WRL::ComPtr<ID3D11RenderTargetView> rtv;
+        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
+        Microsoft::WRL::ComPtr<ID3D11DepthStencilView> dsv;
+        UINT width = 0, height = 0;
+    } m_npc;
+    bool m_showNpc = false;
+    void DrawNpcViewer();
+    /// Opens the viewer on a creature template (reads its models and equipment sets).
+    void OpenNpc(uint32_t entry);
+    /// Shows one display of the open template: rebuilds its look, skins, geosets and animation list.
+    void SetNpcDisplay(uint32_t displayId, float scale);
+    /// Rebuilds the look after the equipment set changed (geosets and hidden items stay).
+    void RefreshNpcLook();
+    void SetNpcSequence(int sequence);
+    void DrawNpcPreview(const ImVec2& size);
     uint32_t m_unitCategory[2] = { ~0u, ~0u };                // folder picked in the tree (~0 = everything)
     std::vector<Ghosts::Version> m_versions;        // of the tile under the camera
     std::string m_versionsKey;

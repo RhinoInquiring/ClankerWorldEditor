@@ -27,7 +27,17 @@ template <class T> struct ModelTrack
     std::vector<T> values;
 };
 
-/// The bones of an M2 with one animation (Stand) and the global sequences, enough to pose every frame.
+/// One entry of an M2's animation list (M2Sequence).
+struct ModelSequence
+{
+    uint16_t id = 0, variation = 0;   // AnimationData id (0 Stand, 4 Walk, ...) and which variant of it
+    uint32_t duration = 0;            // ms
+    uint32_t flags = 0;               // 0x20 kept in the .m2 (else in a .anim file), 0x40 alias of `alias`
+    uint16_t alias = 0;               // the sequence this one plays instead (flag 0x40)
+};
+
+/// The bones of an M2 with one animation (Stand unless asked for another) and the global sequences, enough to pose
+/// every frame.
 struct ModelSkeleton
 {
     struct Bone
@@ -48,6 +58,8 @@ struct ModelSkeleton
     std::vector<UvAnim> uvAnims;
     std::vector<ModelTrack<float>> weights, colorAlphas;
     bool animated = false;                   // some track has keys
+    std::vector<ModelSequence> sequences;    // every animation of the model, in file order
+    int sequence = -1;                       // the one loaded (index into sequences), -1 none
 };
 /// The bone palette at `timeMs` in editor axes (row vectors: skinned = vertex * palette[bone]).
 void PoseBones(const ModelSkeleton& skeleton, uint32_t timeMs, std::vector<DirectX::XMFLOAT4X4>& palette);
@@ -100,6 +112,9 @@ using FileReader = std::function<std::optional<std::vector<uint8_t>>(const std::
 std::optional<ModelMesh> ParseM2(const std::vector<uint8_t>& m2, const std::vector<uint8_t>& skin, const FileReader& anim = {}, const std::string& m2Name = {});
 /// An M2 by name with its skin and the .anim file it needs.
 std::optional<ModelMesh> LoadM2(const std::string& m2Name, const FileReader& read);
+/// The skeleton of an M2 posed by animation `sequence` (index into its sequence list; aliases followed), reading the
+/// .anim file it needs; null when the model has no bones.
+std::shared_ptr<const ModelSkeleton> LoadSkeleton(const std::string& m2Name, const FileReader& read, int sequence);
 /// `groups` holds Root_000.wmo ... in order; missing groups may be empty vectors.
 std::optional<ModelMesh> ParseWmo(const std::vector<uint8_t>& root, const std::vector<std::vector<uint8_t>>& groups);
 /// Number of groups and the root bounding box (WoW axes, min then max) from a WMO root.

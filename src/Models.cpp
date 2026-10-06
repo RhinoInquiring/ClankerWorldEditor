@@ -123,8 +123,8 @@ namespace
     struct QuatRaw { int16_t v[4]; };
     float Unpack(int16_t v) { return (v < 0 ? v + 32768 : v - 32767) / 32767.0f; }
 
-    /// Bones, the Stand animation (else the first) and attachments; null when the model has no bones.
-    std::shared_ptr<const ModelSkeleton> ParseSkeleton(const std::vector<uint8_t>& d, const FileReader& anim, const std::string& name)
+    /// Bones, an animation (`sequence`, or -1: Stand, else the first) and attachments; null when the model has no bones.
+    std::shared_ptr<const ModelSkeleton> ParseSkeleton(const std::vector<uint8_t>& d, const FileReader& anim, const std::string& name, int sequence = -1)
     {
         M2Array bones{}, sequences{};
         if (!ReadAt(d, kM2Bones, bones) || bones.count == 0 || bones.count > 4096 || bones.offset > d.size() ||
@@ -133,10 +133,22 @@ namespace
         auto skeleton = std::make_shared<ModelSkeleton>();
         skeleton->globalSequences = Elements<uint32_t>(d, kM2GlobalLoops);
 
-        // The animation: Stand (id 0) if there is one, following aliases.
+        // The animation: the one asked for, else Stand (id 0) if there is one; aliases followed.
         uint32_t chosen = UINT32_MAX;
         ReadAt(d, kM2Sequences, sequences);
+        if (sequences.offset > d.size() || (d.size() - sequences.offset) / kSequenceSize < sequences.count) sequences.count = 0;
         auto seq = [&](uint32_t i, size_t field, auto& out) { return i < sequences.count && ReadAt(d, sequences.offset + size_t(i) * kSequenceSize + field, out); };
+        for (uint32_t i = 0; i < sequences.count; ++i)
+        {
+            ModelSequence q;
+            seq(i, 0, q.id);
+            seq(i, 2, q.variation);
+            seq(i, 4, q.duration);
+            seq(i, 12, q.flags);
+            seq(i, 62, q.alias);
+            skeleton->sequences.push_back(q);
+        }
+        if (sequence >= 0 && uint32_t(sequence) < sequences.count) chosen = uint32_t(sequence);
         for (uint32_t i = 0; i < sequences.count && chosen == UINT32_MAX; ++i)
             if (uint16_t id = 1; seq(i, 0, id) && id == 0) chosen = i;
         if (chosen == UINT32_MAX && sequences.count) chosen = 0;
@@ -170,6 +182,7 @@ namespace
             }
         }
         const uint32_t animIndex = chosen == UINT32_MAX ? 0 : chosen;
+        skeleton->sequence = chosen == UINT32_MAX ? -1 : int(chosen);
 
         skeleton->bones.resize(bones.count);
         for (uint32_t i = 0; i < bones.count; ++i)
@@ -389,6 +402,12 @@ std::optional<ModelMesh> ParseM2(const std::vector<uint8_t>& d, const std::vecto
     if (!mesh.skeleton)
         for (ModelVertex& v : mesh.vertices) { std::fill(std::begin(v.bones), std::end(v.bones), 0); v.weights[0] = 255; v.weights[1] = v.weights[2] = v.weights[3] = 0; }
     return mesh;
+}
+
+std::shared_ptr<const ModelSkeleton> LoadSkeleton(const std::string& name, const FileReader& read, int sequence)
+{
+    const auto m2 = read(name);
+    return m2 ? ParseSkeleton(*m2, read, name, sequence) : nullptr;
 }
 
 std::optional<ModelMesh> LoadM2(const std::string& name, const FileReader& read)

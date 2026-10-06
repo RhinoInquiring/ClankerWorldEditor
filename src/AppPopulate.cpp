@@ -437,6 +437,7 @@ void App::DrawSpawnsPanel(float w)
             ImGui::TextColored(kQuiet, "%.2f, %.2f, %.2f", first.x, first.y, first.z);
             const auto look = m_looks.SpawnLook(first);
             ImGui::TextColored(kQuiet, "display %u: %s", first.displayId, look ? look->look.model.c_str() : "(no model)");
+            if (first.kind == SpawnKind::Creature && ImGui::SmallButton("Open in NPC viewer")) OpenNpc(first.entry);
             for (int e : first.events)
                 ImGui::TextColored(kWarn, "%s event %s", e > 0 ? "Only during" : "Gone during", EventName(std::abs(e)).c_str());
         }
