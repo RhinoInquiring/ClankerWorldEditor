@@ -3168,8 +3168,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdLine, int)
         auto check = [&](bool ok, const char* what) { printf("%s %s\n", ok ? "ok  " : "FAIL", what); problems += !ok; };
         ChangeStore store;
         TableRowsAdapter templates(store, "creature_template", "entry"), models(store, "creature_template_model", "CreatureID", "Idx"),
-            equips(store, "creature_equip_template", "CreatureID", "ID");
-        TableRowsAdapter* tables[] = { &templates, &models, &equips };
+            equips(store, "creature_equip_template", "CreatureID", "ID"), loot(store, "creature_loot_template", "Entry", "Item");
+        TableRowsAdapter* tables[] = { &templates, &models, &equips, &loot };
         for (TableRowsAdapter* t : tables) { store.Register(*t); t->SetDb(&db); }
         const uint32_t source = __argc >= 4 ? uint32_t(_wtoi(__wargv[3])) : 823;   // Deputy Willem: a model and a weapon set
         auto count = [&](const char* table, const char* key, uint32_t id) {
@@ -3185,7 +3185,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdLine, int)
         auto retarget = [&](std::vector<nlohmann::json> rows, const char* key) { for (auto& r : rows) r[key] = entry; return rows; };
         std::vector<Change> parts;
         const std::pair<TableRowsAdapter*, std::vector<nlohmann::json>> copies[] = {
-            { &templates, retarget(src, "entry") }, { &models, retarget(models.Rows(source), "CreatureID") }, { &equips, retarget(equips.Rows(source), "CreatureID") } };
+            { &templates, retarget(src, "entry") }, { &models, retarget(models.Rows(source), "CreatureID") }, { &equips, retarget(equips.Rows(source), "CreatureID") },
+            { &loot, retarget(loot.Rows(uint32_t(std::stoul(src[0].value("lootid", std::string("0"))))), "Entry") } };   // its own loot, references included
         for (const auto& [t, rows] : copies)
             if (!rows.empty())
             {
@@ -3197,6 +3198,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdLine, int)
         check(count("creature_template", "entry", *id) == 1, "copy: template row written");
         check(count("creature_template_model", "CreatureID", *id) == count("creature_template_model", "CreatureID", source), "copy: every model row written");
         check(count("creature_equip_template", "CreatureID", *id) == count("creature_equip_template", "CreatureID", source), "copy: every equipment set written");
+        const uint32_t sourceLoot = uint32_t(std::stoul(src[0].value("lootid", std::string("0"))));
+        check(sourceLoot == 0 || count("creature_loot_template", "Entry", *id) == count("creature_loot_template", "Entry", sourceLoot),
+              "copy: every loot row written (items and references)");
         for (TableRowsAdapter* t : tables) check(t->LastError().empty(), (t->Table() + ": no write error " + t->LastError()).c_str());
 
         // Edit the name and add an equipment set in one batch, like Apply.
@@ -3221,7 +3225,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdLine, int)
         check(count("creature_equip_template", "CreatureID", *id) == count("creature_equip_template", "CreatureID", source), "undo edit: set removed");
         store.Undo();
         check(count("creature_template", "entry", *id) == 0 && count("creature_template_model", "CreatureID", *id) == 0 &&
-                  count("creature_equip_template", "CreatureID", *id) == 0, "undo copy: every row gone");
+                  count("creature_equip_template", "CreatureID", *id) == 0 && count("creature_loot_template", "Entry", *id) == 0, "undo copy: every row gone");
         const auto next = templates.NextKey(9000000, 9099999);
         check(next && *next > *id, "the undone entry is not handed out again (redo can bring it back)");
         printf("%s\n", problems ? "FAILED" : "all passed");

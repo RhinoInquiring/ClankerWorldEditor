@@ -27,7 +27,7 @@ Direct3D device. Checks that write files use a temporary folder and remove it.
 | `--water-check <Data> <map> <x> <y>` | Dry over wet and back, undo/redo, rotation, export of water |
 | `--blueprint-check <Data> <map> <x> <y> <out.png>` | Save, load and draw a blueprint |
 | `--model-check <Data> <map> <x> <y>` | Every model a tile places loads, boxes fit |
-| `--npc-check <AC server dir> [entry]` | NPC editor tables against the world database: copy a template with models and equipment (one batch), edit, undo; leaves the database as it was |
+| `--npc-check <AC server dir> [entry]` | NPC editor tables against the world database: copy a template with models, equipment and loot (one batch), edit, undo; leaves the database as it was |
 | `--skin-check <Data> <out.png> <display id> [...]` | Character skins the editor composites vs Blizzard's bakes, side by side; fails above a mean difference of 12 |
 | `--appearance-check <Data> [display id]` | A new appearance (copy, bake dropped, hair changed) draws composited, exports both DBCs, and reads back intact |
 | `--anim-check <Data> <model.m2> [...]` | Skeletons animate without flying apart; every animation (incl. `.anim` files) loads and Walk differs from Stand |

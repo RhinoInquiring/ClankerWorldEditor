@@ -631,7 +631,7 @@ private:
         uint64_t editRevision = ~0ull;                   // change store revision the rows were read at
         bool dirty = false;                              // edited and not applied
         std::string columnFilter;
-        struct Item { std::string name; uint32_t display = 0, type = 0; bool found = false; };
+        struct Item { std::string name; uint32_t display = 0, type = 0; bool found = false; uint32_t quality = 1; };
         std::map<uint32_t, Item> items;                  // item_template rows read so far, by entry
         int pickSet = -1, pickSlot = 0;                  // the equipment slot the item picker fills
         std::string pickQuery;
@@ -641,6 +641,12 @@ private:
         uint32_t appearanceId = 0;                       // the display editDisplay / editExtra are for (0 none)
         nlohmann::json editDisplay, editExtra;
         int pickArmor = -1;                              // the NPCItemDisplay slot the item picker fills (-1: an equipment set)
+        bool pickLoot = false;                           // the item picker adds a loot row instead
+        // Loot as edited, per kind (0 drops, 1 pickpocketing, 2 skinning): the rows of the loot id the template names.
+        struct Loot { uint32_t id = ~0u; std::vector<nlohmann::json> rows; };
+        Loot loot[3];
+        int lootKind = 0;
+        std::map<uint32_t, std::vector<std::vector<std::string>>> references;   // reference_loot_template rows read so far
         Microsoft::WRL::ComPtr<ID3D11Texture2D> color, depth;
         Microsoft::WRL::ComPtr<ID3D11RenderTargetView> rtv;
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
@@ -668,6 +674,9 @@ private:
     void DrawNpcGearTab();
     void DrawItemPicker();
     void DrawNpcAppearanceTab();
+    void DrawNpcLootTab();
+    /// The loot rows of one kind for the template's current loot id (read when the id changes).
+    NpcView::Loot& NpcLoot(int kind);
     /// A new editable character display in the project's ranges: a copy of `from` (its baked texture dropped, so the
     /// client composites the edits), or a new human when 0. It replaces `from` in the template's models (else is added).
     void NewNpcAppearance(uint32_t from);
@@ -788,10 +797,14 @@ private:
     // NPC editor (AppNpc.cpp): a template, its models and its equipment sets.
     TableRowsAdapter m_npcTemplates{ m_store, "creature_template", "entry" }, m_npcModels{ m_store, "creature_template_model", "CreatureID", "Idx" },
                      m_npcEquips{ m_store, "creature_equip_template", "CreatureID", "ID" };
+    // Loot (AppNpc.cpp Loot tab): what a creature drops, can be pickpocketed for and skinned for, by loot id.
+    TableRowsAdapter m_lootDrops{ m_store, "creature_loot_template", "Entry", "Item" }, m_lootPickpocket{ m_store, "pickpocketing_loot_template", "Entry", "Item" },
+                     m_lootSkinning{ m_store, "skinning_loot_template", "Entry", "Item" };
     /// Every world-table adapter: registered, connected, synced, exported and checked alike.
     std::vector<TableRowsAdapter*> TableAdapters()
     {
-        return { &m_waypoints, &m_addons, &m_triggerRows, &m_teleports, &m_instances, &m_gossipPois, &m_teles, &m_npcTemplates, &m_npcModels, &m_npcEquips };
+        return { &m_waypoints, &m_addons, &m_triggerRows, &m_teleports, &m_instances, &m_gossipPois, &m_teles, &m_npcTemplates, &m_npcModels, &m_npcEquips,
+                 &m_lootDrops, &m_lootPickpocket, &m_lootSkinning };
     }
     PoiKind m_poiKind = PoiKind::MapIcon;                 // POIs tool: the kind listed, placed and selected
     uint32_t m_poiSel = 0;                                // selected point id of m_poiKind (0 = none)

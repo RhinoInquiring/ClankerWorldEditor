@@ -54,6 +54,22 @@ CharacterFacialHairStyles have for that race and body; faces follow the skin, ha
   `out/client/DBFilesClient`, `out/server/dbc` and `out/dbc/*.json` (mod-dbc-patch); copy `out/server/dbc` to the
   server and restart client and worldserver.
 
+## Loot
+
+The **Loot** tab edits what the creature drops (`creature_loot_template`, by `lootid`), can be pickpocketed for
+(`pickpocketing_loot_template`, `pickpocketloot`) and skinned for (`skinning_loot_template`, `skinloot`).
+
+- Each row is an item (icon, name in its quality colour) or a **reference** to a shared `reference_loot_template`
+  (expand it to see what it holds). **Chance** in percent (100 always); **Group** 0 rolls the row on its own, rows of
+  group 1 and up drop at most one of them (chance 0 in a group: an equal share of what the others leave); **Min / Max**
+  count; **Quest** = only for players on a quest needing it; **Mode** = loot mode mask (1 normal).
+- **Add item...** searches every item; **Add reference** adds a reference row by entry.
+- A creature with no loot id gets **Give it loot of its own** (the id becomes its entry). A loot id shared with other
+  creatures is flagged; **Give it loot of its own (copy)** copies the rows to this creature's own id first.
+- Groups whose chances add up past 100% are flagged.
+- Apply writes the rows with the NPC's other edits and sends `.reload creature_loot_template` (or the pickpocketing /
+  skinning table) over SOAP: a running server drops the new loot at once.
+
 On a running worldserver, Apply sends `.reload creature_template <entry>` over SOAP for existing templates; models,
 equipment and new templates need a restart (AzerothCore has no reload for them).
 

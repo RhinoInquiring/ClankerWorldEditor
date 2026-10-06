@@ -22,6 +22,14 @@ constexpr float kFrameMs = 1000.0f / 30;   // one step of the frame buttons
 uint32_t U(const std::string& s) { return uint32_t(std::strtoul(s.c_str(), nullptr, 10)); }
 float F(const std::string& s) { return std::strtof(s.c_str(), nullptr); }
 
+/// An item quality's colour (0 poor ... 7 heirloom), as the game shows names.
+ImVec4 QualityColor(uint32_t quality)
+{
+    static const ImVec4 kColors[] = { { 0.62f, 0.62f, 0.62f, 1 }, { 1, 1, 1, 1 }, { 0.12f, 1, 0, 1 }, { 0, 0.44f, 0.87f, 1 },
+                                      { 0.64f, 0.21f, 0.93f, 1 }, { 1, 0.5f, 0, 1 }, { 0.9f, 0.8f, 0.5f, 1 }, { 0.9f, 0.8f, 0.5f, 1 } };
+    return quality < std::size(kColors) ? kColors[quality] : kColors[1];
+}
+
 /// A column of a row read from the database (column -> text); empty for NULL or missing.
 std::string Col(const nlohmann::json& row, const char* col)
 {
@@ -77,6 +85,7 @@ void App::LoadNpc(uint32_t entry, bool frame)
     v.dirty = false;
     v.appearanceId = 0;
     v.editDisplay = v.editExtra = nullptr;
+    for (auto& loot : v.loot) loot = {};
     v.name = Col(v.editTemplate, "name");
     RebuildNpcLists();
     // Keep showing the same display while it is still one of the template's (after an edit or an undo), else the first.
@@ -134,8 +143,8 @@ const App::NpcView::Item& App::NpcItem(uint32_t entry)
     if (auto it = m_npc.items.find(entry); it != m_npc.items.end()) return it->second;
     NpcView::Item& item = m_npc.items[entry];
     std::string error;
-    if (const auto rows = m_db.Query("SELECT name, displayid, InventoryType FROM item_template WHERE entry = " + std::to_string(entry), error); rows && !rows->empty())
-        item = { (*rows)[0][0], U((*rows)[0][1]), U((*rows)[0][2]), true };
+    if (const auto rows = m_db.Query("SELECT name, displayid, InventoryType, Quality FROM item_template WHERE entry = " + std::to_string(entry), error); rows && !rows->empty())
+        item = { (*rows)[0][0], U((*rows)[0][1]), U((*rows)[0][2]), true, U((*rows)[0][3]) };
     return item;
 }
 
@@ -471,6 +480,7 @@ void App::DrawNpcViewer()
             if (ImGui::BeginTabItem("Template")) { DrawNpcTemplateTab(); ImGui::EndTabItem(); }
             if (ImGui::BeginTabItem("Models & gear")) { DrawNpcGearTab(); ImGui::EndTabItem(); }
             if (ImGui::BeginTabItem("Appearance")) { DrawNpcAppearanceTab(); ImGui::EndTabItem(); }
+            if (ImGui::BeginTabItem("Loot")) { DrawNpcLootTab(); ImGui::EndTabItem(); }
             ImGui::EndTabBar();
         }
     }
@@ -677,6 +687,20 @@ void App::ApplyNpc()
             appearanceChanged = true;
         }
     const bool templateChanged = v.editTemplate.is_object() && add(m_npcTemplates, { v.editTemplate });
+    // Loot: rows of each kind under the loot id the (edited) template names.
+    TableRowsAdapter* lootTables[3] = { &m_lootDrops, &m_lootPickpocket, &m_lootSkinning };
+    bool lootChanged[3] = {};
+    for (int k = 0; k < 3; ++k)
+        if (const NpcView::Loot& loot = v.loot[k]; loot.id && loot.id != ~0u)
+        {
+            const auto before = lootTables[k]->Rows(loot.id);
+            if (before == loot.rows) continue;
+            Change c = lootTables[k]->MakeChange(loot.id, before, loot.rows, label);
+            lootTables[k]->Apply(c);
+            if (!lootTables[k]->LastError().empty()) Log("%s", lootTables[k]->LastError().c_str());
+            parts.push_back(std::move(c));
+            lootChanged[k] = true;
+        }
     const bool modelsChanged = add(m_npcModels, v.editModels);
     const bool equipChanged = add(m_npcEquips, v.editEquips);
     v.dirty = false;
@@ -687,6 +711,8 @@ void App::ApplyNpc()
     m_creatures.Refresh();            // spawns in the world take the new look
     if (templateChanged && RunServerCommand(".reload creature_template " + std::to_string(v.entry))) Log("%s: creature_template reloaded on the server.", label.c_str());
     if (modelsChanged || equipChanged) Log("%s: models and equipment reach a running worldserver after a restart.", label.c_str());
+    for (int k = 0; k < 3; ++k)
+        if (lootChanged[k] && RunServerCommand(".reload " + lootTables[k]->Table())) Log("%s: %s reloaded on the server.", label.c_str(), lootTables[k]->Table().c_str());
     if (appearanceChanged)
         Log("%s: the appearance is CreatureDisplayInfo / CreatureDisplayInfoExtra rows: export (and build the patch), copy out/server/dbc to the "
             "server, then restart the client and worldserver.", label.c_str());
@@ -973,6 +999,8 @@ void App::DrawNpcGearTab()
         ImGui::EndTable();
     }
     if (remove) { v.editModels.erase(v.editModels.begin() + std::ptrdiff_t(*remove)); changed = true; }
+    const bool listed = std::any_of(v.editModels.begin(), v.editModels.end(), [&](const nlohmann::json& m) { return U(Col(m, "CreatureDisplayID")) == v.displayId; });
+    ImGui::BeginDisabled(listed || !v.displayId);
     if (ImGui::Button("Add the shown display"))
     {
         nlohmann::json row = { { "CreatureID", entry }, { "CreatureDisplayID", std::to_string(v.displayId) }, { "DisplayScale", "1" },
@@ -980,7 +1008,9 @@ void App::DrawNpcGearTab()
         v.editModels.push_back(std::move(row));
         changed = true;
     }
-    ImGui::SetItemTooltip("Adds display %u (pick another under View > Skins first to add that one)", v.displayId);
+    ImGui::EndDisabled();
+    ImGui::SetItemTooltip(listed ? "Display %u is listed already: pick another under View > Skins to add it"
+                                 : "Adds display %u (pick another under View > Skins first to add that one)", v.displayId);
     float chances = 0;
     for (const auto& m : v.editModels) chances += F(Col(m, "Probability"));
     if (v.editModels.empty()) ImGui::TextColored(kWarn, "No model: the creature cannot spawn.");
@@ -1021,6 +1051,7 @@ void App::DrawNpcGearTab()
                 v.pickSet = int(i);
                 v.pickSlot = k;
                 v.pickArmor = -1;
+                v.pickLoot = false;
                 openPicker = true;
             }
             ImGui::SetItemTooltip("%s: item %u. Click to choose another.", kSlots[k], item);
@@ -1057,7 +1088,7 @@ void App::DrawItemPicker()
     bool search = ImGui::IsWindowAppearing();
     if (search) ImGui::SetKeyboardFocusHere();
     ImGui::SetNextItemWidth(-1);
-    if (ImGui::InputTextWithHint("##query", v.pickArmor >= 0 ? "Armour for this slot: name or entry" : "Weapons, shields, held items: name or entry", &v.pickQuery))
+    if (ImGui::InputTextWithHint("##query", v.pickLoot ? "Any item: name or entry" : v.pickArmor >= 0 ? "Armour for this slot: name or entry" : "Weapons, shields, held items: name or entry", &v.pickQuery))
         search = true;
     if (search)
     {
@@ -1065,7 +1096,8 @@ void App::DrawItemPicker()
         // What creature_equip_template accepts (weapons, shields, held-in-off-hand items, ranged weapons), or what an
         // armour slot of CreatureDisplayInfoExtra shows.
         static const char* const kArmourTypes[11] = { "1", "3", "4", "5, 20", "6", "7", "8", "9", "10", "19", "16" };
-        std::string where = v.pickArmor >= 0 && v.pickArmor < 11 ? std::string("InventoryType IN (") + kArmourTypes[v.pickArmor] + ")"
+        std::string where = v.pickLoot ? std::string("1 = 1")
+                          : v.pickArmor >= 0 && v.pickArmor < 11 ? std::string("InventoryType IN (") + kArmourTypes[v.pickArmor] + ")"
                                                                   : "InventoryType IN (13, 14, 15, 17, 21, 22, 23, 25, 26)";
         if (!v.pickQuery.empty())
         {
@@ -1073,10 +1105,10 @@ void App::DrawItemPicker()
             where += " AND (name LIKE " + m_db.Quote("%" + v.pickQuery + "%") + (number ? " OR entry = " + v.pickQuery : "") + ")";
         }
         std::string error;
-        if (const auto rows = m_db.Query("SELECT entry, name, displayid, InventoryType FROM item_template WHERE " + where + " ORDER BY name LIMIT 200", error))
+        if (const auto rows = m_db.Query("SELECT entry, name, displayid, InventoryType, Quality FROM item_template WHERE " + where + " ORDER BY name LIMIT 200", error))
             for (const auto& r : *rows)
             {
-                const NpcView::Item item{ r[1], U(r[2]), U(r[3]), true };
+                const NpcView::Item item{ r[1], U(r[2]), U(r[3]), true, U(r[4]) };
                 v.items[U(r[0])] = item;
                 v.pickHits.push_back({ U(r[0]), item });
             }
@@ -1093,7 +1125,10 @@ void App::DrawItemPicker()
             if (ID3D11ShaderResourceView* tex = icon.empty() ? nullptr : m_renderer.TextureFor(icon, m_mpq)) ImGui::Image(ImTextureID(intptr_t(tex)), { 20, 20 });
             else ImGui::Dummy({ 20, 20 });
             ImGui::SameLine();
-            if (ImGui::Selectable(item.name.c_str())) chosen = entry;
+            ImGui::PushStyleColor(ImGuiCol_Text, QualityColor(item.quality));
+            const bool picked = ImGui::Selectable(item.name.c_str());
+            ImGui::PopStyleColor();
+            if (picked) chosen = entry;
             ImGui::SameLine(360);
             ImGui::TextColored(kQuiet, "%u", entry);
             ImGui::PopID();
@@ -1101,7 +1136,16 @@ void App::DrawItemPicker()
         if (v.pickHits.size() == 200) ImGui::TextColored(kQuiet, "First 200 shown: type more of the name.");
     }
     ImGui::EndChild();
-    if (chosen && v.pickArmor >= 0 && v.editExtra.is_object())
+    if (chosen && *chosen && v.pickLoot)
+    {
+        NpcView::Loot& loot = NpcLoot(v.lootKind);
+        loot.rows.push_back({ { "Entry", std::to_string(loot.id) }, { "Item", std::to_string(*chosen) }, { "Reference", "0" }, { "Chance", "10" },
+                              { "QuestRequired", "0" }, { "LootMode", "1" }, { "GroupId", "0" }, { "MinCount", "1" }, { "MaxCount", "1" },
+                              { "Comment", Col(v.editTemplate, "name") + " - " + NpcItem(*chosen).name } });
+        v.dirty = true;
+        ImGui::CloseCurrentPopup();
+    }
+    else if (chosen && v.pickArmor >= 0 && v.editExtra.is_object())
     {
         const uint32_t display = *chosen ? NpcItem(*chosen).display : 0;
         v.editExtra["NPCItemDisplay[" + std::to_string(v.pickArmor) + "]"] = display;
@@ -1293,6 +1337,7 @@ void App::DrawNpcAppearanceTab()
         {
             v.pickArmor = slot;
             v.pickSet = -1;
+            v.pickLoot = false;
             openPicker = true;
         }
         ImGui::SetItemTooltip("Choose an item for the %s slot (its display is stored)", kSlots[slot]);
@@ -1308,4 +1353,198 @@ void App::DrawNpcAppearanceTab()
         v.dirty = true;
         RefreshNpcDisplay();
     }
+}
+
+// ---------------------------------------------------------------------------------------------- loot
+
+App::NpcView::Loot& App::NpcLoot(int kind)
+{
+    NpcView& v = m_npc;
+    static const char* const kFields[3] = { "lootid", "pickpocketloot", "skinloot" };
+    TableRowsAdapter* tables[3] = { &m_lootDrops, &m_lootPickpocket, &m_lootSkinning };
+    NpcView::Loot& loot = v.loot[kind];
+    const uint32_t id = U(Col(v.editTemplate, kFields[kind]));
+    if (loot.id != id)
+    {
+        loot.id = id;
+        loot.rows = id ? tables[kind]->Rows(id) : std::vector<nlohmann::json>{};
+    }
+    return loot;
+}
+
+void App::DrawNpcLootTab()
+{
+    NpcView& v = m_npc;
+    if (!v.entry || !v.editTemplate.is_object()) { ImGui::TextColored(kQuiet, "No creature open."); return; }
+    static const char* const kKinds[3] = { "Drops", "Pickpocketing", "Skinning" };
+    static const char* const kFields[3] = { "lootid", "pickpocketloot", "skinloot" };
+    for (int k = 0; k < 3; ++k)
+    {
+        if (k) ImGui::SameLine();
+        if (ImGui::RadioButton(kKinds[k], v.lootKind == k)) v.lootKind = k;
+    }
+    NpcView::Loot& loot = NpcLoot(v.lootKind);
+    const std::string field = kFields[v.lootKind];
+
+    // The loot id: the template's column; several creatures may share one.
+    if (!loot.id)
+    {
+        ImGui::TextWrapped("This creature has no %s loot (%s = 0).", kKinds[v.lootKind], field.c_str());
+        if (ImGui::Button("Give it loot of its own"))
+        {
+            v.editTemplate[field] = std::to_string(v.entry);   // AzerothCore's convention: the loot id is the entry
+            v.dirty = true;
+        }
+        ImGui::SetItemTooltip("Sets %s to %u (its entry); then add items", field.c_str(), v.entry);
+        return;
+    }
+    std::string error;
+    const auto shared = m_db.Query("SELECT COUNT(*) FROM creature_template WHERE " + field + " = " + std::to_string(loot.id) + " AND entry <> " + std::to_string(v.entry), error);
+    const int others = shared && !shared->empty() ? std::atoi((*shared)[0][0].c_str()) : 0;
+    ImGui::TextColored(kQuiet, "%s = %u", field.c_str(), loot.id);
+    if (others)
+    {
+        ImGui::SameLine();
+        ImGui::TextColored(kWarn, "shared with %d other creature(s)", others);
+        ImGui::SetItemTooltip("Edits change their loot too. Give this one its own to keep them apart.");
+        if (loot.id != v.entry && ImGui::SmallButton("Give it loot of its own (copy)"))
+        {
+            auto rows = loot.rows;
+            for (auto& r : rows) r["Entry"] = std::to_string(v.entry);
+            v.editTemplate[field] = std::to_string(v.entry);
+            NpcLoot(v.lootKind).rows = std::move(rows);   // re-read for the new id, then replaced by the copy
+            v.dirty = true;
+            return;
+        }
+    }
+
+    // One row per item or reference. Items in a group (1+) drop one of them; group 0 rolls each on its own.
+    bool changed = false;
+    std::optional<size_t> remove;
+    std::map<uint32_t, float> groupChance;
+    std::map<uint32_t, int> groupZero;   // rows with chance 0 in a group: they share what is left
+    if (ImGui::BeginTable("##loot", 8, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_ScrollY,
+                          { 0, std::min(ImGui::GetTextLineHeightWithSpacing() * (float(loot.rows.size()) + 2.5f), 420.0f) }))
+    {
+        ImGui::TableSetupScrollFreeze(0, 1);
+        ImGui::TableSetupColumn("Item", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("Chance", ImGuiTableColumnFlags_WidthFixed, 62);
+        ImGui::TableSetupColumn("Group", ImGuiTableColumnFlags_WidthFixed, 38);
+        ImGui::TableSetupColumn("Min", ImGuiTableColumnFlags_WidthFixed, 32);
+        ImGui::TableSetupColumn("Max", ImGuiTableColumnFlags_WidthFixed, 32);
+        ImGui::TableSetupColumn("Quest", ImGuiTableColumnFlags_WidthFixed, 38);
+        ImGui::TableSetupColumn("Mode", ImGuiTableColumnFlags_WidthFixed, 36);
+        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 18);
+        ImGui::TableHeadersRow();
+        for (size_t i = 0; i < loot.rows.size(); ++i)
+        {
+            nlohmann::json& r = loot.rows[i];
+            ImGui::PushID(int(i));
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            const uint32_t item = U(Col(r, "Item")), reference = U(Col(r, "Reference"));
+            if (reference)
+            {
+                // A reference: the rows of reference_loot_template it names, rolled MinCount..MaxCount times.
+                const bool open = ImGui::TreeNodeEx("##ref", ImGuiTreeNodeFlags_SpanAvailWidth, "Reference %u  %s", reference, Col(r, "Comment").c_str());
+                if (open)
+                {
+                    auto [it, added] = v.references.try_emplace(reference);
+                    if (added)
+                        if (const auto rows = m_db.Query("SELECT r.Item, COALESCE(i.name, ''), r.Chance, r.GroupId, COALESCE(i.Quality, 1) FROM reference_loot_template r "
+                                                         "LEFT JOIN item_template i ON i.entry = r.Item WHERE r.Entry = " + std::to_string(reference) + " ORDER BY r.GroupId, r.Chance DESC",
+                                                         error))
+                            it->second = *rows;
+                    for (const auto& ref : it->second)
+                    {
+                        ImGui::TextColored(QualityColor(U(ref[4])), "%s", ref[1].empty() ? ("#" + ref[0]).c_str() : ref[1].c_str());
+                        ImGui::SameLine();
+                        ImGui::TextColored(kQuiet, "%s%%  group %s", ref[2].c_str(), ref[3].c_str());
+                    }
+                    if (it->second.empty()) ImGui::TextColored(kQuiet, "(no rows)");
+                    ImGui::TreePop();
+                }
+            }
+            else
+            {
+                const NpcView::Item& info = NpcItem(item);
+                const std::string icon = m_looks.ItemIcon(info.display);
+                if (ID3D11ShaderResourceView* tex = icon.empty() ? nullptr : m_renderer.TextureFor(icon, m_mpq)) ImGui::Image(ImTextureID(intptr_t(tex)), { 18, 18 });
+                else ImGui::Dummy({ 18, 18 });
+                ImGui::SameLine();
+                ImGui::TextColored(QualityColor(info.quality), "%s", info.found ? info.name.c_str() : ("#" + std::to_string(item) + " (not in item_template)").c_str());
+                ImGui::SetItemTooltip("Item %u   %s", item, Col(r, "Comment").c_str());
+            }
+            auto number = [&](const char* id, const char* col, float lo, float hi, const char* format) {
+                ImGui::TableNextColumn();
+                ImGui::SetNextItemWidth(-1);
+                float x = F(Col(r, col));
+                if (ImGui::DragFloat(id, &x, std::string(col) == "Chance" ? 0.5f : 0.1f, lo, hi, format, ImGuiSliderFlags_AlwaysClamp))
+                {
+                    char text[32];
+                    snprintf(text, sizeof text, std::string(col) == "Chance" ? "%g" : "%.0f", x);
+                    r[col] = text;
+                    changed = true;
+                }
+            };
+            number("##chance", "Chance", 0, 100, "%.1f%%");
+            ImGui::SetItemTooltip("100 always; 0 in a group: an equal share of what the group's other rows leave");
+            number("##group", "GroupId", 0, 255, "%.0f");
+            ImGui::SetItemTooltip("0: rolled on its own. 1 and up: at most one row of the group drops");
+            number("##min", "MinCount", 1, 255, "%.0f");
+            number("##max", "MaxCount", 1, 255, "%.0f");
+            ImGui::TableNextColumn();
+            if (bool quest = Col(r, "QuestRequired") != "0" && !Col(r, "QuestRequired").empty(); ImGui::Checkbox("##quest", &quest))
+            {
+                r["QuestRequired"] = quest ? "1" : "0";
+                changed = true;
+            }
+            ImGui::SetItemTooltip("Drops only for players on a quest that needs it");
+            number("##mode", "LootMode", 0, 65535, "%.0f");
+            ImGui::SetItemTooltip("Loot mode bit mask (1 normal; scripts switch others on, e.g. hard modes)");
+            ImGui::TableNextColumn();
+            if (ImGui::SmallButton("x")) remove = i;
+            const uint32_t group = U(Col(r, "GroupId"));
+            if (group)
+            {
+                groupChance[group] += F(Col(r, "Chance"));
+                if (F(Col(r, "Chance")) == 0) ++groupZero[group];
+            }
+            ImGui::PopID();
+        }
+        ImGui::EndTable();
+    }
+    if (remove) { loot.rows.erase(loot.rows.begin() + std::ptrdiff_t(*remove)); changed = true; }
+    if (loot.rows.empty()) ImGui::TextColored(kQuiet, "Nothing yet.");
+    for (const auto& [group, chance] : groupChance)
+        if (chance > 100.001f) ImGui::TextColored(kWarn, "Group %u: chances add up to %.1f%% (over 100: some rows can never drop).", group, chance);
+        else if (groupZero.count(group)) ImGui::TextColored(kQuiet, "Group %u: %.1f%% fixed, %d row(s) share the remaining %.1f%%.", group, chance, groupZero[group], 100 - chance);
+
+    if (ImGui::Button("Add item..."))
+    {
+        v.pickLoot = true;
+        v.pickArmor = v.pickSet = -1;
+        ImGui::OpenPopup("##itempick");
+    }
+    ImGui::SameLine();
+    static int newReference = 0;
+    ImGui::SetNextItemWidth(90);
+    ImGui::InputInt("##ref", &newReference, 0);
+    ImGui::SameLine();
+    if (ImGui::Button("Add reference") && newReference > 0)
+    {
+        loot.rows.push_back({ { "Entry", std::to_string(loot.id) }, { "Item", "0" }, { "Reference", std::to_string(newReference) }, { "Chance", "100" },
+                              { "QuestRequired", "0" }, { "LootMode", "1" }, { "GroupId", "0" }, { "MinCount", "1" }, { "MaxCount", "1" },
+                              { "Comment", Col(v.editTemplate, "name") + " - (ReferenceTable)" } });
+        changed = true;
+    }
+    ImGui::SetItemTooltip("A reference_loot_template entry: a shared table (\"Grey 1-5\", \"Small Pouch\" ...) rolled as one row");
+    if (v.lootKind == 0)
+    {
+        const uint32_t lo = U(Col(v.editTemplate, "mingold")), hi = U(Col(v.editTemplate, "maxgold"));
+        ImGui::TextColored(kQuiet, "Money: %u - %u copper (Template tab)", lo, hi);
+    }
+    DrawItemPicker();
+    if (changed) v.dirty = true;
+    v.pickLoot = v.pickLoot && ImGui::IsPopupOpen("##itempick");
 }
