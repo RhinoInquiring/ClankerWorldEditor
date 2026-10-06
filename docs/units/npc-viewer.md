@@ -18,6 +18,9 @@ MIT), rebuilt on this editor's renderer and AzerothCore's tables. Needs the worl
 | Geosets | One "Group: variant" dropdown per submesh group (None / a variant / All), named like wow.export (Hair, Gloves, Cloak, ...) on character models; single submeshes and the base mesh are checkboxes; **As spawned** resets |
 | Textures | The look's skins, hair, cape and the model's fixed textures; hover for a large view, click to copy the path |
 
+The three parts resize: drag the list's right edge, or the preview's right edge to give the tabs more room (the
+layout is remembered). Tabs that do not fit scroll, and the arrow at the tab bar's end lists them all.
+
 Items follow the animated attachment points here (in the world view they stay at the first frame).
 
 ## Editing
@@ -69,6 +72,33 @@ The **Loot** tab edits what the creature drops (`creature_loot_template`, by `lo
 - Groups whose chances add up past 100% are flagged.
 - Apply writes the rows with the NPC's other edits and sends `.reload creature_loot_template` (or the pickpocketing /
   skinning table) over SOAP: a running server drops the new loot at once.
+
+## Dialogue
+
+The **Dialogue** tab has two parts.
+
+**Gossip** edits what the creature says when a player talks to it: its menu (`gossip_menu_id`), the menu's texts
+(`npc_text`) and options (`gossip_menu_option`), and the conditions on them.
+
+- A preview drawn like the game's gossip window shows the text and the options with the game's own icons. Click an
+  option that opens a menu to follow it; the trail above goes back.
+- **Create a gossip menu** makes a menu and its first text in the project's `gossip_menu.id` / `npc_text.id` ranges
+  (default 9000000-9099999) and turns on the Gossip NPC flag. A menu or text other creatures use is flagged.
+- Texts: one text to men (and everyone when the second is empty), one to women; `$N` name, `$C` class, `$R` race,
+  `$B` new line. A menu may hold several texts: the server shows the last (by id) whose conditions hold, so
+  **+ another text** with a condition replaces the default while it holds.
+- Options: icon, text, what choosing it does (gossip submenu, vendor, trainer, innkeeper, banker ...; the NPC flag it
+  needs is set on the option and offered on the creature), **+ submenu** (a new menu the option opens), **Ask first**
+  (a confirmation box, optionally with a price in copper).
+- Conditions (**+ show only when...**): quest rewarded / taken / complete / not taken / state, level, class, race,
+  gender, team, reputation, items, auras, spells, skills, achievements, titles, game events, zone / area / map; each
+  can be negated, and else groups combine them (all of one group, any group).
+
+**Barks** edits the creature's `creature_text` lines: group, text, say / yell / emote / whisper (and boss variants),
+range and chance. Scripts say a group (SmartAI's Talk action, C++ `Talk(group)`); one line of it is picked by chance.
+
+Applying reloads `gossip_menu`, `gossip_menu_option`, `conditions` and `creature_text` on a running server over SOAP.
+`npc_text` has no reload: restart worldserver (and players may need to clear their cache) to see changed texts.
 
 On a running worldserver, Apply sends `.reload creature_template <entry>` over SOAP for existing templates; models,
 equipment and new templates need a restart (AzerothCore has no reload for them).

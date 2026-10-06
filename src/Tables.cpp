@@ -21,7 +21,7 @@ void TableRowsAdapter::NetState(std::map<uint32_t, nlohmann::json>& now, std::ma
 
 std::string TableRowsAdapter::Statements(const Db& db, uint32_t key, const nlohmann::json& rows) const
 {
-    std::string sql = "DELETE FROM " + m_table + " WHERE `" + m_key + "` = " + std::to_string(key) + ";\n";
+    std::string sql = "DELETE FROM " + m_table + " WHERE `" + m_key + "` = " + std::to_string(key) + Filter() + ";\n";
     for (const auto& row : rows) sql += UpsertSql(db, m_table, row) + ";\n";
     return sql;
 }
@@ -29,7 +29,7 @@ std::string TableRowsAdapter::Statements(const Db& db, uint32_t key, const nlohm
 bool TableRowsAdapter::Write(uint32_t key, const nlohmann::json& rows, std::string& error) const
 {
     if (!Connected()) { error = "Not connected to the world database."; return false; }
-    if (!m_db->Query("DELETE FROM " + m_table + " WHERE `" + m_key + "` = " + std::to_string(key), error)) return false;
+    if (!m_db->Query("DELETE FROM " + m_table + " WHERE `" + m_key + "` = " + std::to_string(key) + Filter(), error)) return false;
     for (const auto& row : rows)
         if (!m_db->Query(UpsertSql(*m_db, m_table, row), error)) return false;
     return true;
@@ -60,7 +60,7 @@ std::vector<nlohmann::json> TableRowsAdapter::Rows(uint32_t key) const
     if (auto it = now.find(key); it != now.end()) return it->second.get<std::vector<nlohmann::json>>();
     if (!Connected()) return {};
     std::string error;
-    auto rows = m_db->QueryRows("SELECT * FROM " + m_table + " WHERE `" + m_key + "` = " + std::to_string(key) +
+    auto rows = m_db->QueryRows("SELECT * FROM " + m_table + " WHERE `" + m_key + "` = " + std::to_string(key) + Filter() +
                                 (m_order.empty() ? "" : " ORDER BY `" + m_order + "`"), error);
     return rows.value_or(std::vector<nlohmann::json>{});
 }
@@ -71,7 +71,7 @@ std::map<uint32_t, std::vector<nlohmann::json>> TableRowsAdapter::All() const
     if (Connected())
     {
         std::string error;
-        for (auto& row : m_db->QueryRows("SELECT * FROM " + m_table, error).value_or(std::vector<nlohmann::json>{}))
+        for (auto& row : m_db->QueryRows("SELECT * FROM " + m_table + (m_filter.empty() ? std::string() : " WHERE " + m_filter), error).value_or(std::vector<nlohmann::json>{}))
             if (row[m_key].is_string()) all[uint32_t(std::stoul(row[m_key].get<std::string>()))].push_back(std::move(row));
     }
     std::map<uint32_t, nlohmann::json> now, original;
@@ -132,7 +132,7 @@ std::optional<uint32_t> TableRowsAdapter::NextKey(uint32_t first, uint32_t last)
     if (Connected())
     {
         std::string error;
-        if (auto rows = m_db->Query("SELECT MAX(`" + m_key + "`) FROM " + m_table + " WHERE `" + m_key + "` BETWEEN " + std::to_string(first) + " AND " +
+        if (auto rows = m_db->Query("SELECT MAX(`" + m_key + "`) FROM " + m_table + " WHERE 1 = 1" + Filter() + " AND `" + m_key + "` BETWEEN " + std::to_string(first) + " AND " +
                                     std::to_string(last), error);
             rows && !rows->empty() && !(*rows)[0][0].empty())
             use(uint32_t(std::stoul((*rows)[0][0])));

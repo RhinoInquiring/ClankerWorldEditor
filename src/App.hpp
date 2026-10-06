@@ -647,6 +647,17 @@ private:
         Loot loot[3];
         int lootKind = 0;
         std::map<uint32_t, std::vector<std::vector<std::string>>> references;   // reference_loot_template rows read so far
+        // Dialogue as edited: gossip menus by id (their gossip_menu, gossip_menu_option and conditions rows), the
+        // npc_text rows they show, and the creature's creature_text lines.
+        struct Dialogue
+        {
+            std::map<uint32_t, std::vector<nlohmann::json>> menus, options, conditions;
+            std::map<uint32_t, nlohmann::json> texts;          // null: no such row
+            uint32_t current = 0;                              // the menu shown
+            std::vector<uint32_t> trail;                       // submenus followed from the root
+            std::vector<nlohmann::json> barks;
+            bool barksLoaded = false;
+        } dialogue;
         Microsoft::WRL::ComPtr<ID3D11Texture2D> color, depth;
         Microsoft::WRL::ComPtr<ID3D11RenderTargetView> rtv;
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
@@ -677,6 +688,19 @@ private:
     void DrawNpcLootTab();
     /// The loot rows of one kind for the template's current loot id (read when the id changes).
     NpcView::Loot& NpcLoot(int kind);
+    // Dialogue tab (AppDialogue.cpp).
+    void DrawNpcDialogueTab();
+    void DrawGossip();
+    void DrawBarks();
+    /// Conditions on one menu text (source 14) or option (15): rows of the menu's conditions, edited in place.
+    void DrawConditions(uint32_t menu, int source, uint32_t entry);
+    void LoadGossipMenu(uint32_t menu);
+    /// A new gossip menu with one new text in the project's ranges (not written until Apply); 0 when out of ids.
+    uint32_t NewGossipMenu(const std::string& text);
+    uint32_t NewNpcText(const std::string& text);
+    uint32_t NewDialogueId(TableRowsAdapter& table, const char* kind, const std::vector<uint32_t>& buffered);
+    /// The dialogue's changed rows as change parts; `reloads` gets the tables a running server can reload.
+    void DialogueChanges(std::vector<Change>& parts, const std::string& label, std::set<std::string>& reloads);
     /// A new editable character display in the project's ranges: a copy of `from` (its baked texture dropped, so the
     /// client composites the edits), or a new human when 0. It replaces `from` in the template's models (else is added).
     void NewNpcAppearance(uint32_t from);
@@ -800,11 +824,16 @@ private:
     // Loot (AppNpc.cpp Loot tab): what a creature drops, can be pickpocketed for and skinned for, by loot id.
     TableRowsAdapter m_lootDrops{ m_store, "creature_loot_template", "Entry", "Item" }, m_lootPickpocket{ m_store, "pickpocketing_loot_template", "Entry", "Item" },
                      m_lootSkinning{ m_store, "skinning_loot_template", "Entry", "Item" };
+    // Dialogue: gossip menus, their texts and options, the conditions on those (source types 14 and 15 only), barks.
+    TableRowsAdapter m_gossipMenus{ m_store, "gossip_menu", "MenuID", "TextID" }, m_gossipOptions{ m_store, "gossip_menu_option", "MenuID", "OptionID" },
+                     m_npcTexts{ m_store, "npc_text", "ID" },
+                     m_gossipConditions{ m_store, "conditions", "SourceGroup", "SourceEntry", "SourceTypeOrReferenceId IN (14, 15)", "gossip" },
+                     m_creatureTexts{ m_store, "creature_text", "CreatureID", "GroupID" };
     /// Every world-table adapter: registered, connected, synced, exported and checked alike.
     std::vector<TableRowsAdapter*> TableAdapters()
     {
         return { &m_waypoints, &m_addons, &m_triggerRows, &m_teleports, &m_instances, &m_gossipPois, &m_teles, &m_npcTemplates, &m_npcModels, &m_npcEquips,
-                 &m_lootDrops, &m_lootPickpocket, &m_lootSkinning };
+                 &m_lootDrops, &m_lootPickpocket, &m_lootSkinning, &m_gossipMenus, &m_gossipOptions, &m_npcTexts, &m_gossipConditions, &m_creatureTexts };
     }
     PoiKind m_poiKind = PoiKind::MapIcon;                 // POIs tool: the kind listed, placed and selected
     uint32_t m_poiSel = 0;                                // selected point id of m_poiKind (0 = none)

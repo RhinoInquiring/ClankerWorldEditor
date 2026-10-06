@@ -64,6 +64,7 @@ format code never touches the GPU; the `App*` files are the UI.
 | `src/AppDifferences.cpp` | Catalog > Differences: scan, cards, review, new tiles |
 | `src/AppSources.cpp` | Sources window |
 | `src/AppPopulate.cpp` | Creatures and Gameobjects tools, unit catalog |
+| `src/AppDialogue.cpp` | NPC viewer Dialogue tab: gossip menus, texts, options, conditions, barks |
 | `src/AppNpc.cpp` | NPC viewer: template list, posed preview, animations, skins, equipment, geosets, textures |
 | `src/AppPaths.cpp` | Path editing |
 | `src/AppZones.cpp` | Zones tool, buildings' room names |

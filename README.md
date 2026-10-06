@@ -66,7 +66,7 @@ click a tile to fly there.
 | --- | --- |
 | [Creatures and gameobjects](docs/units/spawns.md) | Place and edit spawns in the world database, with their real models |
 | [Paths](docs/units/paths.md) | Draw and edit creature waypoint paths in 3D |
-| [NPC viewer](docs/units/npc-viewer.md) | One creature in its own preview (animations, skins, equipment, geosets, textures); edit its template, models and equipment, or copy it as a new NPC; design character appearances (race, face, hair, armour); edit drops, pickpocketing and skinning loot |
+| [NPC viewer](docs/units/npc-viewer.md) | One creature in its own preview (animations, skins, equipment, geosets, textures); edit its template, models and equipment, or copy it as a new NPC; design character appearances (race, face, hair, armour); edit drops, pickpocketing and skinning loot; gossip menus, options, conditions and barks |
 
 ![A creature selected with its waypoint path: balls, tubes and blue arrows](docs/images/spawns-paths.jpg)
 

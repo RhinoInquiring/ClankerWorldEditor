@@ -3154,6 +3154,97 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdLine, int)
         }
         return bad ? 1 : 0;
     }
+    if (cmdLine && wcsstr(cmdLine, L"--dialogue-check") && __argc >= 3)
+    {
+        // `--dialogue-check <AC server dir>`: the Dialogue tab's tables against the real world database, cleaning up
+        // after itself: a new menu with a text, an option opening a submenu, conditions on both, and a bark, as one batch;
+        // a condition of another kind under the same id must survive every write; then undo and confirm nothing is left.
+        std::string password, note, error;
+        const auto profile = ServerProfile::FromWorldserverConf(std::filesystem::path(__wargv[2]), password, note);
+        if (!profile) { printf("%s\n", note.c_str()); return 1; }
+        Db db;
+        if (!db.Connect(profile->dbHost, profile->dbPort, profile->dbUser, password, profile->worldDb, error)) { printf("db: %s\n", error.c_str()); return 1; }
+        int problems = 0;
+        auto check = [&](bool ok, const std::string& what) { printf("%s %s\n", ok ? "ok  " : "FAIL", what.c_str()); problems += !ok; };
+        auto count = [&](const std::string& sql) {
+            const auto r = db.Query("SELECT COUNT(*) FROM " + sql, error);
+            return r && !r->empty() ? std::stoi((*r)[0][0]) : -1;
+        };
+        ChangeStore store;
+        TableRowsAdapter menus(store, "gossip_menu", "MenuID", "TextID"), options(store, "gossip_menu_option", "MenuID", "OptionID"), texts(store, "npc_text", "ID"),
+            conditions(store, "conditions", "SourceGroup", "SourceEntry", "SourceTypeOrReferenceId IN (14, 15)", "gossip"),
+            barks(store, "creature_text", "CreatureID", "GroupID");
+        for (TableRowsAdapter* t : { &menus, &options, &texts, &conditions, &barks }) { store.Register(*t); t->SetDb(&db); }
+        const uint32_t menu = menus.NextKey(9000000, 9099999).value_or(0), sub = menu + 1, text = texts.NextKey(9000000, 9099999).value_or(0), text2 = text + 1;
+        const uint32_t creature = 9099999;   // no such template: creature_text has no foreign key
+        if (!menu || !text) { printf("ranges full\n"); return 1; }
+        const std::string m = std::to_string(menu), s = std::to_string(sub), t1 = std::to_string(text), t2 = std::to_string(text2);
+        // A condition of another source type under the same SourceGroup: the gossip adapter must never touch it.
+        db.Query("INSERT INTO conditions (SourceTypeOrReferenceId, SourceGroup, SourceEntry, SourceId, ElseGroup, ConditionTypeOrReference, ConditionTarget, "
+                 "ConditionValue1, ConditionValue2, ConditionValue3, NegativeCondition, ErrorType, ErrorTextId, ScriptName, Comment) VALUES (1, " + m +
+                 ", 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, '', 'dialogue-check bystander')", error);
+        auto textRow = [&](const std::string& id, const std::string& body) {
+            nlohmann::json row = nlohmann::json::object();
+            if (const auto cols = db.Query("SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'npc_text'", error))
+                for (const auto& c : *cols) row[c[0]] = c[0].rfind("text", 0) == 0 ? "" : "0";
+            row["ID"] = id;
+            row["text0_0"] = body;
+            row["Probability0"] = "1";
+            return row;
+        };
+        auto condition = [&](int source, const std::string& entry) {
+            return nlohmann::json{ { "SourceTypeOrReferenceId", std::to_string(source) }, { "SourceGroup", m }, { "SourceEntry", entry }, { "SourceId", "0" },
+                                   { "ElseGroup", "0" }, { "ConditionTypeOrReference", "9" }, { "ConditionTarget", "0" }, { "ConditionValue1", "783" },
+                                   { "ConditionValue2", "0" }, { "ConditionValue3", "0" }, { "NegativeCondition", "0" }, { "ErrorType", "0" }, { "ErrorTextId", "0" },
+                                   { "ScriptName", "" }, { "Comment", "dialogue-check" } };
+        };
+        std::vector<Change> parts;
+        auto put = [&](TableRowsAdapter& table, uint32_t key, const std::vector<nlohmann::json>& rows) {
+            Change c = table.MakeChange(key, table.Rows(key), rows, "check");
+            table.Apply(c);
+            if (!table.LastError().empty()) printf("     %s: %s\n", table.Table().c_str(), table.LastError().c_str());
+            parts.push_back(std::move(c));
+        };
+        put(texts, text, { textRow(t1, "Greetings, $N.") });
+        put(texts, text2, { textRow(t2, "Back again?") });
+        put(menus, menu, { { { "MenuID", m }, { "TextID", t1 } } });
+        put(menus, sub, { { { "MenuID", s }, { "TextID", t2 } } });
+        put(options, menu, { { { "MenuID", m }, { "OptionID", "0" }, { "OptionIcon", "0" }, { "OptionText", "Tell me more." }, { "OptionBroadcastTextID", "0" },
+                               { "OptionType", "1" }, { "OptionNpcFlag", "1" }, { "ActionMenuID", s }, { "ActionPoiID", "0" }, { "BoxCoded", "0" }, { "BoxMoney", "0" },
+                               { "BoxText", "" }, { "BoxBroadcastTextID", "0" }, { "VerifiedBuild", "0" } } });
+        put(conditions, menu, { condition(14, t1), condition(15, "0") });
+        put(barks, creature, { { { "CreatureID", std::to_string(creature) }, { "GroupID", "0" }, { "ID", "0" }, { "Text", "For the Alliance!" }, { "Type", "14" },
+                                 { "Language", "0" }, { "Probability", "100" }, { "Emote", "0" }, { "Duration", "0" }, { "Sound", "0" }, { "BroadcastTextId", "0" },
+                                 { "TextRange", "0" }, { "comment", "dialogue-check" } } });
+        store.Commit(std::move(parts), "dialogue");
+        check(count("npc_text WHERE ID IN (" + t1 + ", " + t2 + ")") == 2, "texts written");
+        check(count("gossip_menu WHERE MenuID IN (" + m + ", " + s + ")") == 2, "menu and submenu written");
+        check(count("gossip_menu_option WHERE MenuID = " + m + " AND ActionMenuID = " + s) == 1, "option opening the submenu written");
+        check(count("conditions WHERE SourceGroup = " + m + " AND SourceTypeOrReferenceId IN (14, 15)") == 2, "conditions on the text and the option written");
+        check(count("creature_text WHERE CreatureID = " + std::to_string(creature)) == 1, "bark written");
+        check(count("conditions WHERE SourceGroup = " + m + " AND SourceTypeOrReferenceId = 1") == 1, "the other kind of condition under the same id untouched");
+        // Edit: drop the option's condition only.
+        {
+            std::vector<Change> edit;
+            Change c = conditions.MakeChange(menu, conditions.Rows(menu), { condition(14, t1) }, "edit");
+            conditions.Apply(c);
+            edit.push_back(std::move(c));
+            store.Commit(std::move(edit), "edit");
+        }
+        check(count("conditions WHERE SourceGroup = " + m + " AND SourceTypeOrReferenceId = 15") == 0 &&
+                  count("conditions WHERE SourceGroup = " + m + " AND SourceTypeOrReferenceId = 14") == 1, "edit: the option's condition removed, the text's kept");
+        store.Undo();
+        check(count("conditions WHERE SourceGroup = " + m + " AND SourceTypeOrReferenceId IN (14, 15)") == 2, "undo edit: both conditions back");
+        store.Undo();
+        check(count("npc_text WHERE ID IN (" + t1 + ", " + t2 + ")") == 0 && count("gossip_menu WHERE MenuID IN (" + m + ", " + s + ")") == 0 &&
+                  count("gossip_menu_option WHERE MenuID = " + m) == 0 && count("conditions WHERE SourceGroup = " + m + " AND SourceTypeOrReferenceId IN (14, 15)") == 0 &&
+                  count("creature_text WHERE CreatureID = " + std::to_string(creature)) == 0,
+              "undo: every row gone");
+        check(count("conditions WHERE SourceGroup = " + m + " AND SourceTypeOrReferenceId = 1") == 1, "the other kind of condition still untouched");
+        db.Query("DELETE FROM conditions WHERE SourceTypeOrReferenceId = 1 AND SourceGroup = " + m + " AND Comment = 'dialogue-check bystander'", error);
+        printf("%s\n", problems ? "FAILED" : "all passed");
+        return problems ? 1 : 0;
+    }
     if (cmdLine && wcsstr(cmdLine, L"--npc-check") && __argc >= 3)
     {
         // `--npc-check <AC server dir> [entry]`: the NPC editor's tables against the real world database, cleaning up

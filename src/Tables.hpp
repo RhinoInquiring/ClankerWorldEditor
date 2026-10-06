@@ -18,8 +18,11 @@ class TableRowsAdapter final : public Adapter
 {
 public:
     /// `order`: column the rows of a key are sorted by (empty: none).
-    TableRowsAdapter(ChangeStore& store, std::string table, std::string key, std::string order = {})
-        : m_store(store), m_table(std::move(table)), m_key(std::move(key)), m_order(std::move(order)), m_domain("world." + m_table) {}
+    /// `filter`: an SQL condition the adapter's rows also meet (a table shared by kinds of rows, e.g. the gossip rows of
+    /// conditions); its domain then carries `name`.
+    TableRowsAdapter(ChangeStore& store, std::string table, std::string key, std::string order = {}, std::string filter = {}, const std::string& name = {})
+        : m_store(store), m_table(std::move(table)), m_key(std::move(key)), m_order(std::move(order)), m_filter(std::move(filter)),
+          m_domain("world." + m_table + (name.empty() ? std::string() : "." + name)) {}
 
     const char* Domain() const override { return m_domain.c_str(); }
     const std::string& Table() const { return m_table; }
@@ -56,7 +59,8 @@ private:
     std::string Statements(const Db& db, uint32_t key, const nlohmann::json& rows) const;
 
     ChangeStore& m_store;
-    std::string m_table, m_key, m_order, m_domain;
+    std::string m_table, m_key, m_order, m_filter, m_domain;
+    std::string Filter() const { return m_filter.empty() ? std::string() : " AND (" + m_filter + ")"; }
     Db* m_db = nullptr;
     std::string m_lastError;
 };

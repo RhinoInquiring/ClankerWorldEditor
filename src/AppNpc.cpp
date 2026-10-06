@@ -86,6 +86,7 @@ void App::LoadNpc(uint32_t entry, bool frame)
     v.appearanceId = 0;
     v.editDisplay = v.editExtra = nullptr;
     for (auto& loot : v.loot) loot = {};
+    v.dialogue = {};
     v.name = Col(v.editTemplate, "name");
     RebuildNpcLists();
     // Keep showing the same display while it is still one of the template's (after an edit or an undo), else the first.
@@ -405,7 +406,8 @@ void App::DrawNpcViewer()
     const float sideWidth = 400;
     const ImGuiStyle& style = ImGui::GetStyle();
     const float barHeight = ImGui::GetFrameHeightWithSpacing() * 2 + style.ItemSpacing.y;
-    if (ImGui::BeginChild("##npcmain", { std::max(ImGui::GetContentRegionAvail().x - sideWidth - style.ItemSpacing.x, 100.0f), 0 }))
+    // Its right edge drags: a narrower preview gives the side panel room for every tab. Remembered with the layout.
+    if (ImGui::BeginChild("##npcmain", { std::max(ImGui::GetContentRegionAvail().x - sideWidth - style.ItemSpacing.x, 100.0f), 0 }, ImGuiChildFlags_ResizeX))
     {
         if (v.entry)
         {
@@ -474,13 +476,14 @@ void App::DrawNpcViewer()
             ImGui::SameLine();
             if (ImGui::SmallButton("Revert")) LoadNpc(v.entry, false);
         }
-        if (ImGui::BeginTabBar("##npctabs"))
+        if (ImGui::BeginTabBar("##npctabs", ImGuiTabBarFlags_FittingPolicyScroll | ImGuiTabBarFlags_TabListPopupButton))
         {
             if (ImGui::BeginTabItem("View")) { DrawNpcViewTab(); ImGui::EndTabItem(); }
             if (ImGui::BeginTabItem("Template")) { DrawNpcTemplateTab(); ImGui::EndTabItem(); }
             if (ImGui::BeginTabItem("Models & gear")) { DrawNpcGearTab(); ImGui::EndTabItem(); }
             if (ImGui::BeginTabItem("Appearance")) { DrawNpcAppearanceTab(); ImGui::EndTabItem(); }
             if (ImGui::BeginTabItem("Loot")) { DrawNpcLootTab(); ImGui::EndTabItem(); }
+            if (ImGui::BeginTabItem("Dialogue")) { DrawNpcDialogueTab(); ImGui::EndTabItem(); }
             ImGui::EndTabBar();
         }
     }
@@ -703,6 +706,8 @@ void App::ApplyNpc()
         }
     const bool modelsChanged = add(m_npcModels, v.editModels);
     const bool equipChanged = add(m_npcEquips, v.editEquips);
+    std::set<std::string> dialogueReloads;
+    DialogueChanges(parts, label, dialogueReloads);
     v.dirty = false;
     if (parts.empty()) return;
     m_store.Commit(std::move(parts), label);
@@ -713,6 +718,9 @@ void App::ApplyNpc()
     if (modelsChanged || equipChanged) Log("%s: models and equipment reach a running worldserver after a restart.", label.c_str());
     for (int k = 0; k < 3; ++k)
         if (lootChanged[k] && RunServerCommand(".reload " + lootTables[k]->Table())) Log("%s: %s reloaded on the server.", label.c_str(), lootTables[k]->Table().c_str());
+    for (const std::string& table : dialogueReloads)
+        if (table == "npc_text") Log("%s: npc_text is read when worldserver starts: restart it to see new or changed gossip texts.", label.c_str());
+        else if (RunServerCommand(".reload " + table)) Log("%s: %s reloaded on the server.", label.c_str(), table.c_str());
     if (appearanceChanged)
         Log("%s: the appearance is CreatureDisplayInfo / CreatureDisplayInfoExtra rows: export (and build the patch), copy out/server/dbc to the "
             "server, then restart the client and worldserver.", label.c_str());
