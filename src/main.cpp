@@ -145,6 +145,9 @@ namespace
                adt->textures.size(), adt->doodads.size(), adt->wmos.size(), maps ? ParseMapDbc(*maps).size() : size_t(0));
         printf("liquids %zu (%zu from old MCLQ chunks)\n", adt->liquids.size(),
                size_t(std::count_if(adt->liquids.begin(), adt->liquids.end(), [](const AdtLiquid& l) { return l.fromMclq; })));
+        for (const std::string& p : ValidateAdt(*bytes, WdtBigAlpha(*wdt))) printf("structure: %s\n", p.c_str());
+        printf("vertex colours: wdt %s, chunks with MCCV %zu\n", WdtVertexColors(*wdt) ? "on" : "off",
+               size_t(std::count_if(adt->chunks.begin(), adt->chunks.end(), [](const AdtChunk& c) { return !c.colors.empty(); })));
         return blpOk == adt->textures.size() ? 0 : 1;
     }
 
@@ -204,6 +207,91 @@ namespace
 
 namespace
 {
+    /// `--shade-check <data dir>`: on Northrend (vertex shading on), shade a stroke, undo and redo it, export and
+    /// read the tile back: the written MCCV matches the editor, other chunks keep Blizzard's bytes, the file validates.
+    int ShadeCheck()
+    {
+        if (__argc < 3 || !__wargv) return 2;
+        setvbuf(stdout, nullptr, _IONBF, 0);
+        char dataDir[1024] = {};
+        WideCharToMultiByte(CP_ACP, 0, __wargv[2], -1, dataDir, sizeof dataDir, nullptr, nullptr);
+        ComPtr<ID3D11Device> device;
+        ComPtr<ID3D11DeviceContext> context;
+        if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &device, nullptr, &context)))
+        { printf("no WARP device\n"); return 1; }
+        Renderer renderer;
+        std::string error;
+        if (!renderer.Init(device.Get(), context.Get(), error)) { printf("renderer: %s\n", error.c_str()); return 1; }
+        MpqChain mpq;
+        mpq.Open(dataDir);
+        ChangeStore store;
+        TerrainAdapter terrain(mpq, renderer, store);
+        store.Register(terrain);
+        if (!terrain.SetMap("Northrend", error) || !terrain.LoadNow(30, 22, error)) { printf("%s\n", error.c_str()); return 1; }
+        if (!terrain.VertexColors()) { printf("Northrend: vertex shading off?\n"); return 1; }
+        const int key = TileKey(30, 22);
+        const Adt original = terrain.Tiles().at(key).adt;
+
+        const XMFLOAT3 centre{ (30 * 16 + 8) * kChunkSize, 0, (22 * 16 + 8) * kChunkSize };
+        PaintBrush brush;
+        brush.radius = 20;
+        brush.pressure = 1;
+        terrain.BeginShade();
+        for (int i = 0; i < 30; ++i) terrain.ShadeStep(centre, brush, { 200, 40, 40 }, false, 0.05f);
+        auto change = terrain.EndShade();
+        if (!change) { printf("shade made no change\n"); return 1; }
+        store.Commit(*change);
+        const Adt shaded = terrain.Tiles().at(key).adt;
+        int problems = 0;
+        const auto at = terrain.ShadeAt(centre.x, centre.z);
+        printf("%s; colour at the centre %d %d %d\n", change->label.c_str(), at ? (*at)[0] : -1, at ? (*at)[1] : -1, at ? (*at)[2] : -1);
+        if (!at || (*at)[0] < 190 || (*at)[1] > 50) ++problems;
+        size_t changed = 0;
+        for (size_t ci = 0; ci < shaded.chunks.size(); ++ci) changed += shaded.chunks[ci].colors != original.chunks[ci].colors;
+        if (changed != change->data.at("colors").size()) ++problems;
+
+        store.Undo();
+        size_t restored = 0;
+        for (size_t ci = 0; ci < original.chunks.size(); ++ci) restored += terrain.Tiles().at(key).adt.chunks[ci].colors == original.chunks[ci].colors;
+        store.Redo();
+        printf("undo restored %zu/%zu chunks\n", restored, original.chunks.size());
+        if (restored != original.chunks.size()) ++problems;
+
+        // Copy the shaded 2x2 chunks and paste them blended 4 chunks away: the shading comes along, fading in at the edge.
+        std::set<ChunkRef> sel;
+        const int gx = 30 * 16 + 7, gz = 22 * 16 + 7;
+        for (int dz = 0; dz < 2; ++dz)
+            for (int dx = 0; dx < 2; ++dx) sel.insert(*terrain.ChunkAtGrid(gx + dx, gz + dz));
+        const PastePlan plan = terrain.PlanPaste(terrain.Copy(sel), gx + 4, gz, 0.0f, PasteOptions{});
+        auto pasteChange = terrain.ApplyPlan(plan, "paste check");
+        if (!pasteChange || !pasteChange->data.contains("colors")) { printf("paste carried no shading\n"); return 1; }
+        store.Commit(*pasteChange);
+        const auto pastedAt = terrain.ShadeAt(centre.x + 4 * kChunkSize, centre.z);
+        printf("paste: %zu chunk(s) reshaded, colour at the pasted centre %d %d %d\n", pasteChange->data.at("colors").size(),
+               pastedAt ? (*pastedAt)[0] : -1, pastedAt ? (*pastedAt)[1] : -1, pastedAt ? (*pastedAt)[2] : -1);
+        if (!pastedAt || (*pastedAt)[0] < 150 || (*pastedAt)[1] > 90) ++problems;
+
+        const std::filesystem::path out = std::filesystem::temp_directory_path() / "wow-world-editor-shadecheck";
+        std::error_code ec;
+        std::filesystem::remove_all(out, ec);
+        const size_t files = terrain.Export(out, error);
+        printf("export: %zu file(s)%s%s\n", files, error.empty() ? "" : ", ", error.c_str());
+        std::ifstream f(out / "World" / "Maps" / "Northrend" / "Northrend_30_22.adt", std::ios::binary);
+        const std::vector<uint8_t> written((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        f.close();
+        const auto back = ParseAdt(written, true);
+        size_t same = 0;
+        if (back)
+            for (size_t ci = 0; ci < back->chunks.size() && ci < shaded.chunks.size(); ++ci) same += back->chunks[ci].colors == terrain.Tiles().at(key).adt.chunks[ci].colors;
+        const auto issues = ValidateAdt(written, true);
+        printf("export: %zu bytes, MCCV matches the editor in %zu/%zu chunks, %zu validation problem(s)\n", written.size(), same,
+               shaded.chunks.size(), issues.size());
+        if (!back || same != shaded.chunks.size() || !issues.empty()) ++problems;
+        std::filesystem::remove_all(out, ec);
+        printf("%d problem(s)\n", problems);
+        return problems ? 1 : 0;
+    }
+
     /// `--plan-check <data dir>`: stream Northshire on a software device, copy 2x2 chunks, plan a blended
     /// paste 6 chunks away and check the result: finite heights, closed seams, at most four layers.
     int PlanCheck()
@@ -3918,6 +4006,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdLine, int)
         fly(false);
         return fly(true) < 50.0f ? 0 : 1;
     }
+    if (cmdLine && wcsstr(cmdLine, L"--shade-check")) return ShadeCheck();
     if (cmdLine && wcsstr(cmdLine, L"--plan-check"))
     {
         try { return PlanCheck(); }

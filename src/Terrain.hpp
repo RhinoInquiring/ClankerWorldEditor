@@ -82,6 +82,7 @@ struct TerrainClipboard
         nlohmann::json layers;              // texture names, flags, effects, alpha (see LayerState)
         uint16_t holes = 0;
         nlohmann::json liquids;             // LiquidState (absolute heights); null = leave the target's water alone
+        std::vector<uint8_t> colors;        // MCCV (145 x BGRA); empty = the source has no vertex shading
     };
     std::vector<Entry> chunks;
     // Objects standing on the copied chunks: x and z relative to the first chunk's corner, y absolute.
@@ -124,6 +125,7 @@ struct PastePlan
         nlohmann::json layers;              // LayerState; null = textures unchanged
         std::optional<uint16_t> holes;      // hole mask; none = unchanged
         nlohmann::json liquids;             // LiquidState; null = water unchanged, [] = no water
+        std::vector<uint8_t> colors;        // MCCV; empty = vertex shading unchanged
     };
     std::vector<Chunk> chunks;      // every chunk the paste changes, the blend band included
     std::vector<ChunkRef> footprint;
@@ -201,6 +203,16 @@ public:
     bool Painting() const { return m_painting; }
     /// The texture with the largest share at a point (the eyedropper).
     std::optional<std::string> TextureAt(float x, float z) const;
+
+    /// Vertex shading (MCCV): the client reads it only on maps whose WDT turns it on (Northrend does, the old
+    /// continents do not). Moves vertex colours towards `rgb` (0x7F = unchanged), or with erase back to neutral.
+    bool VertexColors() const { return m_vertexColors; }
+    void BeginShade() { m_shading = true; m_shadeBefore.clear(); }
+    void ShadeStep(const DirectX::XMFLOAT3& center, const PaintBrush& brush, const std::array<uint8_t, 3>& rgb, bool erase, float dt);
+    std::optional<Change> EndShade();
+    bool Shading() const { return m_shading; }
+    /// The vertex colour (R, G, B) nearest a point (the eyedropper); none where the chunk has no MCCV.
+    std::optional<std::array<uint8_t, 3>> ShadeAt(float x, float z) const;
 
     void BeginStroke(const TerrainHit& at);
     void StrokeStep(const DirectX::XMFLOAT3& center, const Brush& brush, float dt);
@@ -317,7 +329,8 @@ private:
     TileStats FinishTile(int x, int y, std::vector<uint8_t> bytes, Adt adt);
     Change MakeChange(const Edits& edits, const nlohmann::json& layers, const std::string& label,
                       const nlohmann::json& holes = nlohmann::json::array(), const nlohmann::json& objects = nlohmann::json::array(),
-                      const nlohmann::json& areas = nlohmann::json::array(), const nlohmann::json& liquids = nlohmann::json::array()) const;
+                      const nlohmann::json& areas = nlohmann::json::array(), const nlohmann::json& liquids = nlohmann::json::array(),
+                      const nlohmann::json& colors = nlohmann::json::array()) const;
     /// Adds (after) or removes (before) a change's objects on a loaded tile.
     void SetObjects(LoadedTile& tile, const nlohmann::json& objects, bool after);
     /// A WMO's world bounding box from its root file's bounds and the placement (unchanged if unreadable).
@@ -364,6 +377,9 @@ public:
 private:
     bool m_painting = false;
     std::map<std::pair<int, int>, nlohmann::json> m_paintBefore;   // (tile, chunk) -> layers before the stroke
+    bool m_vertexColors = false;   // the open map's WDT has MPHD flag 0x2
+    bool m_shading = false;
+    std::map<std::pair<int, int>, std::vector<uint8_t>> m_shadeBefore;   // (tile, chunk) -> MCCV before the stroke
     struct ObjectSnap { int tile; bool wmo; DoodadPlacement doodad; WmoPlacement wmoPlacement; };
     std::vector<ObjectSnap> m_objectEdit;
     mutable std::map<std::string, std::optional<std::array<float, 6>>> m_wmoBounds;   // root bounds by model name

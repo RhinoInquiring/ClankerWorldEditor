@@ -52,7 +52,7 @@ public:
     bool WantsQuit() const { return m_quit; }
 
 private:
-    enum class Tool { Select, Sculpt, Copy, Holes, Objects, Paint, Creatures, Gameobjects, Zones, Triggers, Pois, Flights };
+    enum class Tool { Select, Sculpt, Copy, Holes, Objects, Paint, Creatures, Gameobjects, Zones, Triggers, Pois, Flights, Shade };
     /// Tools come in groups (the toolbar's buttons); a group remembers the tool last used in it.
     enum class Group { Terrain, Objects, Units, Regions };
     static constexpr const char* kGroupNames[4] = { "Terrain", "Objects", "Units", "Regions" };
@@ -63,6 +63,7 @@ private:
         { Tool::Select, Group::Terrain, "Select", "V", ImGuiKey_V, "pick chunks to copy, rotate or save" },
         { Tool::Sculpt, Group::Terrain, "Sculpt", "B", ImGuiKey_B, "raise, lower, flatten, smooth (1-4)" },
         { Tool::Paint, Group::Terrain, "Paint", "T", ImGuiKey_T, "ground textures" },
+        { Tool::Shade, Group::Terrain, "Shade", "U", ImGuiKey_U, "vertex colours (maps with vertex shading)" },
         { Tool::Holes, Group::Terrain, "Holes", "H", ImGuiKey_H, "cut and fill terrain holes" },
         { Tool::Copy, Group::Terrain, "Copy", "C", ImGuiKey_C, "copy, paste and blend terrain" },
         { Tool::Objects, Group::Objects, "Place and edit", "O", ImGuiKey_O, "doodads and WMOs" },
@@ -512,6 +513,8 @@ private:
     std::string m_activeTexture;          // for the Paint tool
     std::vector<std::string> m_recentTextures;   // newest first
     PaintBrush m_paint;
+    PaintBrush m_shadeBrush;
+    std::array<uint8_t, 3> m_shadeColor{ 0x5A, 0x5A, 0x6A };   // R, G, B; 0x7F = unchanged
     std::optional<int> m_catalogShowTab;  // a tab the catalog should bring forward
     void PickTexture(const std::string& path);
     /// The project's reader falls back to the attached sources (assets pasted from other clients).

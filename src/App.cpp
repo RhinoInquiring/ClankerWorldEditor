@@ -2747,10 +2747,11 @@ void App::BuildOverlay(std::vector<LineVertex>& lines) const
 
     // Brush: outer ring at the radius, inner ring where the falloff is half. Only the brush tools have one; tools that
     // pick things (units, triggers, points, nodes) show their own hover instead.
-    if (m_tool != Tool::Sculpt && m_tool != Tool::Paint) return;
+    if (m_tool != Tool::Sculpt && m_tool != Tool::Paint && m_tool != Tool::Shade) return;
     const XMFLOAT4 ringColors[2] = { { 1, 1, 1, 0.9f }, { 1, 1, 1, 0.35f } };
-    const float radius = m_tool == Tool::Paint ? m_paint.radius : m_brush.radius;
-    const float radii[2] = { radius, m_tool == Tool::Paint ? std::max(radius * m_paint.hardness, 0.5f) : radius * 0.5f };
+    const PaintBrush* soft = m_tool == Tool::Paint ? &m_paint : m_tool == Tool::Shade ? &m_shadeBrush : nullptr;
+    const float radius = soft ? soft->radius : m_brush.radius;
+    const float radii[2] = { radius, soft ? std::max(radius * soft->hardness, 0.5f) : radius * 0.5f };
     for (int ring = 0; ring < 2; ++ring)
     {
         constexpr int kSegments = 64;
@@ -2828,6 +2829,7 @@ void App::DrawViewport(float dt)
             if (io.KeyCtrl && m_tool == Tool::Holes) m_holeRadius = std::clamp(m_holeRadius * (io.MouseWheel > 0 ? 1.2f : 0.83f), 1.0f, 60.0f);
             else if (io.KeyCtrl && m_tool == Tool::Zones) m_areaRadius = std::clamp(m_areaRadius * (io.MouseWheel > 0 ? 1.15f : 0.87f), 1.0f, 300.0f);
             else if (io.KeyCtrl && m_tool == Tool::Paint) m_paint.radius = std::clamp(m_paint.radius * (io.MouseWheel > 0 ? 1.15f : 0.87f), 1.0f, 150.0f);
+            else if (io.KeyCtrl && m_tool == Tool::Shade) m_shadeBrush.radius = std::clamp(m_shadeBrush.radius * (io.MouseWheel > 0 ? 1.15f : 0.87f), 1.0f, 150.0f);
             else if (io.KeyCtrl) m_brush.radius = std::clamp(m_brush.radius * (io.MouseWheel > 0 ? 1.15f : 0.87f), 1.0f, 300.0f);
             else if (io.KeyAlt && m_tool == Tool::Copy) m_pasteOffset = std::clamp(m_pasteOffset + io.MouseWheel * (io.KeyShift ? 0.1f : 0.5f), -50.0f, 50.0f);
             else if (m_looking)   // flying: the wheel sets the speed
@@ -2933,6 +2935,25 @@ void App::DrawViewport(float dt)
                 Log("%s (%zu chunks)", change->label.c_str(), change->data.at("layers").size());
                 m_store.Commit(std::move(*change));
             }
+    }
+    else if (m_tool == Tool::Shade)
+    {
+        // Drag tints towards the colour, Ctrl+drag returns to neutral, Alt+click picks the colour under the cursor.
+        if (ImGui::IsItemActivated() && ImGui::IsMouseDown(ImGuiMouseButton_Left) && m_hover)
+        {
+            if (io.KeyAlt)
+            {
+                if (const auto c = m_terrain.ShadeAt(m_hover->pos.x, m_hover->pos.z)) m_shadeColor = *c;
+            }
+            else if (!m_terrain.VertexColors())
+                Log("%s has no vertex shading: the client ignores vertex colours on this map.", m_terrain.Map().c_str());
+            else
+                m_terrain.BeginShade();
+        }
+        if (m_terrain.Shading() && ImGui::IsMouseDown(ImGuiMouseButton_Left) && m_hover)
+            m_terrain.ShadeStep(m_hover->pos, m_shadeBrush, m_shadeColor, io.KeyCtrl, dt);
+        if (m_terrain.Shading() && !ImGui::IsMouseDown(ImGuiMouseButton_Left))
+            if (auto change = m_terrain.EndShade()) m_store.Commit(std::move(*change));
     }
     else if (SpawnTool())
     {
@@ -3148,7 +3169,7 @@ void App::DrawViewport(float dt)
     const ImVec2 pad{ origin.x + 12, origin.y + 10 };
     if (!m_terrain.Map().empty())
     {
-        const char* tools[] = { "Select", "Sculpt", "Copy", "Holes", "Objects", "Paint", "Creatures", "Gameobjects", "Zones", "Triggers", "POIs", "Flights" };
+        const char* tools[] = { "Select", "Sculpt", "Copy", "Holes", "Objects", "Paint", "Creatures", "Gameobjects", "Zones", "Triggers", "POIs", "Flights", "Shade" };
         const char* modes[] = { "Raise", "Lower", "Flatten", "Smooth" };
         char caption[400];
         if (m_tool == Tool::Sculpt)
@@ -3156,6 +3177,9 @@ void App::DrawViewport(float dt)
         else if (m_tool == Tool::Paint)
             snprintf(caption, sizeof caption, "%s   World > Paint > %s   %s   Ctrl: erase   Alt+click: pick   Ctrl+wheel: radius", m_terrain.Map().c_str(),
                      m_activeTexture.empty() ? "(no texture)" : FileOf(m_activeTexture).c_str(), io.KeyCtrl ? "ERASING" : "");
+        else if (m_tool == Tool::Shade)
+            snprintf(caption, sizeof caption, "%s   World > Shade   %s   Ctrl: back to neutral   Alt+click: pick   Ctrl+wheel: radius", m_terrain.Map().c_str(),
+                     !m_terrain.VertexColors() ? "(this map has no vertex shading)" : io.KeyCtrl ? "ERASING" : "");
         else if (m_tool == Tool::Holes)
             snprintf(caption, sizeof caption, "%s   World > Holes > %s   (Ctrl: %s)", m_terrain.Map().c_str(),
                      m_holeCut != io.KeyCtrl ? "Cut" : "Fill", m_holeCut != io.KeyCtrl ? "fill" : "cut");
@@ -3370,6 +3394,38 @@ void App::DrawToolsPanel()
             ImGui::SetItemTooltip("0: soft edge over the whole radius. Near 1: hard edge (the inner ring).");
             ImGui::TextColored(kQuiet, "Drag: paint   Ctrl+drag: erase\nAlt+click: pick the texture under the cursor\nCtrl+wheel: radius\n"
                                        "A chunk holds 4 textures; a 5th replaces\nthe one it shows least of.");
+        }
+    }
+
+    if (m_tool == Tool::Shade)
+    {
+        if (!m_terrain.VertexColors())
+        {
+            ImGui::PushTextWrapPos(w);
+            ImGui::TextColored(kWarn, "%s has no vertex shading. The client reads vertex colours only on maps whose WDT turns "
+                                      "them on (Northrend does; the old continents and Outland do not).", m_terrain.Map().c_str());
+            ImGui::PopTextWrapPos();
+        }
+        if (Section("Colour"))
+        {
+            float rgb[3] = { m_shadeColor[0] / 255.0f, m_shadeColor[1] / 255.0f, m_shadeColor[2] / 255.0f };
+            ImGui::SetNextItemWidth(w - 90);
+            if (ImGui::ColorEdit3("Colour##shade", rgb))
+                for (int k = 0; k < 3; ++k) m_shadeColor[size_t(k)] = uint8_t(std::lround(std::clamp(rgb[k], 0.0f, 1.0f) * 255.0f));
+            if (ImGui::Button("Neutral (no change)", { w, 0 })) m_shadeColor = { 0x7F, 0x7F, 0x7F };
+            ImGui::TextColored(kQuiet, "Mid grey (127) leaves the ground as it is;\ndarker darkens, brighter lightens (up to 2x).");
+        }
+        if (Section("Brush"))
+        {
+            ImGui::SetNextItemWidth(w - 90);
+            ImGui::SliderFloat("Radius##shade", &m_shadeBrush.radius, 1.0f, 150.0f, "%.0f yd", ImGuiSliderFlags_Logarithmic);
+            ImGui::SetNextItemWidth(w - 90);
+            ImGui::SliderFloat("Pressure##shade", &m_shadeBrush.pressure, 0.02f, 1.0f, "%.2f");
+            ImGui::SetItemTooltip("How fast the colour builds up while you hold the button");
+            ImGui::SetNextItemWidth(w - 90);
+            ImGui::SliderFloat("Hardness##shade", &m_shadeBrush.hardness, 0.0f, 0.95f, "%.2f");
+            ImGui::TextColored(kQuiet, "Drag: shade   Ctrl+drag: back to neutral\nAlt+click: pick the colour under the cursor\nCtrl+wheel: radius\n"
+                                       "One colour per vertex (4.2 yd apart).");
         }
     }
 
@@ -3758,7 +3814,7 @@ bool App::GoToChange(const Change& c, bool go)
     {
         const nlohmann::json& d = *data;
         if (domain == m_terrain.Domain() && d.contains("map") && d["map"].is_string())
-            for (const char* key : { "edits", "layers", "holes", "liquids", "areas", "objects", "tiles" })
+            for (const char* key : { "edits", "layers", "holes", "liquids", "areas", "colors", "objects", "tiles" })
                 if (d.contains(key) && d[key].is_array() && !d[key].empty() && d[key][0].is_array() && d[key][0].size() >= 2)
                 {
                     if (go) GoToTile(d["map"].get<std::string>(), d[key][0][0].get<int>(), d[key][0][1].get<int>());

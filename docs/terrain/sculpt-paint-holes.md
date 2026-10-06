@@ -21,6 +21,17 @@ A 3.3.5 chunk holds at most four textures. Painting a fifth replaces the chunk's
 share to the remaining textures. A painted texture takes the ground effect (grass, pebbles) it has elsewhere on the
 tile. Ground effects the client has no record of are dropped on export, because they crash the client.
 
+## Shade (U)
+
+Vertex shading (MCCV) tints the ground per vertex (every 4.2 yd) on top of its textures. Left drag moves the colours
+towards the picked colour; **Ctrl+drag** returns them to neutral; **Alt+click** picks the colour under the cursor.
+Mid grey (127) leaves the ground unchanged, darker darkens, brighter lightens up to twice as bright. Radius
+(**Ctrl+wheel**), pressure and hardness are in the Brush tab.
+
+The client reads vertex colours only on maps whose WDT turns them on: Northrend does, Azeroth, Kalimdor and Outland
+do not, and there the tool only explains why. Copy, paste and blueprints carry the shading; a blended paste fades it
+in over the same edge as the textures. Export writes the colours into the tile in place.
+
 ## Holes (H)
 
 Left drag cuts holes; **Ctrl+drag** fills them (or the other way round, set in the tab). **Ctrl+wheel** sets the

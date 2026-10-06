@@ -23,6 +23,7 @@ namespace fs = std::filesystem;
 //                  "layers": [[tileX, tileY, chunk, beforeState, afterState], ...],    (optional)
 //                  "holes":  [[tileX, tileY, chunk, before, after], ...],                (optional)
 //                  "areas":  [[tileX, tileY, chunk, before, after], ...],                (optional; MCNK area id)
+//                  "colors": [[tileX, tileY, chunk, before, after], ...],                (optional; MCCV, base64 145 x BGRA)
 //                  "objects": [[tileX, tileY, "m2" | "wmo", before, after], ...] }     (optional; null before = added,
 //                                                                                        null after = deleted; the older
 //                                                                                        4-element form is an addition)
@@ -125,6 +126,7 @@ bool TerrainAdapter::SetMap(const std::string& directory, std::string& error)
     Unload();
     m_map = directory;
     m_bigAlpha = WdtBigAlpha(*wdt);
+    m_vertexColors = WdtVertexColors(*wdt);
     m_present = WdtTiles(*wdt);
     m_globalWmo = WdtGlobalWmo(*wdt);
     return true;
@@ -161,7 +163,7 @@ std::map<int, size_t> TerrainAdapter::EditHashes(const std::vector<Change>& done
     for (const Change& c : done)
     {
         if (c.domain != "terrain.heights" || c.data.value("map", std::string()) != map) continue;
-        for (const char* field : { "edits", "layers", "holes", "areas", "liquids", "objects", "tiles" })
+        for (const char* field : { "edits", "layers", "holes", "areas", "colors", "liquids", "objects", "tiles" })
             for (const auto& e : c.data.value(field, nlohmann::json::array()))
             {
                 size_t& h = out[TileKey(e[0], e[1])];
@@ -508,6 +510,8 @@ bool TerrainAdapter::ReplayEdits(LoadedTile& tile, const std::string& map, const
             if (e[0] == x && e[1] == y && size_t(e[2]) < tile.adt.chunks.size()) tile.adt.chunks[size_t(e[2])].holes = e[4];
         for (const auto& e : c.data.value("areas", nlohmann::json::array()))
             if (e[0] == x && e[1] == y && size_t(e[2]) < tile.adt.chunks.size()) tile.adt.chunks[size_t(e[2])].areaId = e[4];
+        for (const auto& e : c.data.value("colors", nlohmann::json::array()))
+            if (e[0] == x && e[1] == y && size_t(e[2]) < tile.adt.chunks.size()) tile.adt.chunks[size_t(e[2])].colors = Base64Decode(e[4].get<std::string>());
         for (const auto& e : c.data.value("liquids", nlohmann::json::array()))
             if (e[0] == x && e[1] == y && size_t(e[2]) < tile.adt.chunks.size()) SetLiquidState(tile.adt, tile.adt.chunks[size_t(e[2])], e[4]);
         for (const auto& e : c.data.value("objects", nlohmann::json::array()))
@@ -566,6 +570,15 @@ void TerrainAdapter::Set(const Change& change, bool after)
     {
         auto it = m_tiles.find(TileKey(e[0], e[1]));
         if (it != m_tiles.end() && size_t(e[2]) < it->second.adt.chunks.size()) it->second.adt.chunks[size_t(e[2])].areaId = e[after ? 4 : 3];
+    }
+
+    for (const auto& e : change.data.value("colors", nlohmann::json::array()))
+    {
+        auto it = m_tiles.find(TileKey(e[0], e[1]));
+        const size_t ci = e[2];
+        if (it == m_tiles.end() || ci >= it->second.adt.chunks.size()) continue;
+        it->second.adt.chunks[ci].colors = Base64Decode(e[after ? 4 : 3].get<std::string>());
+        m_renderer.UpdateChunk(it->first, ci, it->second.adt.chunks[ci]);
     }
 
     std::set<int> water;
@@ -819,7 +832,7 @@ uint32_t TerrainAdapter::NextUniqueId() const
 }
 
 Change TerrainAdapter::MakeChange(const Edits& edits, const nlohmann::json& layers, const std::string& label, const nlohmann::json& holes,
-                                  const nlohmann::json& objects, const nlohmann::json& areas, const nlohmann::json& liquids) const
+                                  const nlohmann::json& objects, const nlohmann::json& areas, const nlohmann::json& liquids, const nlohmann::json& colors) const
 {
     nlohmann::json list = nlohmann::json::array();
     std::set<int> tiles;
@@ -835,6 +848,7 @@ Change TerrainAdapter::MakeChange(const Edits& edits, const nlohmann::json& laye
     for (const auto& e : objects) tiles.insert(TileKey(e[0], e[1]));
     for (const auto& e : areas) tiles.insert(TileKey(e[0], e[1]));
     for (const auto& e : liquids) tiles.insert(TileKey(e[0], e[1]));
+    for (const auto& e : colors) tiles.insert(TileKey(e[0], e[1]));
     Change c;
     c.domain = Domain();
     c.label = label;
@@ -846,6 +860,7 @@ Change TerrainAdapter::MakeChange(const Edits& edits, const nlohmann::json& laye
     if (!objects.empty()) c.data["objects"] = objects;
     if (!areas.empty()) c.data["areas"] = areas;
     if (!liquids.empty()) c.data["liquids"] = liquids;
+    if (!colors.empty()) c.data["colors"] = colors;
     return c;
 }
 
@@ -995,6 +1010,82 @@ std::optional<std::string> TerrainAdapter::TextureAt(float x, float z) const
     const size_t best = size_t(std::max_element(w.begin(), w.begin() + std::min<uint32_t>(c.layerCount, 4)) - w.begin());
     if (c.textureIds[best] >= tile.adt.textures.size()) return std::nullopt;
     return tile.adt.textures[c.textureIds[best]];
+}
+
+void TerrainAdapter::ShadeStep(const XMFLOAT3& center, const PaintBrush& brush, const std::array<uint8_t, 3>& rgb, bool erase, float dt)
+{
+    if (!m_shading) return;
+    const float r = std::max(brush.radius, 0.5f);
+    const float inner = r * std::clamp(brush.hardness, 0.0f, 0.99f);
+    const float rate = std::clamp(brush.pressure, 0.01f, 1.0f) * 4.0f * dt;   // as Paint: full colour in about a quarter second
+    const uint8_t target[3] = { erase ? uint8_t(0x7F) : rgb[2], erase ? uint8_t(0x7F) : rgb[1], erase ? uint8_t(0x7F) : rgb[0] };   // B, G, R
+    for (auto& [key, tile] : m_tiles)
+        for (size_t ci = 0; ci < tile.adt.chunks.size(); ++ci)
+        {
+            AdtChunk& c = tile.adt.chunks[ci];
+            if (center.x + r < c.baseX || center.x - r > c.baseX + kChunkSize || center.z + r < c.baseZ || center.z - r > c.baseZ + kChunkSize) continue;
+            bool touched = false;
+            for (size_t j = 0; j < 145; ++j)
+            {
+                float vx, vz;
+                VertexXZ(j, vx, vz);
+                const float x = c.baseX + vx * kUnitSize - center.x, z = c.baseZ + vz * kUnitSize - center.z;
+                const float d = std::sqrt(x * x + z * z);
+                if (d >= r) continue;
+                if (!touched)
+                {
+                    m_shadeBefore.try_emplace({ key, int(ci) }, c.colors);
+                    if (c.colors.size() < 145 * 4) c.colors.assign(145 * 4, 0x7F);
+                    touched = true;
+                }
+                float f = d <= inner ? 1.0f : 1.0f - (d - inner) / (r - inner);
+                f = std::min(1.0f, rate * f * f * (3 - 2 * f));
+                for (size_t k = 0; k < 3; ++k)
+                {
+                    uint8_t& v = c.colors[j * 4 + k];
+                    const float step = (float(target[k]) - float(v)) * f;
+                    // At least one step a frame, or slow strokes stall a few values short of the colour.
+                    v = uint8_t(std::clamp(int(v) + (std::abs(step) < 1 && target[k] != v ? (target[k] > v ? 1 : -1) : int(std::lround(step))), 0, 255));
+                }
+            }
+            if (touched) m_renderer.UpdateChunk(key, ci, c);
+        }
+}
+
+std::optional<Change> TerrainAdapter::EndShade()
+{
+    m_shading = false;
+    nlohmann::json colors = nlohmann::json::array();
+    for (const auto& [key, before] : m_shadeBefore)
+    {
+        auto it = m_tiles.find(key.first);
+        if (it == m_tiles.end()) continue;
+        const std::vector<uint8_t>& after = it->second.adt.chunks[size_t(key.second)].colors;
+        if (after != before)
+            colors.push_back({ it->second.x, it->second.y, key.second, Base64Encode(before.data(), before.size()), Base64Encode(after.data(), after.size()) });
+    }
+    m_shadeBefore.clear();
+    if (colors.empty()) return std::nullopt;
+    return MakeChange(Edits{}, nlohmann::json::array(), "Shade " + std::to_string(colors.size()) + " chunk(s)", nlohmann::json::array(),
+                      nlohmann::json::array(), nlohmann::json::array(), nlohmann::json::array(), colors);
+}
+
+std::optional<std::array<uint8_t, 3>> TerrainAdapter::ShadeAt(float x, float z) const
+{
+    const auto ref = ChunkAtGrid(int(std::floor(x / kChunkSize)), int(std::floor(z / kChunkSize)));
+    if (!ref) return std::nullopt;
+    const AdtChunk& c = *Chunk(*ref);
+    if (c.colors.size() < 145 * 4) return std::nullopt;
+    size_t best = 0;
+    float bestD = 1e9f;
+    for (size_t j = 0; j < 145; ++j)
+    {
+        float vx, vz;
+        VertexXZ(j, vx, vz);
+        const float dx = c.baseX + vx * kUnitSize - x, dz = c.baseZ + vz * kUnitSize - z, d = dx * dx + dz * dz;
+        if (d < bestD) { bestD = d; best = j; }
+    }
+    return std::array<uint8_t, 3>{ c.colors[best * 4 + 2], c.colors[best * 4 + 1], c.colors[best * 4] };
 }
 
 void TerrainAdapter::BeginStroke(const TerrainHit& at)
@@ -1213,6 +1304,7 @@ TerrainClipboard TerrainAdapter::CopyFrom(const std::map<int, LoadedTile>& tiles
         e.layers = LayerState(it->second, c);
         e.holes = c.holes;
         e.liquids = LiquidState(it->second.adt, c);
+        e.colors = c.colors;
         clip.chunks.push_back(std::move(e));
     }
 
@@ -1244,9 +1336,12 @@ nlohmann::json TerrainClipboard::ToJson() const
 {
     nlohmann::json chunksJson = nlohmann::json::array(), doodadsJson = nlohmann::json::array(), wmosJson = nlohmann::json::array();
     for (const Entry& e : chunks)
+    {
         chunksJson.push_back({ { "dx", e.dx }, { "dz", e.dz },
                                { "heights", Base64Encode(reinterpret_cast<const uint8_t*>(e.heights.data()), e.heights.size() * sizeof(float)) },
                                { "layers", e.layers }, { "holes", e.holes }, { "liquids", e.liquids } });
+        if (!e.colors.empty()) chunksJson.back()["colors"] = Base64Encode(e.colors.data(), e.colors.size());
+    }
     for (const auto& d : doodads) doodadsJson.push_back(::ToJson(d));
     for (const auto& w : wmos) wmosJson.push_back(::ToJson(w));
     return { { "origin", { originX, originZ } }, { "chunks", chunksJson }, { "doodads", doodadsJson }, { "wmos", wmosJson }, { "pois", pois } };
@@ -1265,6 +1360,7 @@ TerrainClipboard TerrainClipboard::FromJson(const nlohmann::json& j)
         e.layers = c.value("layers", nlohmann::json());
         e.holes = c.value("holes", 0);
         e.liquids = c.value("liquids", nlohmann::json());   // blueprints saved before water was copied: leave water alone
+        if (c.contains("colors")) e.colors = Base64Decode(c.at("colors").get<std::string>());
         clip.chunks.push_back(std::move(e));
     }
     for (const auto& d : j.value("doodads", nlohmann::json::array())) clip.doodads.push_back(DoodadFrom(d));
@@ -1286,6 +1382,7 @@ Adt TerrainClipboard::ToAdt() const
         c.indexY = uint32_t((originZ + e.dz) % 16);
         for (size_t k = 0; k < 145; ++k) c.heights[k] = e.heights[k] - c.baseY;
         c.holes = e.holes;
+        c.colors = e.colors;
         if (!e.layers.is_null()) TerrainAdapter::SetLayerState(scratch, c, e.layers);
         else c.alpha.assign(64 * 64 * 4, 0);
         if (!e.liquids.is_null()) TerrainAdapter::SetLiquidState(scratch.adt, c, e.liquids);
@@ -1332,12 +1429,20 @@ void TerrainClipboard::RotateClockwise()
         e.dx = depth - 1 - dz;
         e.dz = dx;
 
+        // Vertex j goes to turned(j): the same for heights and vertex colours.
+        auto turned = [](size_t j) {
+            const int r = int(j / 17), c = int(j % 17);
+            return c < 9 ? size_t(c * 17 + (8 - r)) : size_t((c - 9) * 17 + 9 + (7 - r));
+        };
         std::array<float, 145> h{};
-        for (int r = 0; r <= 8; ++r)
-            for (int c = 0; c <= 8; ++c) h[size_t(c * 17 + (8 - r))] = e.heights[size_t(r * 17 + c)];
-        for (int r = 0; r < 8; ++r)
-            for (int c = 0; c < 8; ++c) h[size_t(c * 17 + 9 + (7 - r))] = e.heights[size_t(r * 17 + 9 + c)];
+        for (size_t j = 0; j < 145; ++j) h[turned(j)] = e.heights[j];
         e.heights = h;
+        if (e.colors.size() >= 145 * 4)
+        {
+            std::vector<uint8_t> col(145 * 4);
+            for (size_t j = 0; j < 145; ++j) std::memcpy(&col[turned(j) * 4], &e.colors[j * 4], 4);
+            e.colors = std::move(col);
+        }
 
         uint16_t holes = 0;
         for (int r = 0; r < 4; ++r)
@@ -1586,6 +1691,7 @@ PastePlan TerrainAdapter::PlanPaste(const TerrainClipboard& clip, int gx, int gz
                 for (size_t j = 0; j < 145; ++j) pc.heights[j] = pastedHeight(*e, j) - c.baseY;
             }
             if (o.textures && !e->layers.is_null()) pc.layers = e->layers;
+            if (o.textures && m_vertexColors) pc.colors = e->colors;
             if (o.holes) pc.holes = e->holes;
             pc.liquids = pastedWater(*e);
             plan.chunks.push_back(std::move(pc));
@@ -1734,9 +1840,29 @@ PastePlan TerrainAdapter::PlanPaste(const TerrainClipboard& clip, int gx, int gz
                     }
                 pc.layers = tMin >= 1.0f ? it->second->layers : BlendLayers(LayerState(m_tiles.at(ref->tile), c), it->second->layers, t.data());
             }
+            if (o.textures && inside && m_vertexColors && it->second->colors.size() >= 145 * 4)
+            {
+                // Vertex shading fades in over the same distance as the textures, from the ground's own colours.
+                auto fade = [&](int row, int col) {
+                    const float v = std::clamp((r.insideDist[node(row, col)] - 0.5f) / std::min(wNodes, 4.0f), 0.0f, 1.0f);
+                    return v * v * (3 - 2 * v);
+                };
+                pc.colors = it->second->colors;
+                for (size_t j = 0; j < 145; ++j)
+                {
+                    const int row = int(j / 17), col = int(j % 17);
+                    const float t = col < 9 ? fade(row, col)
+                                            : (fade(row, col - 9) + fade(row, col - 8) + fade(row + 1, col - 9) + fade(row + 1, col - 8)) / 4;
+                    for (size_t k = 0; k < 4; ++k)
+                    {
+                        const float ground = c.colors.size() >= 145 * 4 ? c.colors[j * 4 + k] : 0x7F;
+                        pc.colors[j * 4 + k] = uint8_t(std::lround(ground + (pc.colors[j * 4 + k] - ground) * t));
+                    }
+                }
+            }
             if (o.holes && inside) pc.holes = it->second->holes;
             if (inside) pc.liquids = pastedWater(*it->second);
-            if (pc.setHeights || !pc.layers.is_null() || pc.holes || !pc.liquids.is_null()) plan.chunks.push_back(std::move(pc));
+            if (pc.setHeights || !pc.layers.is_null() || pc.holes || !pc.liquids.is_null() || !pc.colors.empty()) plan.chunks.push_back(std::move(pc));
         }
     return plan;
 }
@@ -1745,7 +1871,7 @@ std::optional<Change> TerrainAdapter::ApplyPlan(const PastePlan& plan, const std
 {
     PreviewPlan(nullptr);
     Edits edits;
-    nlohmann::json layers = nlohmann::json::array(), holes = nlohmann::json::array(), liquids = nlohmann::json::array();
+    nlohmann::json layers = nlohmann::json::array(), holes = nlohmann::json::array(), liquids = nlohmann::json::array(), colors = nlohmann::json::array();
     std::set<std::pair<int, int>> touched;
     std::set<int> water;
     for (const auto& pc : plan.chunks)
@@ -1773,6 +1899,11 @@ std::optional<Change> TerrainAdapter::ApplyPlan(const PastePlan& plan, const std
             c.holes = *pc.holes;
             m_renderer.SetChunkHoles(pc.ref.tile, size_t(pc.ref.chunk), c.holes);
         }
+        if (!pc.colors.empty() && pc.colors != c.colors)
+        {
+            colors.push_back({ tile.x, tile.y, pc.ref.chunk, Base64Encode(c.colors.data(), c.colors.size()), Base64Encode(pc.colors.data(), pc.colors.size()) });
+            c.colors = pc.colors;
+        }
         if (!pc.liquids.is_null())
             if (nlohmann::json before = LiquidState(tile.adt, c); before != pc.liquids)
             {
@@ -1788,9 +1919,9 @@ std::optional<Change> TerrainAdapter::ApplyPlan(const PastePlan& plan, const std
     const nlohmann::json objects = AddObjects(plan.doodads, plan.wmos, nullptr);
 
     if (touched.empty() && objects.empty()) return std::nullopt;
-    Change c = MakeChange(edits, layers, label, holes, objects, nlohmann::json::array(), liquids);
+    Change c = MakeChange(edits, layers, label, holes, objects, nlohmann::json::array(), liquids, colors);
     if (c.data["edits"].empty() && !c.data.contains("layers") && !c.data.contains("holes") && !c.data.contains("objects") &&
-        !c.data.contains("liquids"))
+        !c.data.contains("liquids") && !c.data.contains("colors"))
         return std::nullopt;
     return c;
 }
@@ -1801,6 +1932,7 @@ static AdtChunk PlannedChunk(const LoadedTile& tile, const PastePlan::Chunk& pc,
     AdtChunk c = tile.adt.chunks[size_t(pc.ref.chunk)];
     if (pc.setHeights) c.heights = pc.heights;
     if (pc.holes) c.holes = *pc.holes;
+    if (!pc.colors.empty()) c.colors = pc.colors;
     TerrainAdapter::SetLayerState(scratch, c, pc.layers.is_null() ? TerrainAdapter::LayerState(tile, tile.adt.chunks[size_t(pc.ref.chunk)]) : pc.layers);
     return c;
 }
@@ -2140,6 +2272,7 @@ std::set<int> TerrainAdapter::EditedTiles(const std::string& map) const
             for (const auto& e : c.data.at("edits")) tiles.insert(TileKey(e[0], e[1]));
             for (const auto& e : c.data.value("holes", nlohmann::json::array())) tiles.insert(TileKey(e[0], e[1]));
             for (const auto& e : c.data.value("areas", nlohmann::json::array())) tiles.insert(TileKey(e[0], e[1]));
+            for (const auto& e : c.data.value("colors", nlohmann::json::array())) tiles.insert(TileKey(e[0], e[1]));
             for (const auto& e : c.data.value("layers", nlohmann::json::array())) tiles.insert(TileKey(e[0], e[1]));
             for (const auto& e : c.data.value("objects", nlohmann::json::array())) tiles.insert(TileKey(e[0], e[1]));
             for (const auto& e : c.data.value("liquids", nlohmann::json::array())) tiles.insert(TileKey(e[0], e[1]));
@@ -2247,6 +2380,7 @@ size_t TerrainAdapter::Export(const fs::path& outDir, std::string& error, std::v
         std::map<size_t, nlohmann::json> layers;
         std::map<size_t, uint16_t> holes;
         std::map<size_t, uint32_t> areas;
+        std::map<size_t, std::string> colors;
         std::map<size_t, nlohmann::json> liquids;
         nlohmann::json objects = nlohmann::json::array();
     };
@@ -2261,6 +2395,7 @@ size_t TerrainAdapter::Export(const fs::path& outDir, std::string& error, std::v
         for (const auto& e : c.data.value("layers", nlohmann::json::array())) tiles[{ map, TileKey(e[0], e[1]) }].layers[size_t(e[2])] = e[4];
         for (const auto& e : c.data.value("holes", nlohmann::json::array())) tiles[{ map, TileKey(e[0], e[1]) }].holes[size_t(e[2])] = e[4];
         for (const auto& e : c.data.value("areas", nlohmann::json::array())) tiles[{ map, TileKey(e[0], e[1]) }].areas[size_t(e[2])] = e[4];
+        for (const auto& e : c.data.value("colors", nlohmann::json::array())) tiles[{ map, TileKey(e[0], e[1]) }].colors[size_t(e[2])] = e[4];
         for (const auto& e : c.data.value("objects", nlohmann::json::array())) tiles[{ map, TileKey(e[0], e[1]) }].objects.push_back(e);
         for (const auto& e : c.data.value("liquids", nlohmann::json::array())) tiles[{ map, TileKey(e[0], e[1]) }].liquids[size_t(e[2])] = e[4];
         if (c.data.contains("global")) addedMaps.insert(map);   // its WDT carries the moved or replaced WMO
@@ -2381,6 +2516,18 @@ size_t TerrainAdapter::Export(const fs::path& outDir, std::string& error, std::v
                 std::memcpy(bytes->data() + adt->chunks[ci].mcnkOffset + 8 + 0x34, &area, 4);
                 adt->chunks[ci].areaId = area;
             }
+        for (const auto& [ci, text] : edits.colors)   // MCCV in place (before a rewrite moves the sub-chunks)
+        {
+            const std::vector<uint8_t> colors = Base64Decode(text);
+            if (ci >= adt->chunks.size() || colors.size() < 145 * 4) continue;
+            if (!adt->chunks[ci].mccvOffset)
+            {
+                if (fail(rel + ": chunk " + std::to_string(ci) + " has no MCCV to hold its shading; not written")) return written;
+                continue;
+            }
+            std::memcpy(bytes->data() + adt->chunks[ci].mccvOffset, colors.data(), 145 * 4);
+            adt->chunks[ci].colors = colors;
+        }
 
         if (!edits.layers.empty() || !edits.objects.empty() || !edits.liquids.empty())
         {
@@ -2482,6 +2629,8 @@ bool TerrainSelfTest()
         for (size_t i = 0; i < rgb.size(); ++i) rgb[i] = uint8_t(i * 7 + dx);
         e.layers = { { "names", { "a.blp" } }, { "flags", { 0 } }, { "effects", { 0 } }, { "alpha", Base64Encode(rgb.data(), rgb.size()) } };
         e.holes = dx == 0 ? 0x0001 : 0x8000;   // top-left cell / bottom-right cell
+        e.colors.resize(145 * 4);
+        for (size_t j = 0; j < e.colors.size(); ++j) e.colors[j] = uint8_t(j / 4);   // vertex j coloured j
         clip.chunks.push_back(e);
     }
     const TerrainClipboard original = clip;
@@ -2491,6 +2640,7 @@ bool TerrainSelfTest()
     if (clip.chunks[0].heights[144] != 8.0f) return false;          // top-right outer corner -> bottom-right
     if (clip.chunks[0].heights[9 + 7] != 9.0f) return false;   // inner top-left (row 0, col 0) -> top-right (row 0, col 7)
     if (clip.chunks[0].holes != 0x0008 || clip.chunks[1].holes != 0x1000) return false;   // holes turn too
+    if (clip.chunks[0].colors[144 * 4] != 8 || clip.chunks[0].colors[(9 + 7) * 4] != 9) return false;   // colours turn with the vertices
 
     // Placement matrices decompose back to the same placement (the gizmo relies on it), gimbal lock included.
     {
@@ -2538,7 +2688,7 @@ bool TerrainSelfTest()
     for (size_t k = 0; k < clip.chunks.size(); ++k)
         if (clip.chunks[k].dx != original.chunks[k].dx || clip.chunks[k].dz != original.chunks[k].dz ||
             clip.chunks[k].heights != original.chunks[k].heights || clip.chunks[k].layers != original.chunks[k].layers ||
-            clip.chunks[k].holes != original.chunks[k].holes)
+            clip.chunks[k].holes != original.chunks[k].holes || clip.chunks[k].colors != original.chunks[k].colors)
             return false;
     return true;
 }

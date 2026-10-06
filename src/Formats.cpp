@@ -90,8 +90,8 @@ namespace
 
     /// The MCNK's sub-chunks the way the 3.3.5 client reads them: one after another from the end of the 128-byte
     /// header, each advancing by its size field (the client never uses the header's ofs* fields). Two stock quirks:
-    /// 13 padding bytes follow MCNR's 435; an MCAL whose size field is short (compressed-alpha tiles say 512) runs
-    /// for the header's sizeAlpha; an MCLQ whose size field is 0 runs for the header's sizeLiquid.
+    /// 13 padding bytes follow MCNR's 435; MCAL runs for the header's sizeAlpha whatever its own size field says
+    /// (stock tiles have it short and long); an MCLQ whose size field is 0 runs for the header's sizeLiquid.
     /// `start` = offset of the "MCNK" magic. Stops at the first span that does not lead to a sub-chunk or the end.
     std::vector<SubSpan> WalkSubChunks(const std::vector<uint8_t>& d, size_t start, size_t chunkEnd, uint32_t sizeAlpha, uint32_t sizeLiquid)
     {
@@ -103,12 +103,14 @@ namespace
             const uint32_t tag = tagAt(q);
             uint32_t size = 0;
             ReadAt(d, q + 4, size);
+            // MCAL's size field can also be too long (512 where the header's sizeAlpha says 147 or 8, Northrend_30_22 / _31_22);
+            // the client rewrites it from sizeAlpha on load, so sizeAlpha decides either way.
+            if (tag == Tag("MCAL") && sizeAlpha >= 8 && q + sizeAlpha <= chunkEnd) size = sizeAlpha - 8;
             if (!IsMcnkSubTag(tag) || size > chunkEnd - q - 8) break;
             size_t next = q + 8 + size;
             if (next < chunkEnd && !IsMcnkSubTag(tagAt(next)))
             {
                 if (tag == Tag("MCNR") && IsMcnkSubTag(tagAt(next + 13))) next += 13;
-                else if (tag == Tag("MCAL") && sizeAlpha > 8 && q + sizeAlpha <= chunkEnd) next = q + sizeAlpha;
                 else if (tag == Tag("MCLQ") && sizeLiquid > 8 && q + sizeLiquid <= chunkEnd) next = q + sizeLiquid;
             }
             if (tag == Tag("MCNR") && next + 13 == chunkEnd) next = chunkEnd;   // padding at the very end
@@ -246,6 +248,11 @@ namespace
         {
             c.mcnrOffset = mcnr->first;
         }
+        if (auto mccv = SubChunk(d, start, end, h.ofsMccv, Tag("MCCV")); mccv && mccv->second >= 145 * 4)
+        {
+            c.colors.assign(d.begin() + std::ptrdiff_t(mccv->first), d.begin() + std::ptrdiff_t(mccv->first + 145 * 4));
+            c.mccvOffset = mccv->first;
+        }
 
         c.alpha.assign(64 * 64 * 4, 0);
         auto mcly = SubChunk(d, start, end, h.ofsLayer, Tag("MCLY"));
@@ -370,6 +377,16 @@ bool WdtBigAlpha(const std::vector<uint8_t>& wdt)
         if (magic == Tag("MPHD") && size >= 4 && ReadAt(wdt, off, flags)) big = (flags & (0x4 | 0x80)) != 0;
     });
     return big;
+}
+
+bool WdtVertexColors(const std::vector<uint8_t>& wdt)
+{
+    bool on = false;
+    ForEachChunk(wdt, 0, wdt.size(), [&](uint32_t magic, size_t off, size_t size) {
+        uint32_t flags = 0;
+        if (magic == Tag("MPHD") && size >= 4 && ReadAt(wdt, off, flags)) on = (flags & 0x2) != 0;
+    });
+    return on;
 }
 
 bool WdtHasTile(const std::vector<uint8_t>& wdt, int x, int y)
@@ -1188,6 +1205,7 @@ std::vector<std::string> ValidateAdt(const std::vector<uint8_t>& d, bool bigAlph
             {
                 uint32_t declared = 0;
                 ReadAt(d, start + ofs + 4, declared);
+                if (magic == Tag("MCAL") && h.sizeAlpha >= 8) declared = h.sizeAlpha - 8;   // as WalkSubChunks
                 if (start + ofs + 8 + declared > chunkEnd) problem(where + tagName(magic) + " runs past the end of the MCNK");
             }
             return s;

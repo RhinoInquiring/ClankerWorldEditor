@@ -36,6 +36,7 @@ struct AdtChunk
     std::array<float, 145> heights{};        // MCVT, relative to baseY: 9,8,9,...,9 rows
     size_t mcvtOffset = 0;                    // file offset of the MCVT floats (0 = none), for export
     size_t mcnrOffset = 0;                    // file offset of the MCNR normals (145 x 3 int8), for export
+    size_t mccvOffset = 0;                    // file offset of the MCCV colours (145 x BGRA), for export
     size_t mcnkOffset = 0;                    // file offset of the MCNK chunk (its magic), for header patches
     uint16_t holes = 0;                       // 4x4 hole mask, bit (row * 4 + col); one bit = 2x2 cells (8.33 yd)
     uint32_t areaId = 0;
@@ -44,6 +45,7 @@ struct AdtChunk
     std::array<uint32_t, 4> layerFlags{};     // MCLY flags as read
     std::array<uint32_t, 4> effectIds{};      // MCLY ground effect (detail doodads) per layer
     std::vector<uint8_t> alpha;               // 64x64 RGBA: r,g,b = layers 1..3
+    std::vector<uint8_t> colors;              // MCCV: 145 x BGRA, 0x7F = 1.0 (neutral); empty = the chunk has none
     std::vector<uint32_t> doodadRefs, wmoRefs;   // MCRF: indices into Adt::doodads / Adt::wmos
 };
 
@@ -86,6 +88,8 @@ std::vector<uint8_t> WriteMh2o(const Adt& adt);
 
 /// MPHD flags say whether the map's alpha maps are 8-bit (big alpha) or 4-bit.
 bool WdtBigAlpha(const std::vector<uint8_t>& wdt);
+/// MPHD flag 0x2: the client reads MCCV vertex colours on this map (and expects one in every chunk).
+bool WdtVertexColors(const std::vector<uint8_t>& wdt);
 
 /// True when the WDT MAIN table marks tile (x, y) as present.
 bool WdtHasTile(const std::vector<uint8_t>& wdt, int x, int y);

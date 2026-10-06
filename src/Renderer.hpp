@@ -104,7 +104,7 @@ private:
     Com<ID3D11Buffer> m_farVertices, m_farIndices;
     std::vector<std::pair<int, UINT>> m_farTiles;   // tile key, first index (1536 indices each)
 
-    struct TerrainVertex { DirectX::XMFLOAT3 pos; DirectX::XMFLOAT3 nrm; DirectX::XMFLOAT2 uv; };
+    struct TerrainVertex { DirectX::XMFLOAT3 pos; DirectX::XMFLOAT3 nrm; DirectX::XMFLOAT2 uv; uint32_t col; };   // col: MCCV as RGBA8, 0x7F neutral
     /// Level of detail: 0 full (256 triangles a chunk), 1 outer grid (128), 2 coarse (about 72). Every level keeps
     /// all nine vertices on each chunk edge, so neighbouring chunks at different levels never open a crack.
     static constexpr int kLods = 3;

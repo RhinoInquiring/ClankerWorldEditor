@@ -15,9 +15,9 @@ namespace
 {
     const char* kTerrainShader = R"(
 cbuffer Frame : register(b0) { float4x4 viewProj; float4 lightDir; float4 params; float4 tint; };
-struct VsIn { float3 pos : POSITION; float3 nrm : NORMAL; float2 uv : TEXCOORD0; };
-struct VsOut { float4 pos : SV_POSITION; float3 nrm : NORMAL; float2 uv : TEXCOORD0; };
-VsOut VsMain(VsIn i) { VsOut o; o.pos = mul(float4(i.pos, 1), viewProj); o.nrm = i.nrm; o.uv = i.uv; return o; }
+struct VsIn { float3 pos : POSITION; float3 nrm : NORMAL; float2 uv : TEXCOORD0; float4 col : COLOR; };
+struct VsOut { float4 pos : SV_POSITION; float3 nrm : NORMAL; float2 uv : TEXCOORD0; float3 col : COLOR; };
+VsOut VsMain(VsIn i) { VsOut o; o.pos = mul(float4(i.pos, 1), viewProj); o.nrm = i.nrm; o.uv = i.uv; o.col = i.col.rgb * (255.0 / 127.0); return o; }
 
 Texture2D t0 : register(t0); Texture2D t1 : register(t1); Texture2D t2 : register(t2); Texture2D t3 : register(t3);
 Texture2D alphaMap : register(t4);
@@ -31,6 +31,7 @@ float4 PsMain(VsOut i) : SV_TARGET
     c = lerp(c, t1.Sample(wrapS, tuv).rgb, a.r);
     c = lerp(c, t2.Sample(wrapS, tuv).rgb, a.g);
     c = lerp(c, t3.Sample(wrapS, tuv).rgb, a.b);
+    c *= i.col;   // vertex shading (MCCV): 0x7F = unchanged
     float d = saturate(dot(normalize(i.nrm), -lightDir.xyz));
     c *= 0.45 + 0.55 * d;
     if (params.y > 0.5) return float4(lerp(c, tint.rgb, 0.3), params.z);   // ghost: tinted, see-through
@@ -132,11 +133,12 @@ bool Renderer::Init(ID3D11Device* device, ID3D11DeviceContext* context, std::str
     const D3D11_INPUT_ELEMENT_DESC terrain[] = {
         { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
         { "NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0 },
-        { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 24, D3D11_INPUT_PER_VERTEX_DATA, 0 } };
+        { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 24, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+        { "COLOR", 0, DXGI_FORMAT_R8G8B8A8_UNORM, 0, 32, D3D11_INPUT_PER_VERTEX_DATA, 0 } };
     const D3D11_INPUT_ELEMENT_DESC line[] = {
         { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
         { "COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0 } };
-    device->CreateInputLayout(terrain, 3, vs->GetBufferPointer(), vs->GetBufferSize(), &m_terrainLayout);
+    device->CreateInputLayout(terrain, 4, vs->GetBufferPointer(), vs->GetBufferSize(), &m_terrainLayout);
     device->CreateInputLayout(line, 2, lvs->GetBufferPointer(), lvs->GetBufferSize(), &m_lineLayout);
 
     D3D11_BUFFER_DESC cb{ sizeof(FrameConstants), D3D11_USAGE_DYNAMIC, D3D11_BIND_CONSTANT_BUFFER, D3D11_CPU_ACCESS_WRITE };
@@ -453,7 +455,10 @@ void Renderer::BuildChunkVertices(TileGpu& tile, size_t index, const AdtChunk& c
         const bool inner = col >= 9;
         const float x = inner ? (col - 9 + 0.5f) : float(col);
         const float z = inner ? (row + 0.5f) : float(row);
-        v[j] = { { c.baseX + x * kUnitSize, c.baseY + c.heights[j], c.baseZ + z * kUnitSize }, { 0, 0, 0 }, { x / 8.0f, z / 8.0f } };
+        // MCCV is B, G, R, A; the layout reads R first.
+        const uint8_t* m = c.colors.size() >= 145 * 4 ? c.colors.data() + j * 4 : nullptr;
+        const uint32_t rgba = m ? uint32_t(m[2]) | uint32_t(m[1]) << 8 | uint32_t(m[0]) << 16 | 0xFF000000u : 0xFF7F7F7Fu;
+        v[j] = { { c.baseX + x * kUnitSize, c.baseY + c.heights[j], c.baseZ + z * kUnitSize }, { 0, 0, 0 }, { x / 8.0f, z / 8.0f }, rgba };
     }
 
     // Smooth normals from every cell, holes included, so lighting does not change at a hole's rim.

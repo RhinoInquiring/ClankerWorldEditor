@@ -35,7 +35,7 @@ build\Release\wow-world-editor.exe
 ### Terrain
 | Feature | What it does |
 | --- | --- |
-| [Sculpt, paint and holes](docs/terrain/sculpt-paint-holes.md) | Raise, lower, flatten and smooth ground; paint up to four textures per chunk; cut and fill holes |
+| [Sculpt, paint and holes](docs/terrain/sculpt-paint-holes.md) | Raise, lower, flatten and smooth ground; paint up to four textures per chunk; shade vertex colours; cut and fill holes |
 | [Copy and paste](docs/terrain/copy-paste.md) | Move areas of terrain with their textures, water and objects; seams blend into the ground around them |
 | [Blueprints](docs/terrain/blueprints.md) | Save an area as a reusable piece and place it anywhere, on any map |
 | [Water](docs/terrain/water.md) | Terrain water travels with copies and pastes; a dry paste removes the water under it |
