@@ -743,7 +743,8 @@ std::optional<ModelRenderer::ModelInfo> ModelRenderer::Info(const std::string& m
     const bool wmo = Lower(model).ends_with(".wmo");
     const GpuMesh* mesh = Mesh(wmo ? model : M2Name(model), wmo, mpq);
     if (!mesh) return std::nullopt;
-    ModelInfo info{ mesh->skeleton, {}, mesh->textureNames, mesh->boundsMin, mesh->boundsMax };
+    ModelInfo info{ mesh->skeleton, {}, mesh->textureNames, {}, mesh->boundsMin, mesh->boundsMax };
+    for (const auto& set : mesh->doodadSets) info.doodadSets.push_back(set.name);
     for (const auto& b : mesh->batches) info.geosets.push_back(b.geoset);
     std::sort(info.geosets.begin(), info.geosets.end());
     info.geosets.erase(std::unique(info.geosets.begin(), info.geosets.end()), info.geosets.end());

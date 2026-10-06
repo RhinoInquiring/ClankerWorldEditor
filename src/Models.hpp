@@ -90,7 +90,7 @@ struct ModelMesh
     /// WMO doodads (WoW axes, relative to the WMO) and the sets choosing among them: set 0 always, plus the
     /// placement's doodadSet.
     struct Doodad { std::string model; DirectX::XMFLOAT3 pos{}; DirectX::XMFLOAT4 rot{ 0, 0, 0, 1 }; float scale = 1; };
-    struct DoodadSet { uint32_t first = 0, count = 0; };
+    struct DoodadSet { uint32_t first = 0, count = 0; std::string name; };
     std::vector<Doodad> doodads;
     std::vector<DoodadSet> doodadSets;
 };

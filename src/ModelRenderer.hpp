@@ -78,6 +78,7 @@ public:
         std::shared_ptr<const ModelSkeleton> skeleton;
         std::vector<uint16_t> geosets;      // sorted, once each
         std::vector<std::string> textures;  // fixed textures
+        std::vector<std::string> doodadSets; // WMO: its doodad sets by index (MODS names; set 0 always shows)
         DirectX::XMFLOAT3 boundsMin{}, boundsMax{};
     };
     std::optional<ModelInfo> Info(const std::string& model, const MpqChain& mpq);

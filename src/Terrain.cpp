@@ -530,6 +530,8 @@ void TerrainAdapter::Set(const Change& change, bool after)
 {
     for (const auto& e : change.data.value("tiles", nlohmann::json::array()))   // added tiles: the overlay, whatever map is open
         SetTile(change.data.at("map"), e[0], e[1], e[2], after);
+    if (const auto it = change.data.find("global"); it != change.data.end() && it->is_array() && it->size() == 2)
+        SetGlobalWmo(change.data.at("map"), WmoFrom((*it)[after ? 1 : 0]));
     if (change.data.at("map").get<std::string>() != m_map) return;   // other maps pick it up when loaded
     std::set<std::pair<int, int>> touched;
     for (const auto& e : change.data.at("edits"))
@@ -602,6 +604,7 @@ std::optional<DoodadPlacement> TerrainAdapter::FindDoodad(uint32_t uid) const
 
 std::optional<WmoPlacement> TerrainAdapter::FindWmo(uint32_t uid) const
 {
+    if (m_globalWmo && m_globalWmo->uniqueId == uid) return m_globalWmo;
     for (const auto& [key, tile] : m_tiles)
         for (const auto& w : tile.adt.wmos)
             if (w.uniqueId == uid) return w;
@@ -665,6 +668,7 @@ std::set<ObjectRef> TerrainAdapter::DoodadsInside(const std::set<ObjectRef>& obj
 void TerrainAdapter::BeginObjectEdit(const std::set<ObjectRef>& objects)
 {
     CancelObjectEdit();
+    if (m_globalWmo && objects.count({ true, m_globalWmo->uniqueId })) m_objectEdit.push_back({ kGlobalWmoKey, true, {}, *m_globalWmo });
     for (const auto& [key, tile] : m_tiles)
     {
         for (const auto& d : tile.adt.doodads)
@@ -678,6 +682,15 @@ void TerrainAdapter::PreviewObjectEdit(const std::function<void(DoodadPlacement&
 {
     for (const ObjectSnap& s : m_objectEdit)
     {
+        if (s.tile == kGlobalWmoKey && m_globalWmo)   // shown at once; written to the WDT when the edit ends
+        {
+            WmoPlacement w = s.wmoPlacement;
+            wmo(w);
+            FitWmoExtents(w);
+            m_globalWmo = w;
+            m_objectsChanged.insert(kGlobalWmoKey);
+            continue;
+        }
         auto it = m_tiles.find(s.tile);
         if (it == m_tiles.end()) continue;
         nlohmann::json after;
@@ -701,9 +714,14 @@ void TerrainAdapter::PreviewObjectEdit(const std::function<void(DoodadPlacement&
 
 std::optional<Change> TerrainAdapter::EndObjectEdit(const std::string& label)
 {
-    nlohmann::json objects = nlohmann::json::array();
+    nlohmann::json objects = nlohmann::json::array(), global;
     for (const ObjectSnap& s : m_objectEdit)
     {
+        if (s.tile == kGlobalWmoKey)
+        {
+            if (m_globalWmo && ToJson(*m_globalWmo) != ToJson(s.wmoPlacement)) global = { ToJson(s.wmoPlacement), ToJson(*m_globalWmo) };
+            continue;
+        }
         auto it = m_tiles.find(s.tile);
         if (it == m_tiles.end()) continue;
         const nlohmann::json before = s.wmo ? ToJson(s.wmoPlacement) : ToJson(s.doodad);
@@ -714,14 +732,26 @@ std::optional<Change> TerrainAdapter::EndObjectEdit(const std::string& label)
         if (now && *now != before) objects.push_back({ it->second.x, it->second.y, s.wmo ? "wmo" : "m2", before, *now });
     }
     m_objectEdit.clear();
-    if (objects.empty()) return std::nullopt;
-    return MakeChange(Edits{}, nlohmann::json::array(), label, nlohmann::json::array(), objects);
+    if (objects.empty() && global.is_null()) return std::nullopt;
+    Change c = MakeChange(Edits{}, nlohmann::json::array(), label, nlohmann::json::array(), objects);
+    if (!global.is_null())
+    {
+        c.data["global"] = global;   // the WMO of a WMO-only map: [before, after], kept in its WDT
+        c.target = m_map + " WMO";
+        SetGlobalWmo(m_map, WmoFrom(global[1]));
+    }
+    return c;
 }
 
 void TerrainAdapter::CancelObjectEdit()
 {
     for (const ObjectSnap& s : m_objectEdit)
-        if (auto it = m_tiles.find(s.tile); it != m_tiles.end())
+        if (s.tile == kGlobalWmoKey)
+        {
+            m_globalWmo = s.wmoPlacement;
+            m_objectsChanged.insert(kGlobalWmoKey);
+        }
+        else if (auto it = m_tiles.find(s.tile); it != m_tiles.end())
         {
             const nlohmann::json before = s.wmo ? ToJson(s.wmoPlacement) : ToJson(s.doodad);
             ApplyObjectEntry(it->second.adt, { it->second.x, it->second.y, s.wmo ? "wmo" : "m2", nullptr, before }, true);
@@ -1983,7 +2013,28 @@ void TerrainAdapter::RebuildOverlay()
     fs::remove_all(m_projectDir / "overlay", ec);   // the overlay is the applied changes, nothing else
     for (const Change& c : m_store.Done())
         if (c.domain == Domain())
+        {
             for (const auto& e : c.data.value("tiles", nlohmann::json::array())) SetTile(c.data.at("map"), e[0], e[1], e[2], true);
+            if (const auto it = c.data.find("global"); it != c.data.end() && it->is_array() && it->size() == 2) SetGlobalWmo(c.data.at("map"), WmoFrom((*it)[1]));
+        }
+}
+
+void TerrainAdapter::SetGlobalWmo(const std::string& map, const WmoPlacement& p)
+{
+    const std::string name = "World\\Maps\\" + map + "\\" + map + ".wdt";
+    if (const auto wdt = m_mpq.Read(name))
+        if (const auto patched = WdtSetGlobalWmo(*wdt, p); !patched.empty())
+            if (const fs::path path = m_mpq.OverlayPath(name); !path.empty())
+            {
+                std::error_code ec;
+                fs::create_directories(path.parent_path(), ec);
+                std::ofstream(path, std::ios::binary).write(reinterpret_cast<const char*>(patched.data()), std::streamsize(patched.size()));
+            }
+    if (map == m_map)
+    {
+        m_globalWmo = p;
+        m_objectsChanged.insert(kGlobalWmoKey);
+    }
 }
 
 std::optional<TerrainAdapter::NewTile> TerrainAdapter::ReadNewTile(const MpqChain& chain, const std::string& map, int x, int y)
@@ -2212,6 +2263,7 @@ size_t TerrainAdapter::Export(const fs::path& outDir, std::string& error, std::v
         for (const auto& e : c.data.value("areas", nlohmann::json::array())) tiles[{ map, TileKey(e[0], e[1]) }].areas[size_t(e[2])] = e[4];
         for (const auto& e : c.data.value("objects", nlohmann::json::array())) tiles[{ map, TileKey(e[0], e[1]) }].objects.push_back(e);
         for (const auto& e : c.data.value("liquids", nlohmann::json::array())) tiles[{ map, TileKey(e[0], e[1]) }].liquids[size_t(e[2])] = e[4];
+        if (c.data.contains("global")) addedMaps.insert(map);   // its WDT carries the moved or replaced WMO
         for (const auto& e : c.data.value("tiles", nlohmann::json::array()))
         {
             tiles[{ map, TileKey(e[0], e[1]) }];   // read through the overlay: the added tile as converted

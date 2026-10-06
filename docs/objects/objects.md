@@ -38,6 +38,16 @@ Click a model or building in the [Catalog](catalog.md): it follows the cursor; c
 select it). **Shift+click** keeps placing; each copy gets a random turn and an optional scale jitter. **Esc** or a
 right-click stops.
 
+## Doodad sets, replacing, dungeon WMOs
+
+With one WMO selected, the **Object** window's **Doodads** list picks its furniture set (set 0 always shows; the
+placement adds one more). To swap a model for another in the same place and turn, pick the new one in the Catalog,
+then **Replace with ...** in the Object window (doodads take doodads, WMOs take WMOs).
+
+On a WMO-only map (most dungeons) the map's own WMO is an object like any other: select it, move or turn it with the
+handles, change its doodad set or replace it. It lives in the map's WDT, which export writes with it; it cannot be
+deleted (the map is that WMO).
+
 ## On export
 
 Moved, added and deleted objects are written into the tiles they stand on, with fresh unique ids for new ones (above

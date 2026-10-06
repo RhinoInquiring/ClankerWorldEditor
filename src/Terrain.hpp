@@ -322,6 +322,8 @@ private:
     void SetObjects(LoadedTile& tile, const nlohmann::json& objects, bool after);
     /// A WMO's world bounding box from its root file's bounds and the placement (unchanged if unreadable).
     void FitWmoExtents(WmoPlacement& w) const;
+    /// Writes a WMO-only map's WDT with its global WMO as `p` into the overlay (and shows it, when that map is open).
+    void SetGlobalWmo(const std::string& map, const WmoPlacement& p);
     uint32_t NextUniqueId() const;
     /// Adds objects to the loaded tiles under them and returns their "objects" entries (empty when none landed).
     nlohmann::json AddObjects(std::vector<DoodadPlacement> doodads, std::vector<WmoPlacement> wmos, std::vector<ObjectRef>* placed);

@@ -521,6 +521,7 @@ std::optional<ModelMesh> ParseWmo(const std::vector<uint8_t>& root, const std::v
     for (size_t i = 0; i + 32 <= modsSize; i += 32)
     {
         ModelMesh::DoodadSet set;
+        set.name.assign(reinterpret_cast<const char*>(root.data() + modsOff + i), strnlen(reinterpret_cast<const char*>(root.data() + modsOff + i), 20));
         ReadAt(root, modsOff + i + 20, set.first);
         ReadAt(root, modsOff + i + 24, set.count);
         mesh.doodadSets.push_back(set);

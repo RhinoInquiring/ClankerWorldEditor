@@ -1941,7 +1941,7 @@ void App::DrawObjectPanel()
     }
     ImGui::TextColored(kAccent, "%s", FileOf(model).c_str());
     ImGui::SetItemTooltip("%s", model.c_str());
-    ImGui::TextColored(kQuiet, "%s   id %u%s", ref.wmo ? "WMO (building)" : "M2 (doodad)", ref.uid, ref.uid >= 200'000'000 ? "  (added in this project)" : "");
+    ImGui::TextColored(kQuiet, "%s   id %u%s", ref.wmo ? "WMO (building)" : "M2 (doodad)", ref.uid, ref.uid >= 200'000'000 && ref.uid != 0xFFFFFFFFu ? "  (added in this project)" : "");
     if (m_objSel.empty()) return;   // hovered only: no editing
     ImGui::Spacing();
 
@@ -1966,11 +1966,55 @@ void App::DrawObjectPanel()
         field(ImGui::SliderFloat("Scale", &scale, 1.0f / 1024.0f, 63.0f, "%.3f", ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_AlwaysClamp),
               [&](float*, float*, float* s) { if (s) *s = scale; });
     }
+    // A WMO's doodad set (its furniture: set 0 always shows, the placement adds one more) and swapping the model.
+    const auto& global = m_terrain.GlobalWmo();
+    const bool isGlobal = ref.wmo && global && global->uniqueId == ref.uid;
+    auto setWmo = [&](const std::string& label, const std::function<void(WmoPlacement&)>& fn) {
+        m_terrain.BeginObjectEdit(m_objSel);
+        m_terrain.PreviewObjectEdit([](DoodadPlacement&) {}, fn);
+        EndObjectEdit(label);
+    };
+    if (ref.wmo)
+        if (const auto placed = m_terrain.FindWmo(ref.uid))
+            if (const auto info = m_models.Info(placed->model, m_mpq); info && info->doodadSets.size() > 1)
+            {
+                auto setName = [&](size_t i) { return std::to_string(i) + "  " + (info->doodadSets[i].empty() ? "(unnamed)" : info->doodadSets[i]); };
+                ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 70);
+                if (ImGui::BeginCombo("Doodads", placed->doodadSet < info->doodadSets.size() ? setName(placed->doodadSet).c_str() : std::to_string(placed->doodadSet).c_str()))
+                {
+                    for (size_t i = 0; i < info->doodadSets.size(); ++i)
+                        if (ImGui::Selectable(setName(i).c_str(), i == placed->doodadSet))
+                            setWmo("Doodad set " + std::to_string(i) + " for " + FileOf(model), [i](WmoPlacement& p) { p.doodadSet = uint16_t(i); });
+                    ImGui::EndCombo();
+                }
+                ImGui::SetItemTooltip("The furniture set shown with set 0 (which always shows)");
+            }
+    if (m_armed && m_armed->wmo == ref.wmo && _stricmp(m_armed->path.c_str(), model.c_str()) != 0)
+    {
+        if (ImGui::Button(("Replace with " + FileOf(m_armed->path)).c_str()))
+        {
+            const std::string path = m_armed->path, label = "Replace " + FileOf(model) + " with " + FileOf(path);
+            if (ref.wmo) setWmo(label, [path](WmoPlacement& p) { p.model = path; p.doodadSet = 0; });
+            else
+            {
+                m_terrain.BeginObjectEdit(m_objSel);
+                m_terrain.PreviewObjectEdit([path](DoodadPlacement& d) { d.model = path; }, [](WmoPlacement&) {});
+                EndObjectEdit(label);
+            }
+            m_armed.reset();
+        }
+        ImGui::SetItemTooltip("Same place and turn, the model picked in the Catalog");
+    }
+    else ImGui::TextColored(kQuiet, "To swap the model: pick one in the Catalog, then Replace here.");
+    if (isGlobal) ImGui::TextColored(kQuiet, "This map's own WMO: kept in its WDT, exported with it.");
     ImGui::Spacing();
     if (ImGui::Button("Drop to ground"))
         EditObjects("Drop object to the ground", [&](float* p, float*, float*) { if (const auto h = m_terrain.HeightAt(p[0], p[2])) p[1] = *h; });
     ImGui::SameLine();
+    ImGui::BeginDisabled(isGlobal);
     if (ImGui::Button("Delete")) DeleteSelectedObjects();
+    ImGui::EndDisabled();
+    if (isGlobal) ImGui::SetItemTooltip("A WMO-only map is its WMO: replace it instead");
 }
 
 void App::ClearPlacementView()
@@ -2223,7 +2267,8 @@ void App::Frame(float dt)
         m_models.AddTile(kGlobalWmoKey, adt, m_mpq);
     }
     for (int key : m_terrain.TakeObjectChanges())   // edited, pasted or undone objects: reload that tile's models now
-        if (auto it = m_terrain.Tiles().find(key); it != m_terrain.Tiles().end() && m_models.HasTile(key))
+        if (key == kGlobalWmoKey) m_models.RemoveTile(key);   // added back below from the moved placement
+        else if (auto it = m_terrain.Tiles().find(key); it != m_terrain.Tiles().end() && m_models.HasTile(key))
         {
             m_models.RemoveTile(key);
             m_models.AddTile(key, it->second.adt, m_mpq);
@@ -2831,9 +2876,7 @@ void App::DrawViewport(float dt)
         if ((m_tool == Tool::Objects && !gizmoHot) || (m_tool == Tool::Zones && io.KeyShift))
         {
             const float ground = m_hover ? XMVectorGetX(XMVector3Length(XMVectorSubtract(XMLoadFloat3(&m_hover->pos), p0))) : 6000.0f;
-            const auto& global = m_terrain.GlobalWmo();
-            if (const auto hit = m_models.Pick(p0, dir, ground, m_modelSettings); hit && !(global && hit->wmo && hit->uid == global->uniqueId))
-                m_objHover = ObjectRef{ hit->wmo, hit->uid };   // a WMO-only map's own WMO lives in its WDT: not an editable object yet
+            if (const auto hit = m_models.Pick(p0, dir, ground, m_modelSettings)) m_objHover = ObjectRef{ hit->wmo, hit->uid };
         }
         m_spawnHover.reset();
         if (SpawnTool() && m_showSpawns[int(m_spawnKind)])

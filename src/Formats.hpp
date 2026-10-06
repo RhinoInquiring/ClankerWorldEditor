@@ -96,6 +96,9 @@ std::vector<bool> WdtTiles(const std::vector<uint8_t>& wdt);
 /// for maps of terrain tiles. Position and extents are moved into the ADT placement space (the WDT counts from the
 /// map's middle: + kZeroPoint on x and z); subtract it again when writing a WDT.
 std::optional<WmoPlacement> WdtGlobalWmo(const std::vector<uint8_t>& wdt);
+/// The WDT with its global WMO set to `p` (ADT placement space, as WdtGlobalWmo returns it): MWMO and MODF rewritten,
+/// every other chunk kept. Empty when the WDT has no MODF to replace.
+std::vector<uint8_t> WdtSetGlobalWmo(const std::vector<uint8_t>& wdt, const WmoPlacement& p);
 /// The model tile key the editor shows a WMO-only map's WMO under (past the 4096 terrain tile keys, so it is picked like them).
 constexpr int kGlobalWmoKey = 5000;
 

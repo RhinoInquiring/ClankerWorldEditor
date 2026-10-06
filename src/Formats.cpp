@@ -405,6 +405,48 @@ std::optional<WmoPlacement> WdtGlobalWmo(const std::vector<uint8_t>& wdt)
                          e.uniqueId, e.doodadSet, e.flags, e.nameSet };
 }
 
+std::vector<uint8_t> WdtSetGlobalWmo(const std::vector<uint8_t>& wdt, const WmoPlacement& p)
+{
+    std::vector<uint8_t> out;
+    bool replaced = false;
+    auto put = [&](uint32_t magic, const uint8_t* data, size_t size) {
+        const uint32_t s = uint32_t(size);
+        out.insert(out.end(), reinterpret_cast<const uint8_t*>(&magic), reinterpret_cast<const uint8_t*>(&magic) + 4);
+        out.insert(out.end(), reinterpret_cast<const uint8_t*>(&s), reinterpret_cast<const uint8_t*>(&s) + 4);
+        out.insert(out.end(), data, data + size);
+    };
+    ForEachChunk(wdt, 0, wdt.size(), [&](uint32_t magic, size_t off, size_t size) {
+        if (magic == Tag("MWMO"))
+        {
+            std::vector<uint8_t> name(p.model.begin(), p.model.end());
+            name.push_back(0);
+            put(magic, name.data(), name.size());
+        }
+        else if (magic == Tag("MODF") && size >= sizeof(ModfEntry))
+        {
+            ModfEntry e{};
+            std::memcpy(&e, wdt.data() + off, sizeof e);
+            e.nameId = 0;
+            e.uniqueId = p.uniqueId;
+            const float shift[3] = { kZeroPoint, 0, kZeroPoint };   // back to the WDT's middle-of-map origin
+            for (int k = 0; k < 3; ++k)
+            {
+                e.pos[k] = p.pos[k] - shift[k];
+                e.rot[k] = p.rot[k];
+                e.ext[k] = p.extMin[k] - shift[k];
+                e.ext[3 + k] = p.extMax[k] - shift[k];
+            }
+            e.flags = p.flags;
+            e.doodadSet = p.doodadSet;
+            e.nameSet = p.nameSet;
+            put(magic, reinterpret_cast<const uint8_t*>(&e), sizeof e);
+            replaced = true;
+        }
+        else put(magic, wdt.data() + off, size);
+    });
+    return replaced ? out : std::vector<uint8_t>{};
+}
+
 std::vector<bool> WdtTiles(const std::vector<uint8_t>& wdt)
 {
     std::vector<bool> tiles(64 * 64, false);
@@ -1464,6 +1506,32 @@ bool FormatsSelfTest()
         uint32_t size = uint32_t(body.size());
         put(v, &magic, 4); put(v, &size, 4); put(v, body.data(), body.size());
     };
+
+    {   // A WMO-only WDT: read the global WMO (moved into ADT space), change it, write it, read it back.
+        std::vector<uint8_t> wdt, mphd(32, 0), main(64 * 64 * 8, 0), mwmo, modf;
+        mphd[0] = 1;   // global WMO
+        const std::string name = "World\\wmo\\Dungeon\\Test.wmo";
+        mwmo.assign(name.begin(), name.end());
+        mwmo.push_back(0);
+        ModfEntry e{ 0, 0xFFFFFFFFu, { 10, 20, 30 }, { 0, 90, 0 }, { -5, -6, -7, 5, 6, 7 }, 0, 1, 0, 0 };
+        put(modf, &e, sizeof e);
+        chunk(wdt, Tag("MPHD"), mphd);
+        chunk(wdt, Tag("MAIN"), main);
+        chunk(wdt, Tag("MWMO"), mwmo);
+        chunk(wdt, Tag("MODF"), modf);
+        auto g = WdtGlobalWmo(wdt);
+        if (!g || g->model != name || g->pos[0] != 10 + kZeroPoint || g->pos[2] != 30 + kZeroPoint || g->extMax[0] != 5 + kZeroPoint || g->doodadSet != 1)
+            return false;
+        g->model = "World\\wmo\\Dungeon\\Other.wmo";
+        g->pos[1] += 4;
+        g->rot[1] = 180;
+        g->doodadSet = 2;
+        const auto written = WdtSetGlobalWmo(wdt, *g);
+        const auto back = WdtGlobalWmo(written);
+        if (!back || back->model != g->model || back->pos[0] != g->pos[0] || back->pos[1] != 24 || back->rot[1] != 180 || back->doodadSet != 2 ||
+            back->uniqueId != 0xFFFFFFFFu || WdtTiles(written) != WdtTiles(wdt))
+            return false;
+    }
 
     // One MCNK: heights 0..144, two layers, the second with an uncompressed 4-bit alpha of 0xF/0x0.
     std::vector<uint8_t> mcvt, mcly, mcal, sub;

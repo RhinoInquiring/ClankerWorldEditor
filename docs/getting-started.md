@@ -33,7 +33,7 @@ The last project reopens on start. To compare against other clients or stack mod
 | --- | --- |
 | Viewport | The world; tools act here |
 | Tools | The current tool's settings, in tabs |
-| Maps | Every map of the client, the whole-map picture and its tile grid (orange = edited, blue outline = loaded). A WMO-only map (most dungeons) shows its WMO and an **Open this map** button instead: spawns, paths, triggers, POIs and flight nodes then work on its floors; terrain tools have nothing to edit there |
+| Maps | Every map of the client, the whole-map picture and its tile grid (orange = edited, blue outline = loaded). A WMO-only map (most dungeons) shows its WMO and an **Open this map** button instead: spawns, paths, triggers, POIs and flight nodes then work on its floors; the Objects tool moves, turns or replaces its WMO and picks its doodad set; terrain tools have nothing to edit there |
 | Inspector | What the tool works on: the chunk, object, spawn or area under the cursor or selected, every field |
 | Object | Transform of the selected objects |
 | Catalog | Models, buildings, textures, units, blueprints, differences, portal effects ([Catalog](objects/catalog.md)) |
