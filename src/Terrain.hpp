@@ -145,6 +145,8 @@ public:
 
     /// Switches to a map (unloading every tile); false when the map has no WDT.
     bool SetMap(const std::string& directory, std::string& error);
+    /// The one WMO a WMO-only map (most dungeons) is made of; null for maps of terrain tiles.
+    const std::optional<WmoPlacement>& GlobalWmo() const { return m_globalWmo; }
     void Unload();
     const std::string& Map() const { return m_map; }
     const std::vector<bool>& Present() const { return m_present; }
@@ -334,6 +336,7 @@ private:
     bool m_farChanged = false;
     /// Shows (copies tiles/<stash> into the overlay, marks it in the overlay WDT) or hides an added tile.
     void SetTile(const std::string& map, int x, int y, const std::string& stash, bool present);
+    std::optional<WmoPlacement> m_globalWmo;
     std::vector<bool> m_present;
     std::map<int, LoadedTile> m_tiles;
     std::set<int> m_pinned;

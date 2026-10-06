@@ -236,7 +236,7 @@ void App::MoveSpawns(const XMFLOAT3& at)
         s.x += tx - cx;
         s.y += ty - cy;
         const XMFLOAT3 e = ServerToEditor(s.x, s.y, s.z);
-        s.z = n == 1 ? tz : m_terrain.HeightAt(e.x, e.z).value_or(s.z);
+        s.z = n == 1 ? tz : GroundAt(e.x, e.z, tz).value_or(s.z);
         if (const auto ref = m_terrain.ChunkAtGrid(int(std::floor(e.x / kChunkSize)), int(std::floor(e.z / kChunkSize))))
             if (const AdtChunk* c = m_terrain.Chunk(*ref)) { s.areaId = c->areaId; s.zoneId = m_areas.ZoneOf(c->areaId); }
     });
@@ -494,7 +494,7 @@ void App::DrawSpawnsPanel(float w)
         if (ImGui::Button("Drop to ground", { (w - 8) / 2, 0 }))
             EditSpawns("Drop " + what + " to the ground", [&](Spawn& s) {
                 const XMFLOAT3 e = ServerToEditor(s.x, s.y, s.z);
-                if (const auto h = m_terrain.HeightAt(e.x, e.z)) s.z = *h;
+                if (const auto h = GroundAt(e.x, e.z, e.y)) s.z = *h;
             });
         ImGui::SameLine();
         if (ImGui::Button("Delete  Del", { (w - 8) / 2, 0 })) DeleteSpawns();

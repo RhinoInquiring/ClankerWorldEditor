@@ -2327,6 +2327,16 @@ namespace
         }
         const auto t0 = std::chrono::steady_clock::now();
         for (const auto& [key, tile] : terrain.Tiles()) models.AddTile(key, tile.adt, mpq);
+        // A WMO-only map: its one WMO, as the editor shows it; the camera then works inside its box.
+        const std::optional<WmoPlacement>& global = terrain.GlobalWmo();
+        if (global)
+        {
+            Adt adt;
+            adt.wmos.push_back(*global);
+            models.AddTile(kGlobalWmoKey, adt, mpq);
+            printf("WMO-only map: %s at (%.1f, %.1f, %.1f) rot (%.1f, %.1f, %.1f) doodad set %u\n", global->model.c_str(), global->pos[0], global->pos[1],
+                   global->pos[2], global->rot[0], global->rot[1], global->rot[2], global->doodadSet);
+        }
         if (const char* server = std::getenv("WWE_SERVER"))   // creature and gameobject spawns from that server's world database
         {
             std::string password, note;
@@ -2342,6 +2352,7 @@ namespace
                 float minX, minY, maxX, maxY, unused;
                 EditorToServer({ (tx + radius + 1) * kTileSize, 0, (ty + radius + 1) * kTileSize }, minX, minY, unused);
                 EditorToServer({ (tx - radius) * kTileSize, 0, (ty - radius) * kTileSize }, maxX, maxY, unused);
+                if (global) minX = minY = -20000, maxX = maxY = 20000;   // the whole instance
                 ChangeStore spawnStore;
                 DisplayLooks looks(mpq);
                 for (const SpawnKind kind : { SpawnKind::Creature, SpawnKind::GameObject })
@@ -2369,15 +2380,41 @@ namespace
                         }
                     }
                     printf("%s spawns: %zu, with a model %zu\n", spawns.Table(), total, shown);
+                    if (global && kind == SpawnKind::Creature)
+                    {
+                        // Inside an instance every creature should stand on the WMO: a floor within a few yards below it.
+                        ModelRenderer::DrawSettings all;
+                        all.distance = 1e9f;
+                        size_t floored = 0;
+                        XMFLOAT3 lo{ 1e9f, 1e9f, 1e9f }, hi{ -1e9f, -1e9f, -1e9f };
+                        for (const Spawn& s : spawns.Around(mapId, minX, minY, maxX, maxY))
+                        {
+                            const XMFLOAT3 p = ServerToEditor(s.x, s.y, s.z);
+                            lo = { std::min(lo.x, p.x), std::min(lo.y, p.y), std::min(lo.z, p.z) };
+                            hi = { std::max(hi.x, p.x), std::max(hi.y, p.y), std::max(hi.z, p.z) };
+                            if (const auto hit = models.Pick(XMVectorSet(p.x, p.y + 2, p.z, 0), XMVectorSet(0, -1, 0, 0), 6.0f, all); hit && hit->wmo) ++floored;
+                        }
+                        XMFLOAT3 c[8];
+                        if (models.Corners(true, global->uniqueId, c))
+                        {
+                            XMFLOAT3 wl = c[0], wh = c[0];
+                            for (const auto& k : c) wl = { std::min(wl.x, k.x), std::min(wl.y, k.y), std::min(wl.z, k.z) }, wh = { std::max(wh.x, k.x), std::max(wh.y, k.y), std::max(wh.z, k.z) };
+                            printf("WMO box (%.0f..%.0f, %.0f..%.0f, %.0f..%.0f), creature box (%.0f..%.0f, %.0f..%.0f, %.0f..%.0f)\n", wl.x, wh.x, wl.y, wh.y,
+                                   wl.z, wh.z, lo.x, hi.x, lo.y, hi.y, lo.z, hi.z);
+                        }
+                        printf("%s creatures on a WMO floor: %zu of %zu\n", floored * 10 >= total * 9 ? "ok  " : "FAIL", floored, total);
+                    }
                 }
             }
         }
         const float loadMs = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - t0).count();
 
         const auto centre = terrain.Tiles().find(TileKey(tx, ty));
-        if (centre == terrain.Tiles().end()) { printf("tile not loaded\n"); return 1; }
-        const float ex = (tx + fx) * kTileSize, ez = (ty + fz) * kTileSize;
-        const XMFLOAT3 eye{ ex, terrain.HeightAt(ex, ez).value_or(centre->second.maxHeight) + above, ez };
+        if (centre == terrain.Tiles().end() && !global) { printf("tile not loaded\n"); return 1; }
+        // WMO-only: (fx, fz) are fractions across the WMO's box (x, z), `above` yards over its middle height.
+        const float ex = global ? global->extMin[0] + fx * (global->extMax[0] - global->extMin[0]) : (tx + fx) * kTileSize;
+        const float ez = global ? global->extMin[2] + fz * (global->extMax[2] - global->extMin[2]) : (ty + fz) * kTileSize;
+        const XMFLOAT3 eye{ ex, global ? (global->extMin[1] + global->extMax[1]) / 2 + above : terrain.HeightAt(ex, ez).value_or(centre->second.maxHeight) + above, ez };
         const float y = XMConvertToRadians(yaw), p = XMConvertToRadians(pitch);
         const XMVECTOR fwd = XMVectorSet(std::cos(p) * std::sin(y), std::sin(p), std::cos(p) * std::cos(y), 0);
         const UINT w = 1280, h = 720;
@@ -3985,9 +4022,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdLine, int)
     ShowWindow(hwnd, SW_SHOWMAXIMIZED);
     UpdateWindow(hwnd);
 
-    const bool firstRun = !std::filesystem::exists("imgui.ini");
+    // The panel layout lives with the other per-user settings; a layout left next to the exe by older builds moves there.
+    static const std::string iniPath = (SettingsDir() / "imgui.ini").string();
+    if (std::error_code ec; !std::filesystem::exists(iniPath) && std::filesystem::exists("imgui.ini")) std::filesystem::copy_file("imgui.ini", iniPath, ec);
+    const bool firstRun = !std::filesystem::exists(iniPath);
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
+    ImGui::GetIO().IniFilename = iniPath.c_str();
     ImGui_ImplWin32_Init(hwnd);
     ImGui_ImplDX11_Init(g_device.Get(), g_context.Get());
 

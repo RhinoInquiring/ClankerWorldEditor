@@ -3,6 +3,7 @@
 #include "Assets.hpp"
 
 #include <imgui.h>
+#include <imgui_stdlib.h>
 #include <imgui_impl_win32.h>
 #include <imgui_internal.h>
 #include <ImGuizmo.h>
@@ -25,7 +26,21 @@ namespace fs = std::filesystem;
 
 namespace
 {
-    const char* kConfigFile = "wow-world-editor.cfg";   // last opened project folder
+    const char* kOldConfigFile = "wow-world-editor.cfg";   // where older builds kept the last project, next to the exe
+    const ImVec4 kBad{ 1.00f, 0.42f, 0.38f, 1.00f };
+
+    /// How a log line reads: 2 an error, 1 something to act on, 0 information.
+    /// ponytail: keyword match on the text; a level per Log call if the guess misfires.
+    int LogLevel(const std::string& line)
+    {
+        std::string l = line;
+        std::transform(l.begin(), l.end(), l.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+        for (const char* w : { "fail", "error", "cannot", "can't", "not written", "refus", "not connected", "missing" })
+            if (l.find(w) != std::string::npos) return 2;
+        for (const char* w : { "restart", "warning", "first", "no free" })
+            if (l.find(w) != std::string::npos) return 1;
+        return 0;
+    }
 
     const ImVec4 kAccent{ 0.30f, 0.62f, 1.00f, 1.00f };
     const ImVec4 kWarn{ 1.00f, 0.66f, 0.25f, 1.00f };
@@ -125,7 +140,7 @@ namespace
 
     /// A row of mutually exclusive options drawn as joined toggle buttons; returns true on change.
     template <class E>
-    bool Segmented(const char* id, E& value, std::initializer_list<std::pair<E, const char*>> items, float width = 0)
+    bool Segmented(const char* id, E& value, const std::vector<std::pair<E, std::string>>& items, float width = 0)
     {
         bool changed = false;
         ImGui::PushID(id);
@@ -136,7 +151,7 @@ namespace
             if (i++) ImGui::SameLine();
             const bool on = value == v;
             if (on) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.22f, 0.42f, 0.70f, 1));
-            if (ImGui::Button(label, ImVec2(each, 0))) { value = v; changed = true; }
+            if (ImGui::Button(label.c_str(), ImVec2(each, 0))) { value = v; changed = true; }
             if (on) ImGui::PopStyleColor();
         }
         ImGui::PopID();
@@ -238,14 +253,6 @@ bool App::Init(HWND hwnd, ID3D11Device* device, ID3D11DeviceContext* context, bo
         { "Build patch MPQ and install it into the client", "", [this] { BuildPatch(true); }, hasProject },
         { "Undo", "Ctrl+Z", [this] { Undo(); }, [this] { return m_store.CanUndo(); } },
         { "Redo", "Ctrl+Y", [this] { Redo(); }, [this] { return m_store.CanRedo(); } },
-        { "Tool: Select", "V", [this] { m_tool = Tool::Select; }, always },
-        { "Tool: Sculpt", "B", [this] { m_tool = Tool::Sculpt; }, always },
-        { "Tool: Copy", "C", [this] { m_tool = Tool::Copy; }, always },
-        { "Tool: Holes", "H", [this] { m_tool = Tool::Holes; }, always },
-        { "Tool: Zones (paint area ids)", "Z", [this] { m_tool = Tool::Zones; }, always },
-        { "Tool: Triggers (area triggers, teleports, entrances)", "K", [this] { m_tool = Tool::Triggers; }, always },
-        { "Tool: POIs (map landmarks, gossip points, .tele bookmarks)", "J", [this] { m_tool = Tool::Pois; }, always },
-        { "Tool: Flight paths (taxi nodes and routes)", "Y", [this] { m_tool = Tool::Flights; }, always },
         { "Group: Terrain", "F1", [this] { SetGroup(Group::Terrain); }, always },
         { "Group: Objects", "F2", [this] { SetGroup(Group::Objects); }, always },
         { "Group: Units", "F3", [this] { SetGroup(Group::Units); }, always },
@@ -271,13 +278,50 @@ bool App::Init(HWND hwnd, ID3D11Device* device, ID3D11DeviceContext* context, bo
         { "Project settings...", "", [this] { OpenProjectSettings(); }, hasProject },
         { "Server setup...", "", [this] { OpenSetup(); }, hasProject },
         { "Check for problems", "", [this] { RunChecks(); }, hasProject },
+        { "Window: NPC viewer", "", [this] { m_showNpc = true; m_npc.focus = true; }, always },
+        { "Window: Sources", "", [this] { m_showSources = true; }, hasProject },
+        { "Window: Keyboard shortcuts", "Ctrl+/", [this] { m_showShortcuts = true; }, always },
+        { "View: toggle far terrain", "", [this] { m_drawOptions.farTerrain = !m_drawOptions.farTerrain; }, always },
+        { "View: toggle terrain level of detail", "", [this] { m_drawOptions.lod = !m_drawOptions.lod; }, always },
+        { "View: toggle creatures", "", [this] { m_showSpawns[0] = !m_showSpawns[0]; }, always },
+        { "View: toggle gameobjects", "", [this] { m_showSpawns[1] = !m_showSpawns[1]; }, always },
     };
+    for (const ToolInfo& t : kTools)
+        m_commands.push_back({ std::string("Tool: ") + t.name + " (" + t.about + ")", t.key, [this, tool = t.tool] { m_tool = tool; }, always });
 
-    std::ifstream cfg(kConfigFile);
-    std::string last;
-    if (std::getline(cfg, last) && fs::exists(fs::path(last) / "project.json")) OpenProject(last);
+    // Recent projects; the list older builds kept next to the exe (one project) joins it once.
+    if (std::ifstream f(SettingsDir() / "recent.txt"); f)
+        for (std::string line; std::getline(f, line);)
+            if (!line.empty()) m_recent.push_back(line);
+    if (std::ifstream old(kOldConfigFile); old)
+        if (std::string line; std::getline(old, line) && !line.empty() && std::find(m_recent.begin(), m_recent.end(), line) == m_recent.end())
+            m_recent.push_back(line);
+    if (!m_recent.empty() && fs::exists(fs::path(m_recent.front()) / "project.json")) OpenProject(m_recent.front());
     else Log("Welcome. Create a project (File > New project) or open one to start.");
     return true;
+}
+
+void App::RememberProject(const std::string& dir)
+{
+    std::erase(m_recent, dir);
+    m_recent.insert(m_recent.begin(), dir);
+    if (m_recent.size() > 10) m_recent.resize(10);
+    std::ofstream f(SettingsDir() / "recent.txt");
+    for (const std::string& d : m_recent) f << d << "\n";
+}
+
+void App::Autosave()
+{
+    if (!m_project || !m_store.Dirty()) return;
+    const double now = ImGui::GetTime();
+    if (m_store.Revision() != m_autosaveRevision)   // an edit just landed: write a moment later, once it settles
+    {
+        m_autosaveRevision = m_store.Revision();
+        m_autosaveAt = now + 2.0;
+        return;
+    }
+    if (now < m_autosaveAt) return;
+    if (!Save(true)) m_autosaveAt = now + 30.0;   // failing: try again later, not every frame
 }
 
 void App::Log(const char* fmt, ...)
@@ -293,6 +337,12 @@ void App::Log(const char* fmt, ...)
     char stamp[16];
     std::strftime(stamp, sizeof stamp, "%H:%M:%S", &tm);
     m_log.push_back(std::string(stamp) + "  " + text);
+    if (const int level = LogLevel(text))
+    {
+        m_toast = text;
+        m_toastError = level == 2;
+        m_toastUntil = ImGui::GetCurrentContext() ? ImGui::GetTime() + (level == 2 ? 12.0 : 8.0) : 0;
+    }
 }
 
 // ---------------------------------------------------------------------------------------------- actions
@@ -360,7 +410,7 @@ bool App::OpenProject(const std::string& dir)
     m_store.author = m_project->author;
     if (!m_store.Load(m_project->ChangesDir(), error)) Log("Changes not fully loaded: %s", error.c_str());
     m_terrain.RebuildOverlay();
-    std::ofstream(kConfigFile) << m_project->dir.string() << "\n";
+    RememberProject(m_project->dir.string());
     Log("Opened project '%s': %zu archives, %zu maps, %zu changes.", m_project->name.c_str(), archives, m_maps.size(), m_store.Done().size());
     ConnectServer();
     if (m_project->serverProfile.empty()) OpenSetup();
@@ -452,16 +502,16 @@ void App::CloseProject()
     m_flyGround.reset();
 }
 
-bool App::Save()
+bool App::Save(bool quiet)
 {
     if (!m_project) return false;
     std::string error;
     if (!m_project->Save(error) || !m_store.Save(m_project->ChangesDir(), error))
     {
-        Log("Save failed: %s", error.c_str());
+        Log("%s failed: %s", quiet ? "Autosave" : "Save", error.c_str());
         return false;
     }
-    Log("Saved %zu changes to %s", m_store.Done().size(), m_project->ChangesDir().string().c_str());
+    if (!quiet) Log("Saved %zu changes to %s", m_store.Done().size(), m_project->ChangesDir().string().c_str());
     return true;
 }
 
@@ -644,6 +694,30 @@ void App::GoToTile(const std::string& map, int x, int y)
         m_camera.pos.y = it->second.maxHeight + 120.0f;
         m_focusTile.reset();
     }
+}
+
+void App::GoToWmoMap(const std::string& map)
+{
+    GoToTile(map, 32, 32);
+    const auto& w = m_terrain.GlobalWmo();
+    if (m_terrain.Map() != map || !w) return;
+    m_focusTile.reset();
+    m_camera.pos = { (w->extMin[0] + w->extMax[0]) / 2, w->extMax[1] + 40.0f, (w->extMin[2] + w->extMax[2]) / 2 + 60.0f };
+    m_camera.yaw = 0;
+    m_camera.pitch = -0.7f;
+    Log("%s is a WMO-only map (%s): right-drag and WASD to fly in.", map.c_str(), w->model.c_str());
+}
+
+std::optional<float> App::GroundAt(float x, float z, float fromY) const
+{
+    const std::optional<float> terrain = m_terrain.HeightAt(x, z);
+    std::optional<float> best = terrain && *terrain <= fromY + 2 ? terrain : std::nullopt;
+    ModelRenderer::DrawSettings wmos;
+    wmos.doodads = false;
+    const float top = fromY + 2;
+    if (const auto hit = m_models.Pick(XMVectorSet(x, top, z, 0), XMVectorSet(0, -1, 0, 0), 2000.0f, wmos); hit && hit->wmo)
+        if (const float y = top - hit->distance; !best || y > *best) best = y;
+    return best ? best : terrain;
 }
 
 void App::FocusTile()
@@ -2007,6 +2081,7 @@ void App::SelectMap(size_t index)
     const auto& m = m_maps[index];
     const auto wdt = m_mpq.Read("World\\Maps\\" + m.directory + "\\" + m.directory + ".wdt");
     m_mapTiles = wdt ? WdtTiles(*wdt) : std::vector<bool>();
+    m_mapGlobal = wdt ? WdtGlobalWmo(*wdt) : std::nullopt;
     const auto wdl = m_mpq.Read("World\\Maps\\" + m.directory + "\\" + m.directory + ".wdl");
     m_mapWdl = wdl ? ParseWdl(*wdl) : std::vector<std::vector<int16_t>>{};
     m_mapPreviewDir = m.directory;
@@ -2063,6 +2138,7 @@ void App::RefreshMapPreview()
 void App::Frame(float dt)
 {
     m_fps = m_fps * 0.95f + (dt > 0 ? 1.0f / dt : 0) * 0.05f;
+    Autosave();
     if (m_closeRequested)
     {
         m_closeRequested = false;
@@ -2139,7 +2215,13 @@ void App::Frame(float dt)
 
     // Models follow the terrain: drop tiles that streamed out, add one newly loaded tile per frame.
     for (int key : m_models.TileKeys())
-        if (key >= 0 && !m_terrain.Tiles().count(key)) m_models.RemoveTile(key);   // negative keys: paste previews
+        if (key >= 0 && key != kGlobalWmoKey && !m_terrain.Tiles().count(key)) m_models.RemoveTile(key);   // negative keys: paste previews
+    if (const auto& global = m_terrain.GlobalWmo(); global && !m_models.HasTile(kGlobalWmoKey))   // a WMO-only map's one WMO
+    {
+        Adt adt;
+        adt.wmos.push_back(*global);
+        m_models.AddTile(kGlobalWmoKey, adt, m_mpq);
+    }
     for (int key : m_terrain.TakeObjectChanges())   // edited, pasted or undone objects: reload that tile's models now
         if (auto it = m_terrain.Tiles().find(key); it != m_terrain.Tiles().end() && m_models.HasTile(key))
         {
@@ -2179,6 +2261,7 @@ void App::Frame(float dt)
     DrawVersions();
     DrawSources();
     DrawNpcViewer();
+    DrawShortcuts();
     DrawChangesPanel();
     DrawProblemsPanel();
     if (ImGuiWindow* log = ImGui::FindWindowByName("Log"); log && log->DockId) ImGui::SetNextWindowDockID(log->DockId, ImGuiCond_FirstUseEver);
@@ -2196,6 +2279,7 @@ void App::HandleShortcuts()
 {
     const ImGuiInputFlags global = ImGuiInputFlags_RouteGlobal;
     if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_P, global)) { m_paletteOpen = true; m_paletteQuery[0] = 0; m_paletteSelected = 0; }
+    if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_Slash, global)) m_showShortcuts = !m_showShortcuts;
     if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_N, global)) NewProject();
     if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_O, global)) OpenProjectDialog();
     if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_S, global)) Save();
@@ -2211,18 +2295,8 @@ void App::HandleShortcuts()
     if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_B, global)) OpenSaveBlueprint();
     if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_V, global)) PasteAtCursor();
     if (ImGui::GetIO().KeyCtrl) return;
-    if (ImGui::IsKeyPressed(ImGuiKey_V, false)) m_tool = Tool::Select;
-    if (ImGui::IsKeyPressed(ImGuiKey_B, false)) m_tool = Tool::Sculpt;
-    if (ImGui::IsKeyPressed(ImGuiKey_C, false)) m_tool = Tool::Copy;
-    if (ImGui::IsKeyPressed(ImGuiKey_H, false)) m_tool = Tool::Holes;
-    if (ImGui::IsKeyPressed(ImGuiKey_O, false)) m_tool = Tool::Objects;
-    if (ImGui::IsKeyPressed(ImGuiKey_T, false)) m_tool = Tool::Paint;
-    if (ImGui::IsKeyPressed(ImGuiKey_N, false)) m_tool = Tool::Creatures;
-    if (ImGui::IsKeyPressed(ImGuiKey_I, false)) m_tool = Tool::Gameobjects;
-    if (ImGui::IsKeyPressed(ImGuiKey_Z, false)) m_tool = Tool::Zones;
-    if (ImGui::IsKeyPressed(ImGuiKey_K, false)) m_tool = Tool::Triggers;
-    if (ImGui::IsKeyPressed(ImGuiKey_J, false)) m_tool = Tool::Pois;
-    if (ImGui::IsKeyPressed(ImGuiKey_Y, false)) m_tool = Tool::Flights;
+    for (const ToolInfo& t : kTools)
+        if (ImGui::IsKeyPressed(t.imKey, false)) m_tool = t.tool;
     for (int g = 0; g < 4; ++g)   // F1..F4: tool groups
         if (ImGui::IsKeyPressed(ImGuiKey(ImGuiKey_F1 + g), false)) SetGroup(Group(g));
     const bool pathMode = m_path && m_tool == Tool::Creatures;
@@ -2329,6 +2403,12 @@ void App::DrawMenuBar()
         if (ImGui::MenuItem("Reset panel layout")) m_buildLayout = true;
         ImGui::EndMenu();
     }
+    if (ImGui::BeginMenu("Help"))
+    {
+        ImGui::MenuItem("Keyboard shortcuts", "Ctrl+/", &m_showShortcuts);
+        if (ImGui::MenuItem("Command palette...", "Ctrl+P")) { m_paletteOpen = true; m_paletteQuery[0] = 0; }
+        ImGui::EndMenu();
+    }
     ImGui::EndMainMenuBar();
 }
 
@@ -2353,17 +2433,12 @@ void App::DrawToolbar()
         }
         ImGui::TextColored(kQuiet, "|");
         ImGui::SameLine();
-        struct Mode { const char* name; const char* tip; };
-        const Mode later[] = { { "Atmosphere", "Lights, fog, weather, minimaps" }, { "Logic", "AI, quests, dialogue, conditions" },
-                               { "Data", "Spells, items, loot, races and classes" } };
-        for (const Mode& m : later)
-        {
-            ImGui::BeginDisabled();
-            ImGui::Button(m.name);
-            ImGui::EndDisabled();
-            ImGui::SetItemTooltip("%s - not built yet", m.tip);
-            ImGui::SameLine();
-        }
+        if (m_showNpc) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.22f, 0.42f, 0.70f, 1));
+        const bool npcPressed = ImGui::Button("NPCs");
+        if (m_showNpc) ImGui::PopStyleColor();
+        if (npcPressed) { m_showNpc = !m_showNpc; m_npc.focus = m_showNpc; }
+        ImGui::SetItemTooltip("NPC viewer: creature templates, models, equipment, appearance");
+        ImGui::SameLine();
 
         const float playWidth = 120;
         ImGui::SameLine(ImGui::GetWindowWidth() - playWidth - 10);
@@ -2395,6 +2470,29 @@ void App::DrawStatusBar()
             }
             else
                 ImGui::TextColored(kQuiet, "No project");
+            if (m_project && m_problemsChecked)
+            {
+                const auto errors = std::count_if(m_problems.begin(), m_problems.end(), [](const Problem& p) { return p.severity == Problem::Severity::Error; });
+                const auto warnings = std::ptrdiff_t(m_problems.size()) - errors;
+                ImGui::SameLine(0, 24);
+                char text[96];
+                const char* stale = m_problemsRevision != m_store.Revision() ? "  (before the last edits)" : "";
+                if (m_problems.empty()) snprintf(text, sizeof text, "no problems%s", stale);
+                else snprintf(text, sizeof text, "%zd error(s), %zd warning(s)%s", errors, warnings, stale);
+                ImGui::PushStyleColor(ImGuiCol_Text, errors ? kBad : warnings ? kWarn : kQuiet);
+                if (ImGui::Selectable(text, false, 0, ImGui::CalcTextSize(text))) ImGui::SetWindowFocus("Problems");
+                ImGui::PopStyleColor();
+                ImGui::SetItemTooltip("Open the Problems panel (Check now runs the checks again)");
+            }
+            if (ImGui::GetTime() < m_toastUntil)
+            {
+                ImGui::SameLine(0, 24);
+                const std::string text = Fit(m_toast, 520);
+                ImGui::PushStyleColor(ImGuiCol_Text, m_toastError ? kBad : kWarn);
+                if (ImGui::Selectable(text.c_str(), false, 0, ImGui::CalcTextSize(text.c_str()))) ImGui::SetWindowFocus("Log");
+                ImGui::PopStyleColor();
+                ImGui::SetItemTooltip("%s\n(click for the Log)", m_toast.c_str());
+            }
             if (m_project && !m_project->serverProfile.empty())
             {
                 ImGui::SameLine(0, 24);
@@ -2426,6 +2524,13 @@ void App::DrawStatusBar()
                     ImGui::SameLine(0, 24);
                     ImGui::TextColored(kQuiet, "cursor %.1f, %.1f, %.1f   tile %d_%d   chunk %u,%u   area %s", m_hover->pos.x, m_hover->pos.y,
                                        m_hover->pos.z, m_hover->chunk.tile % 64, m_hover->chunk.tile / 64, c->indexX, c->indexY, AreaLabel(c->areaId).c_str());
+                }
+                else
+                {
+                    float sx, sy, sz;   // on a WMO floor: no chunk; the server position is what spawns and points take
+                    EditorToServer(m_hover->pos, sx, sy, sz);
+                    ImGui::SameLine(0, 24);
+                    ImGui::TextColored(kQuiet, "cursor on a WMO   server %.1f, %.1f, %.1f", sx, sy, sz);
                 }
             const std::string right = std::to_string(int(m_fps + 0.5f)) + " fps";
             ImGui::SameLine(ImGui::GetWindowWidth() - ImGui::CalcTextSize(right.c_str()).x - 16);
@@ -2677,6 +2782,11 @@ void App::DrawViewport(float dt)
             else if (io.KeyCtrl && m_tool == Tool::Paint) m_paint.radius = std::clamp(m_paint.radius * (io.MouseWheel > 0 ? 1.15f : 0.87f), 1.0f, 150.0f);
             else if (io.KeyCtrl) m_brush.radius = std::clamp(m_brush.radius * (io.MouseWheel > 0 ? 1.15f : 0.87f), 1.0f, 300.0f);
             else if (io.KeyAlt && m_tool == Tool::Copy) m_pasteOffset = std::clamp(m_pasteOffset + io.MouseWheel * (io.KeyShift ? 0.1f : 0.5f), -50.0f, 50.0f);
+            else if (m_looking)   // flying: the wheel sets the speed
+            {
+                m_camera.speed = std::clamp(m_camera.speed * (io.MouseWheel > 0 ? 1.25f : 0.8f), 10.0f, 1000.0f);
+                m_speedShownUntil = ImGui::GetTime() + 1.5;
+            }
             else p = XMVectorAdd(p, XMVectorScale(fwd, io.MouseWheel * 20.0f));
         }
         XMStoreFloat3(&m_camera.pos, p);
@@ -2703,11 +2813,27 @@ void App::DrawViewport(float dt)
                 if (const auto ref = m_terrain.ChunkAtGrid(int(std::floor(hit->pos.x / kChunkSize)), int(std::floor(hit->pos.z / kChunkSize))))
                     m_hover = TerrainHit{ hit->pos, *ref };
         }
+        // Spawns, paths, triggers, POIs and flight nodes stand on WMO floors too (bridges, buildings, dungeons): the nearer
+        // of the terrain and a WMO under the cursor. Terrain tools keep aiming at the terrain.
+        if (SpawnTool() || m_tool == Tool::Triggers || m_tool == Tool::Pois || m_tool == Tool::Flights)
+        {
+            ModelRenderer::DrawSettings wmos = m_modelSettings;
+            wmos.doodads = false;
+            const float ground = m_hover ? XMVectorGetX(XMVector3Length(XMVectorSubtract(XMLoadFloat3(&m_hover->pos), p0))) : 6000.0f;
+            if (const auto hit = m_models.Pick(p0, dir, ground, wmos); hit && hit->wmo)
+            {
+                XMFLOAT3 pos;
+                XMStoreFloat3(&pos, XMVectorAdd(p0, XMVectorScale(dir, hit->distance)));
+                m_hover = TerrainHit{ pos, ChunkRef{ -1, -1 } };   // no terrain chunk here
+            }
+        }
         m_objHover.reset();
         if ((m_tool == Tool::Objects && !gizmoHot) || (m_tool == Tool::Zones && io.KeyShift))
         {
             const float ground = m_hover ? XMVectorGetX(XMVector3Length(XMVectorSubtract(XMLoadFloat3(&m_hover->pos), p0))) : 6000.0f;
-            if (const auto hit = m_models.Pick(p0, dir, ground, m_modelSettings)) m_objHover = ObjectRef{ hit->wmo, hit->uid };
+            const auto& global = m_terrain.GlobalWmo();
+            if (const auto hit = m_models.Pick(p0, dir, ground, m_modelSettings); hit && !(global && hit->wmo && hit->uid == global->uniqueId))
+                m_objHover = ObjectRef{ hit->wmo, hit->uid };   // a WMO-only map's own WMO lives in its WDT: not an editable object yet
         }
         m_spawnHover.reset();
         if (SpawnTool() && m_showSpawns[int(m_spawnKind)])
@@ -3063,12 +3189,24 @@ void App::DrawViewport(float dt)
     }
     else
     {
-        const char* line1 = m_project ? "Pick a map in the Maps panel" : "No project open";
-        const char* line2 = m_project ? "Click a tile in its grid to fly there" : "File > New project, or File > Open project";
-        const ImVec2 s1 = ImGui::CalcTextSize(line1), s2 = ImGui::CalcTextSize(line2);
-        const ImVec2 c{ origin.x + size.x / 2, origin.y + size.y / 2 };
-        dl->AddText({ c.x - s1.x / 2, c.y - s1.y }, IM_COL32(240, 242, 246, 255), line1);
-        dl->AddText({ c.x - s2.x / 2, c.y + 4 }, IM_COL32(200, 205, 212, 200), line2);
+        if (!m_project) DrawStartScreen(origin, size);
+        else
+        {
+            const char* line1 = "Pick a map in the Maps panel";
+            const char* line2 = "Click a tile in its grid to fly there";
+            const ImVec2 s1 = ImGui::CalcTextSize(line1), s2 = ImGui::CalcTextSize(line2);
+            const ImVec2 c{ origin.x + size.x / 2, origin.y + size.y / 2 };
+            dl->AddText({ c.x - s1.x / 2, c.y - s1.y }, IM_COL32(240, 242, 246, 255), line1);
+            dl->AddText({ c.x - s2.x / 2, c.y + 4 }, IM_COL32(200, 205, 212, 200), line2);
+        }
+    }
+    if (ImGui::GetTime() < m_speedShownUntil)
+    {
+        char text[48];
+        snprintf(text, sizeof text, "Camera speed %.0f yd/s", m_camera.speed);
+        const ImVec2 s = ImGui::CalcTextSize(text), at{ origin.x + (size.x - s.x) / 2, origin.y + size.y - s.y - 40 };
+        dl->AddRectFilled({ at.x - 8, at.y - 4 }, { at.x + s.x + 8, at.y + s.y + 4 }, IM_COL32(20, 22, 26, 210), 4);
+        dl->AddText(at, IM_COL32(235, 238, 242, 255), text);
     }
     ImGui::End();
 }
@@ -3101,15 +3239,13 @@ void App::DrawToolsPanel()
     const float w = ImGui::GetContentRegionAvail().x;
 
     ImGui::SeparatorText(kGroupNames[int(GroupOf(m_tool))]);
-    switch (GroupOf(m_tool))
+    if (m_terrain.GlobalWmo() && (GroupOf(m_tool) == Group::Terrain || m_tool == Tool::Zones))
+        ImGui::TextColored(kWarn, "%s has no terrain (one WMO): nothing for this tool here.", m_terrain.Map().c_str());
     {
-    case Group::Terrain:
-        Segmented("tool", m_tool, { { Tool::Select, "Select V" }, { Tool::Sculpt, "Sculpt B" }, { Tool::Paint, "Paint T" }, { Tool::Holes, "Holes H" },
-                                    { Tool::Copy, "Copy C" } }, w);
-        break;
-    case Group::Objects: Segmented("tool", m_tool, { { Tool::Objects, "Place and edit  O" } }, w); break;
-    case Group::Units: Segmented("tool", m_tool, { { Tool::Creatures, "Creatures N" }, { Tool::Gameobjects, "Gameobjects I" } }, w); break;
-    case Group::Regions: Segmented("tool", m_tool, { { Tool::Zones, "Zones Z" }, { Tool::Triggers, "Triggers K" }, { Tool::Pois, "POIs J" }, { Tool::Flights, "Flights Y" } }, w); break;
+        std::vector<std::pair<Tool, std::string>> tools;
+        for (const ToolInfo& t : kTools)
+            if (t.group == GroupOf(m_tool)) tools.push_back({ t.tool, std::string(t.name) + "  " + t.key });
+        Segmented("tool", m_tool, tools, w);
     }
     ImGui::Spacing();
 
@@ -3363,7 +3499,17 @@ void App::DrawMapsPanel()
 
     if (m_mapIndex < 0) { ImGui::TextColored(kQuiet, "Select a map to see its tiles."); ImGui::End(); return; }
     const MapEntry& map = m_maps[size_t(m_mapIndex)];
-    if (m_mapTiles.empty()) { ImGui::TextColored(kQuiet, "%s has no WDT tile grid (WMO-only map).", map.directory.c_str()); ImGui::End(); return; }
+    if (m_mapGlobal)
+    {
+        // A dungeon or other WMO-only map: no tiles, one WMO.
+        ImGui::TextWrapped("%s is one WMO, no terrain:", map.directory.c_str());
+        ImGui::TextColored(kQuiet, "%s", m_mapGlobal->model.c_str());
+        if (ImGui::Button(m_terrain.Map() == map.directory ? "Go to its middle" : "Open this map", { -1, 0 })) GoToWmoMap(map.directory);
+        ImGui::TextColored(kQuiet, "Spawns, paths, triggers, POIs and flight nodes work on its floors.\nTerrain tools have nothing to edit here.");
+        ImGui::End();
+        return;
+    }
+    if (m_mapTiles.empty()) { ImGui::TextColored(kQuiet, "%s has no WDT tile grid.", map.directory.c_str()); ImGui::End(); return; }
 
     RefreshMapPreview();
     // 64x64 tile grid over the map picture (land green to brown by height, blue shallows, dark deep water):
@@ -3498,6 +3644,9 @@ void App::DrawChangesPanel()
     ImGui::EndDisabled();
     ImGui::SameLine();
     ImGui::TextColored(kQuiet, "%zu applied, %zu undone%s", m_store.Done().size(), m_store.Undone().size(), m_store.Dirty() ? "  (unsaved)" : "");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(-1);
+    ImGui::InputTextWithHint("##changefilter", "Filter", &m_changeFilter);
 
     if (ImGui::BeginTable("##changes", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_Resizable))
     {
@@ -3507,10 +3656,31 @@ void App::DrawChangesPanel()
         ImGui::TableSetupColumn("Target", ImGuiTableColumnFlags_WidthFixed, 140);
         ImGui::TableSetupColumn("Time", ImGuiTableColumnFlags_WidthFixed, 70);
         ImGui::TableHeadersRow();
-        auto row = [](const Change& c, bool undone) {
+        // Click a row: the camera goes where the change was made. Right-click: undo or redo up to it.
+        std::optional<size_t> undoTo, redoTo;
+        const Change* goTo = nullptr;
+        auto row = [&](const Change& c, bool undone, size_t index) {
+            if (!m_changeFilter.empty() && !ContainsNoCase(c.label, m_changeFilter.c_str()) && !ContainsNoCase(c.target, m_changeFilter.c_str())) return;
             ImGui::TableNextRow();
             if (undone) ImGui::PushStyleColor(ImGuiCol_Text, kQuiet);
-            ImGui::TableNextColumn(); ImGui::Text("%llu", static_cast<unsigned long long>(c.id));
+            ImGui::TableNextColumn();
+            ImGui::PushID(int(c.id));
+            if (ImGui::Selectable(std::to_string(c.id).c_str(), false, ImGuiSelectableFlags_SpanAllColumns)) goTo = &c;
+            if (ImGui::BeginItemTooltip())
+            {
+                ImGui::Text("%s", c.label.c_str());
+                ImGui::TextColored(kQuiet, "%s   by %s", c.domain.c_str(), c.author.c_str());
+                ImGui::TextColored(kQuiet, "Click: go there   Right-click: %s to here", undone ? "redo" : "undo");
+                ImGui::EndTooltip();
+            }
+            if (ImGui::BeginPopupContextItem("##change"))
+            {
+                if (ImGui::MenuItem("Go there", nullptr, false, GoToChange(c, false))) goTo = &c;
+                if (!undone && ImGui::MenuItem("Undo to here (this one included)")) undoTo = index;
+                if (undone && ImGui::MenuItem("Redo to here (this one included)")) redoTo = index;
+                ImGui::EndPopup();
+            }
+            ImGui::PopID();
             ImGui::TableNextColumn(); ImGui::Text("%s%s", c.label.c_str(), undone ? "  (undone)" : "");
             ImGui::TableNextColumn(); ImGui::TextUnformatted(c.target.c_str());
             std::tm tm{};
@@ -3521,10 +3691,154 @@ void App::DrawChangesPanel()
             ImGui::TableNextColumn(); ImGui::TextUnformatted(stamp);
             if (undone) ImGui::PopStyleColor();
         };
-        for (auto it = m_store.Undone().begin(); it != m_store.Undone().end(); ++it) row(*it, true);
-        for (auto it = m_store.Done().rbegin(); it != m_store.Done().rend(); ++it) row(*it, false);
+        for (size_t i = 0; i < m_store.Undone().size(); ++i) row(m_store.Undone()[i], true, i);
+        for (size_t i = m_store.Done().size(); i-- > 0;) row(m_store.Done()[i], false, i);
         ImGui::EndTable();
+        if (goTo && !GoToChange(*goTo, true)) Log("'%s' has no place to go to.", goTo->label.c_str());
+        if (undoTo) UndoTo(*undoTo);
+        if (redoTo) RedoTo(*redoTo);
     }
+    ImGui::End();
+}
+
+bool App::GoToChange(const Change& c, bool go)
+{
+    // A batch: its first part with a place.
+    std::vector<std::pair<std::string, const nlohmann::json*>> parts;
+    if (c.domain == ChangeStore::kBatch && c.data.contains("changes"))
+        for (const auto& p : c.data["changes"]) parts.push_back({ p.value("domain", ""), &p["data"] });
+    else parts.push_back({ c.domain, &c.data });
+    for (const auto& [domain, data] : parts)
+    {
+        const nlohmann::json& d = *data;
+        if (domain == m_terrain.Domain() && d.contains("map") && d["map"].is_string())
+            for (const char* key : { "edits", "layers", "holes", "liquids", "areas", "objects", "tiles" })
+                if (d.contains(key) && d[key].is_array() && !d[key].empty() && d[key][0].is_array() && d[key][0].size() >= 2)
+                {
+                    if (go) GoToTile(d["map"].get<std::string>(), d[key][0][0].get<int>(), d[key][0][1].get<int>());
+                    return true;
+                }
+        if (domain == m_creatures.Domain() || domain == m_gameobjects.Domain())
+        {
+            const nlohmann::json& r = d.contains("rows") && d["rows"].is_array() && !d["rows"].empty() ? d["rows"][0] : d;
+            const nlohmann::json& row = r.contains("after") && r["after"].is_object() ? r["after"] : r.contains("before") ? r["before"] : r;
+            auto text = [&](const char* k) { return row.contains(k) && row[k].is_string() ? row[k].get<std::string>() : std::string(); };
+            if (row.is_object() && !text("map").empty() && !text("position_x").empty())
+            {
+                if (go) FlyTo(uint32_t(std::stoul(text("map"))), std::stof(text("position_x")), std::stof(text("position_y")), std::stof(text("position_z")), false);
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+void App::UndoTo(size_t doneCount)
+{
+    if (m_terrain.Stroking() || m_terrain.HoleStroking() || m_terrain.AreaStroking()) return;
+    const size_t steps = m_store.Done().size() - std::min(doneCount, m_store.Done().size());
+    if (!steps) return;
+    ClearPlacementView();
+    for (size_t i = 0; i < steps; ++i) m_store.Undo();
+    Log("Undid %zu change(s).", steps);
+}
+
+void App::RedoTo(size_t undoneCount)
+{
+    if (m_terrain.Stroking() || m_terrain.HoleStroking() || m_terrain.AreaStroking()) return;
+    const size_t steps = m_store.Undone().size() - std::min(undoneCount, m_store.Undone().size());
+    if (!steps) return;
+    ClearPlacementView();
+    for (size_t i = 0; i < steps; ++i) m_store.Redo();
+    Log("Redid %zu change(s).", steps);
+}
+
+void App::DrawStartScreen(const ImVec2& origin, const ImVec2& size)
+{
+    const ImVec2 box{ std::min(560.0f, size.x - 40), std::min(380.0f, size.y - 40) };
+    if (box.x < 200 || box.y < 150) return;
+    ImGui::SetCursorScreenPos({ origin.x + (size.x - box.x) / 2, origin.y + (size.y - box.y) / 2 });
+    if (ImGui::BeginChild("##start", box, ImGuiChildFlags_Borders, ImGuiWindowFlags_NoScrollbar))
+    {
+        ImGui::TextUnformatted("WoW World Editor");
+        ImGui::TextColored(kQuiet, "A project holds your edits to one client and one server.");
+        ImGui::Spacing();
+        const float half = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) / 2;
+        if (ImGui::Button("New project...  Ctrl+N", { half, 0 })) NewProject();
+        ImGui::SameLine();
+        if (ImGui::Button("Open project...  Ctrl+O", { half, 0 })) OpenProjectDialog();
+        ImGui::SeparatorText("Recent");
+        if (m_recent.empty()) ImGui::TextColored(kQuiet, "None yet.");
+        std::optional<std::string> open;
+        for (const std::string& dir : m_recent)
+        {
+            const bool exists = fs::exists(fs::path(dir) / "project.json");
+            ImGui::BeginDisabled(!exists);
+            if (ImGui::Selectable((fs::path(dir).filename().string() + "##" + dir).c_str())) open = dir;
+            ImGui::EndDisabled();
+            ImGui::SameLine(160);
+            ImGui::TextColored(kQuiet, "%s%s", Fit(dir, ImGui::GetContentRegionAvail().x - 80).c_str(), exists ? "" : "  (missing)");
+        }
+        ImGui::Spacing();
+        ImGui::TextColored(kQuiet, "Ctrl+P: every command   Ctrl+/: keyboard shortcuts");
+        if (open) OpenProject(*open);
+    }
+    ImGui::EndChild();
+}
+
+void App::DrawShortcuts()
+{
+    if (!m_showShortcuts) return;
+    ImGui::SetNextWindowSize({ 620, 640 }, ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Keyboard shortcuts", &m_showShortcuts)) { ImGui::End(); return; }
+    ImGui::SetNextItemWidth(-1);
+    ImGui::InputTextWithHint("##filter", "Filter: a key or what it does", &m_shortcutFilter);
+    // The commands that have a key (tools included, from the tool table), then gestures no command covers.
+    struct Row { std::string keys, what; };
+    std::vector<std::pair<const char*, std::vector<Row>>> sections;
+    std::vector<Row> commands;
+    for (const Command& c : m_commands)
+        if (!c.shortcut.empty()) commands.push_back({ c.shortcut, c.name });
+    sections.push_back({ "Commands", std::move(commands) });
+    sections.push_back({ "Camera", { { "Right drag", "look around" }, { "W A S D / Q E", "move / down, up (while looking or with the viewport focused)" },
+                                     { "Shift", "move faster" }, { "Wheel while right-dragging", "camera speed" }, { "Wheel", "move forward or back" },
+                                     { "F", "focus the camera on the tile" } } });
+    sections.push_back({ "Selecting", { { "Click", "select" }, { "Shift+click", "add to the selection" }, { "Ctrl+click", "remove from the selection" },
+                                        { "Drag empty space", "box select" }, { "Esc", "stop placing, cancel, then clear the selection" } } });
+    sections.push_back({ "Moving things (objects, spawns, triggers, POIs, path points)",
+                         { { "1 / 2 / 3", "move / rotate / scale handles" }, { "X", "world or local axes" }, { "Ctrl while dragging", "snap" },
+                           { "G", "drop to the ground" }, { "PgUp / PgDn", "up / down" }, { "+ / -", "scale" }, { "Del", "delete" },
+                           { "Alt+click", "move the selection to the cursor" } } });
+    sections.push_back({ "Brushes", { { "Ctrl+wheel", "brush radius" }, { "Alt+click (Paint)", "pick the texture under the cursor" },
+                                      { "Ctrl (Holes)", "fill instead of cut" } } });
+    sections.push_back({ "Copy and paste", { { "Arrows", "nudge the pinned paste a chunk" }, { "Alt+wheel", "fine height of the paste" },
+                                             { "Enter / Esc", "commit / cancel the pinned paste" } } });
+    sections.push_back({ "Versions", { { "[ / ]", "compare the selection with the previous / next version" }, { "Enter", "paste the version shown" },
+                                       { "Del", "reject the difference under review" } } });
+    if (ImGui::BeginChild("##rows"))
+        for (const auto& [title, rows] : sections)
+        {
+            std::vector<const Row*> shown;
+            for (const Row& r : rows)
+                if (m_shortcutFilter.empty() || ContainsNoCase(r.keys, m_shortcutFilter.c_str()) || ContainsNoCase(r.what, m_shortcutFilter.c_str()))
+                    shown.push_back(&r);
+            if (shown.empty()) continue;
+            ImGui::SeparatorText(title);
+            if (ImGui::BeginTable(title, 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
+            {
+                ImGui::TableSetupColumn("keys", ImGuiTableColumnFlags_WidthFixed, 170);
+                for (const Row* r : shown)
+                {
+                    ImGui::TableNextRow();
+                    ImGui::TableNextColumn();
+                    ImGui::TextColored(kAccent, "%s", r->keys.c_str());
+                    ImGui::TableNextColumn();
+                    ImGui::TextWrapped("%s", r->what.c_str());
+                }
+                ImGui::EndTable();
+            }
+        }
+    ImGui::EndChild();
     ImGui::End();
 }
 
@@ -3532,10 +3846,27 @@ void App::DrawLogPanel()
 {
     if (!ImGui::Begin("Log")) { ImGui::End(); return; }
     if (ImGui::SmallButton("Clear")) m_log.clear();
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Copy"))
+    {
+        std::string all;
+        for (const std::string& line : m_log) all += line + "\n";
+        ImGui::SetClipboardText(all.c_str());
+    }
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(-1);
+    ImGui::InputTextWithHint("##logfilter", "Filter", &m_logFilter);
     ImGui::Separator();
     if (ImGui::BeginChild("##log", { 0, 0 }, ImGuiChildFlags_None, ImGuiWindowFlags_HorizontalScrollbar))
     {
-        for (const std::string& line : m_log) ImGui::TextUnformatted(line.c_str());
+        for (const std::string& line : m_log)
+        {
+            if (!m_logFilter.empty() && !ContainsNoCase(line, m_logFilter.c_str())) continue;
+            const int level = LogLevel(line);
+            if (level) ImGui::PushStyleColor(ImGuiCol_Text, level == 2 ? kBad : kWarn);
+            ImGui::TextUnformatted(line.c_str());
+            if (level) ImGui::PopStyleColor();
+        }
         if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 4) ImGui::SetScrollHereY(1.0f);
     }
     ImGui::EndChild();

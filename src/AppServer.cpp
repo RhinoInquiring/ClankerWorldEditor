@@ -263,7 +263,19 @@ void App::DrawServerPanel()
     if (ImGui::SmallButton("Setup...")) OpenSetup();
 
     ImGui::SetNextItemWidth(-90);
-    const bool enter = ImGui::InputTextWithHint("##cmd", "GM command, e.g. server info", &m_command, ImGuiInputTextFlags_EnterReturnsTrue);
+    const bool enter = ImGui::InputTextWithHint(
+        "##cmd", "GM command, e.g. server info (up / down: earlier ones)", &m_command, ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_CallbackHistory,
+        [](ImGuiInputTextCallbackData* data) {
+            App& app = *static_cast<App*>(data->UserData);
+            const int count = int(app.m_commandLog.size());
+            if (!count) return 0;
+            int& pos = app.m_historyPos;   // -1: the line being typed; else index from the newest
+            pos = data->EventKey == ImGuiKey_UpArrow ? std::min(pos + 1, count - 1) : std::max(pos - 1, -1);
+            data->DeleteChars(0, data->BufTextLen);
+            if (pos >= 0) data->InsertChars(0, app.m_commandLog[size_t(count - 1 - pos)].first.c_str());
+            return 0;
+        },
+        this);
     ImGui::SameLine();
     if ((ImGui::Button("Run", { 80, 0 }) || enter) && !m_command.empty())
     {
@@ -271,6 +283,7 @@ void App::DrawServerPanel()
         if (command[0] == '.') command.erase(0, 1);   // the console takes commands without the dot
         RunServerCommand(command);
         m_command.clear();
+        m_historyPos = -1;
         ImGui::SetKeyboardFocusHere(-1);
     }
     if (ImGui::BeginChild("##out", { 0, 0 }, ImGuiChildFlags_Borders))
@@ -292,6 +305,7 @@ void App::RunChecks()
 {
     m_problems.clear();
     m_problemsChecked = true;
+    m_problemsRevision = m_store.Revision();
     if (!m_project) return;
     // The real export pipeline, written to a scratch folder: whatever export would refuse or fix shows up here.
     const fs::path out = m_project->dir / "out" / "check";

@@ -35,6 +35,9 @@ struct ServerProfile
 std::optional<std::string> ReadSecret(const std::string& profile, const std::string& what);
 bool WriteSecret(const std::string& profile, const std::string& what, const std::string& secret);
 
+/// %APPDATA%\wow-world-editor (created when missing): per-user settings, panel layout, recent projects, server profiles.
+std::filesystem::path SettingsDir();
+
 /// MySQL connection (libmysql.dll, delay-loaded: the editor runs without it, only server features stop).
 class Db
 {

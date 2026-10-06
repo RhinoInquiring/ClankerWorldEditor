@@ -17,6 +17,17 @@
 
 namespace fs = std::filesystem;
 
+std::filesystem::path SettingsDir()
+{
+    PWSTR appData = nullptr;
+    std::filesystem::path dir;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, nullptr, &appData))) dir = std::filesystem::path(appData) / "wow-world-editor";
+    CoTaskMemFree(appData);
+    std::error_code ec;
+    if (!dir.empty()) std::filesystem::create_directories(dir, ec);
+    return dir;
+}
+
 namespace
 {
 std::wstring Wide(const std::string& s)
@@ -26,14 +37,7 @@ std::wstring Wide(const std::string& s)
     return w;
 }
 
-fs::path ProfilesFile()
-{
-    PWSTR appData = nullptr;
-    fs::path dir;
-    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, nullptr, &appData))) dir = fs::path(appData) / "wow-world-editor";
-    CoTaskMemFree(appData);
-    return dir / "profiles.json";
-}
+fs::path ProfilesFile() { return SettingsDir() / "profiles.json"; }
 
 std::string XmlEscape(const std::string& s)
 {

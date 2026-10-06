@@ -189,7 +189,7 @@ std::optional<App::Transformable> App::SpawnTransform()
     t.ground = [this, what = t.what] {
         EditSpawns("Drop " + what + " to the ground", [&](Spawn& s) {
             const XMFLOAT3 e = ServerToEditor(s.x, s.y, s.z);
-            if (const auto h = m_terrain.HeightAt(e.x, e.z)) s.z = *h;
+            if (const auto h = GroundAt(e.x, e.z, e.y)) s.z = *h;
         });
     };
     t.remove = [this] { DeleteSpawns(); };
@@ -214,7 +214,7 @@ std::optional<App::Transformable> App::TriggerTransform()
     t.ground = [this] {
         Trigger g = m_triggerEdit;
         const XMFLOAT3 e = ServerToEditor(g.x, g.y, g.z);
-        if (const auto h = m_terrain.HeightAt(e.x, e.z)) g.z = *h + (g.Sphere() ? 0 : g.height / 2);
+        if (const auto h = GroundAt(e.x, e.z, e.y)) g.z = *h + (g.Sphere() ? 0 : g.height / 2);
         CommitTrigger(g.id, g, m_teleportEdit, "Drop trigger " + std::to_string(g.id) + " to the ground");
     };
     t.remove = [this] { CommitTrigger(m_triggerSel, std::nullopt, std::nullopt, "Delete trigger " + std::to_string(m_triggerSel)); };
@@ -258,7 +258,7 @@ std::optional<App::Transformable> App::PoiTransform()
         t.ground = [this] {
             Poi p = m_poiEdit;
             const XMFLOAT3 e = ServerToEditor(p.x, p.y, p.z);
-            if (const auto h = m_terrain.HeightAt(e.x, e.z)) p.z = *h;
+            if (const auto h = GroundAt(e.x, e.z, e.y)) p.z = *h;
             CommitPoi(p.kind, p.id, p, "Drop point " + std::to_string(p.id) + " to the ground");
         };
     t.remove = [this] { CommitPoi(m_poiKind, m_poiSel, std::nullopt, "Delete point " + std::to_string(m_poiSel)); };

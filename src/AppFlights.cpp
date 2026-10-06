@@ -357,7 +357,7 @@ std::optional<App::Transformable> App::FlightTransform()
         t.ground = [this] {
             TaxiPoint q = FlightPoints()[*m_flightPoint];
             const XMFLOAT3 e = At(q);
-            if (const auto h = m_terrain.HeightAt(e.x, e.z)) q.z = *h;
+            if (const auto h = GroundAt(e.x, e.z, e.y)) q.z = *h;
             CommitDbc({ { &m_taxiPoints, q.id, q.ToRow(m_taxiPoints.Row(q.id)) } }, "Drop flight point to the ground");
         };
         t.remove = [this] { DeleteFlightPoint(*m_flightPoint); };
@@ -387,7 +387,7 @@ std::optional<App::Transformable> App::FlightTransform()
         const TaxiNode before = TaxiNode::FromRow(m_taxiNodes.Row(m_flightNode));
         TaxiNode after = before;
         const XMFLOAT3 e = At(after);
-        if (const auto h = m_terrain.HeightAt(e.x, e.z)) after.z = *h;
+        if (const auto h = GroundAt(e.x, e.z, e.y)) after.z = *h;
         CommitNodeMove(before, after, "Drop flight node " + std::to_string(after.id) + " to the ground");
     };
     t.remove = [this] { DeleteFlightNode(m_flightNode); };

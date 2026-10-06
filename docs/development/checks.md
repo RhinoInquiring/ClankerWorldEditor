@@ -33,7 +33,7 @@ Direct3D device. Checks that write files use a temporary folder and remove it.
 | `--anim-check <Data> <model.m2> [...]` | Skeletons animate without flying apart; every animation (incl. `.anim` files) loads and Walk differs from Stand |
 | `--catalog-check <Data> <out.png>` | Catalog build time, search, thumbnails |
 | `--asset-check <Data> <other client> <map> <x> <y>` | Paste from another client, cracks, the asset closure |
-| `--render <Data> <map> <x> <y> <out.png> [yaw pitch above fx fz]` | Draws a view to a PNG |
+| `--render <Data> <map> <x> <y> <out.png> [yaw pitch above fx fz]` | Draws a view to a PNG. WMO-only maps (any x y): fx fz are fractions of the WMO box, above is yards over its middle; with WWE_SERVER=<AC dir> it also checks every creature stands on a WMO floor |
 | `--map-preview <Data> <map> <out.png>` | The Maps panel picture |
 
 ## Versions

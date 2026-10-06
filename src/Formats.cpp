@@ -383,6 +383,28 @@ bool WdtHasTile(const std::vector<uint8_t>& wdt, int x, int y)
     return has;
 }
 
+std::optional<WmoPlacement> WdtGlobalWmo(const std::vector<uint8_t>& wdt)
+{
+    uint32_t flags = 0;
+    std::string name;
+    std::optional<ModfEntry> modf;
+    ForEachChunk(wdt, 0, wdt.size(), [&](uint32_t magic, size_t off, size_t size) {
+        if (magic == Tag("MPHD") && size >= 4) ReadAt(wdt, off, flags);
+        else if (magic == Tag("MWMO") && size) name = CString(wdt, off, size, 0);
+        else if (magic == Tag("MODF") && size >= sizeof(ModfEntry))
+        {
+            modf.emplace();
+            std::memcpy(&*modf, wdt.data() + off, sizeof(ModfEntry));
+        }
+    });
+    if (!(flags & 0x1) || name.empty() || !modf) return std::nullopt;
+    // A WDT's MODF counts from the middle of the map, an ADT's from its corner: shift it into the ADTs' space.
+    const ModfEntry& e = *modf;
+    return WmoPlacement{ name, { e.pos[0] + kZeroPoint, e.pos[1], e.pos[2] + kZeroPoint }, { e.rot[0], e.rot[1], e.rot[2] },
+                         { e.ext[0] + kZeroPoint, e.ext[1], e.ext[2] + kZeroPoint }, { e.ext[3] + kZeroPoint, e.ext[4], e.ext[5] + kZeroPoint },
+                         e.uniqueId, e.doodadSet, e.flags, e.nameSet };
+}
+
 std::vector<bool> WdtTiles(const std::vector<uint8_t>& wdt)
 {
     std::vector<bool> tiles(64 * 64, false);

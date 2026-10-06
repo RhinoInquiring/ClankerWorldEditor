@@ -181,7 +181,7 @@ void App::DropPathPoint()
     if (!m_path || !m_path->sel || *m_path->sel >= m_path->points.size()) return;
     PathPoint& p = m_path->points[*m_path->sel];
     const XMFLOAT3 e = Editor(p);
-    if (const auto h = m_terrain.HeightAt(e.x, e.z)) { p.z = *h; m_path->dirty = true; }
+    if (const auto h = GroundAt(e.x, e.z, e.y)) { p.z = *h; m_path->dirty = true; }
 }
 
 void App::BuildPathSolids(std::vector<LineVertex>& triangles) const

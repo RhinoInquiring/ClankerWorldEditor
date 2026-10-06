@@ -126,6 +126,7 @@ bool TerrainAdapter::SetMap(const std::string& directory, std::string& error)
     m_map = directory;
     m_bigAlpha = WdtBigAlpha(*wdt);
     m_present = WdtTiles(*wdt);
+    m_globalWmo = WdtGlobalWmo(*wdt);
     return true;
 }
 
@@ -135,6 +136,7 @@ void TerrainAdapter::Unload()
     m_renderer.Clear();
     m_map.clear();
     m_present.clear();
+    m_globalWmo.reset();
     m_stroking = false;
     m_stroke.clear();
     m_previewed.clear();

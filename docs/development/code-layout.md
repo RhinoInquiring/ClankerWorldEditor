@@ -84,3 +84,8 @@ none / uniform / per axis, with a `limits` note), and `begin` / `preview(delta)`
 `remove`. Add the tool to `TransformTool()`, call `DrawTransformBar` at the top of its selection panel, and make its
 fields preview live and save when let go (no Apply). It then gets the same handles, snapping, keys, Alt+click move,
 caption and undo as every other tool. `TransformSelfTest` (in `--selftest`) covers the shared math.
+
+## Adding a tool
+
+Add it to `App::kTools` (App.hpp): group, name, hotkey and a few words on what it does. The hotkey, the Tools
+panel buttons, the command palette and the keyboard shortcuts window all read that table.

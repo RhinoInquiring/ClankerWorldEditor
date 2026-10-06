@@ -56,10 +56,28 @@ private:
     /// Tools come in groups (the toolbar's buttons); a group remembers the tool last used in it.
     enum class Group { Terrain, Objects, Units, Regions };
     static constexpr const char* kGroupNames[4] = { "Terrain", "Objects", "Units", "Regions" };
+    /// Every tool once: its group, name, hotkey and what it does. Hotkeys, the Tools panel, the command palette and
+    /// the shortcuts window all read this list, so a new tool is added here only.
+    struct ToolInfo { Tool tool; Group group; const char* name; const char* key; ImGuiKey imKey; const char* about; };
+    static constexpr ToolInfo kTools[] = {
+        { Tool::Select, Group::Terrain, "Select", "V", ImGuiKey_V, "pick chunks to copy, rotate or save" },
+        { Tool::Sculpt, Group::Terrain, "Sculpt", "B", ImGuiKey_B, "raise, lower, flatten, smooth (1-4)" },
+        { Tool::Paint, Group::Terrain, "Paint", "T", ImGuiKey_T, "ground textures" },
+        { Tool::Holes, Group::Terrain, "Holes", "H", ImGuiKey_H, "cut and fill terrain holes" },
+        { Tool::Copy, Group::Terrain, "Copy", "C", ImGuiKey_C, "copy, paste and blend terrain" },
+        { Tool::Objects, Group::Objects, "Place and edit", "O", ImGuiKey_O, "doodads and WMOs" },
+        { Tool::Creatures, Group::Units, "Creatures", "N", ImGuiKey_N, "creature spawns and their paths" },
+        { Tool::Gameobjects, Group::Units, "Gameobjects", "I", ImGuiKey_I, "gameobject spawns" },
+        { Tool::Zones, Group::Regions, "Zones", "Z", ImGuiKey_Z, "paint area ids, buildings, world maps" },
+        { Tool::Triggers, Group::Regions, "Triggers", "K", ImGuiKey_K, "area triggers, teleports, entrances" },
+        { Tool::Pois, Group::Regions, "POIs", "J", ImGuiKey_J, "map landmarks, gossip points, .tele bookmarks" },
+        { Tool::Flights, Group::Regions, "Flights", "Y", ImGuiKey_Y, "flight masters' nodes and routes" },
+    };
     static Group GroupOf(Tool t)
     {
-        return t == Tool::Objects ? Group::Objects : t == Tool::Creatures || t == Tool::Gameobjects ? Group::Units
-             : t == Tool::Zones || t == Tool::Triggers || t == Tool::Pois || t == Tool::Flights ? Group::Regions : Group::Terrain;
+        for (const ToolInfo& i : kTools)
+            if (i.tool == t) return i.group;
+        return Group::Terrain;
     }
     void SetGroup(Group g) { m_tool = m_groupTool[int(g)]; }
     Tool m_groupTool[4] = { Tool::Sculpt, Tool::Objects, Tool::Creatures, Tool::Zones };
@@ -256,7 +274,8 @@ private:
     void OpenProjectDialog();
     bool OpenProject(const std::string& dir);
     void CloseProject();
-    bool Save();
+    /// `quiet`: autosave, logged only when it fails.
+    bool Save(bool quiet = false);
     void Export(bool playTest);
     /// Exports, then packs out/client into the project's patch MPQ (out/<patchName>); with `install`, copies it into
     /// the client's Data folder too (the client must be closed: it holds its archives open).
@@ -271,6 +290,11 @@ private:
     void Undo();
     void Redo();
     void GoToTile(const std::string& map, int x, int y);
+    /// Opens a WMO-only map (a dungeon) with the camera over the middle of its WMO.
+    void GoToWmoMap(const std::string& map);
+    /// The floor under (x, z) at or below height fromY: the terrain or a loaded WMO, whichever is higher (a bridge, a
+    /// building's floor, a dungeon). Falls back to the terrain height; null when there is neither.
+    std::optional<float> GroundAt(float x, float z, float fromY) const;
     void FocusTile();
     void CopySelection();
     void PasteAtCursor();
@@ -431,6 +455,7 @@ private:
     std::vector<MapEntry> m_maps;
     int m_mapIndex = -1;
     std::vector<bool> m_mapTiles;
+    std::optional<WmoPlacement> m_mapGlobal;   // the selected map is WMO-only: its WMO
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> m_mapPreview;   // the selected map from its WDL, coloured by height
     Microsoft::WRL::ComPtr<ID3D11Texture2D> m_mapPreviewTexture;
     std::vector<std::vector<int16_t>> m_mapWdl;   // the selected map's low-detail heights, loaded tiles patched with their current heights
@@ -853,8 +878,35 @@ private:
     std::vector<Problem> m_problems;
     bool m_problemsChecked = false;
 
+    uint64_t m_problemsRevision = 0;                 // change store revision the problems were checked at
     std::vector<std::string> m_log;
+    std::string m_logFilter;
+    std::string m_toast;                             // the last error or warning, shown a while in the status bar
+    double m_toastUntil = 0;
+    bool m_toastError = false;
     std::vector<Command> m_commands;
+
+    // Autosave: the change log is written a moment after each edit. Database edits are live at once, so the log that
+    // can undo and revert them must not wait for Ctrl+S.
+    uint64_t m_autosaveRevision = ~0ull;
+    double m_autosaveAt = 0;
+    void Autosave();
+    // Recent projects (SettingsDir()/recent.txt, newest first) and the start screen listing them.
+    std::vector<std::string> m_recent;
+    void RememberProject(const std::string& dir);
+    void DrawStartScreen(const ImVec2& origin, const ImVec2& size);
+    // Help > Keyboard shortcuts: every command with a key plus the viewport's mouse and key gestures.
+    bool m_showShortcuts = false;
+    std::string m_shortcutFilter;
+    void DrawShortcuts();
+    // Changes panel: a filter, and per change: go to it, undo or redo up to it.
+    std::string m_changeFilter;
+    /// Flies the camera to where a change was made (a terrain tile, a spawn); false when it has no place. `go` false: only asks.
+    bool GoToChange(const Change& change, bool go);
+    void UndoTo(size_t doneCount);
+    void RedoTo(size_t undoneCount);
+    double m_speedShownUntil = 0;                    // camera speed shown in the viewport after the wheel changed it
+    int m_historyPos = -1;                           // Server panel: command history position while pressing up / down
     bool m_paletteOpen = false;
     char m_paletteQuery[128] = {};
     int m_paletteSelected = 0;

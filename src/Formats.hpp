@@ -92,6 +92,12 @@ bool WdtHasTile(const std::vector<uint8_t>& wdt, int x, int y);
 
 /// All 64x64 present flags of a WDT, indexed y * 64 + x.
 std::vector<bool> WdtTiles(const std::vector<uint8_t>& wdt);
+/// The one WMO a WMO-only map (instances, most dungeons: MPHD flag 0x1) is made of, from its MWMO and MODF; null
+/// for maps of terrain tiles. Position and extents are moved into the ADT placement space (the WDT counts from the
+/// map's middle: + kZeroPoint on x and z); subtract it again when writing a WDT.
+std::optional<WmoPlacement> WdtGlobalWmo(const std::vector<uint8_t>& wdt);
+/// The model tile key the editor shows a WMO-only map's WMO under (past the 4096 terrain tile keys, so it is picked like them).
+constexpr int kGlobalWmoKey = 5000;
 
 /// Sets the unique ids of an ADT's placements in place, MDDF and MODF entries in file order (ParseAdt's order).
 /// False when the lists do not match the file's.
