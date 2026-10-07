@@ -28,6 +28,7 @@
 #include "Triggers.hpp"
 #include "Lights.hpp"
 #include "Sounds.hpp"
+#include "Roads.hpp"
 
 #include <imgui.h>
 #include <imgui_impl_dx11.h>
@@ -2508,6 +2509,28 @@ namespace
         const XMFLOAT3 eye{ ex, global ? (global->extMin[1] + global->extMax[1]) / 2 + above : terrain.HeightAt(ex, ez).value_or(centre->second.maxHeight) + above, ez };
         const float y = XMConvertToRadians(yaw), p = XMConvertToRadians(pitch);
         const XMVECTOR fwd = XMVectorSet(std::cos(p) * std::sin(y), std::sin(p), std::cos(p) * std::cos(y), 0);
+        // WWE_ROAD=1: a Barrens road curving through where the camera looks (Roads tool defaults), to see its look.
+        RoadStore roads(store);
+        if (std::getenv("WWE_ROAD") && pitch < 0)
+        {
+            const float reach = above / std::sin(-p);   // to the ground ahead
+            const float cx = eye.x + XMVectorGetX(fwd) * reach, cz = eye.z + XMVectorGetZ(fwd) * reach;
+            const float sx = std::cos(y), sz = -std::sin(y);   // across the view
+            Road r;
+            r.id = 1;
+            r.map = arg(3);
+            r.texture = "Tileset\\Barrens\\BarrensRoad01.blp";
+            r.shoulderTexture = "Tileset\\Barrens\\BarrensBaseDirt.blp";
+            for (int i = -3; i <= 3; ++i)   // an S across the view
+            {
+                const float a = i * 25.0f, bend = std::sin(i * 0.9f) * 18.0f;
+                const float px = cx + sx * a + XMVectorGetX(fwd) * bend, pz = cz + sz * a + XMVectorGetZ(fwd) * bend;
+                r.points.push_back({ { px, terrain.HeightAt(px, pz).value_or(0), pz } });
+            }
+            terrain.SetRoads(&roads);
+            roads.onChanged = [&](const std::string& map, const RoadStore::Cells& cells) { terrain.RefreshCells(map, cells); };
+            roads.Commit(nullptr, &r, "render road");
+        }
         const UINT w = 1280, h = 720;
         const XMMATRIX viewProj = XMMatrixLookToRH(XMLoadFloat3(&eye), fwd, XMVectorSet(0, 1, 0, 0)) *
                                   XMMatrixPerspectiveFovRH(XMConvertToRadians(60.0f), float(w) / h, 1.0f, 6000.0f);
@@ -4070,6 +4093,130 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdLine, int)
         return fly(true) < 50.0f ? 0 : 1;
     }
     if (cmdLine && wcsstr(cmdLine, L"--shade-check")) return ShadeCheck();
+    if (cmdLine && wcsstr(cmdLine, L"--road-check") && __argc >= 3)
+    {
+        // `--road-check <data dir>`: a Barrens-style road across Kalimdor 40_30: shown over the ground while the tiles keep
+        // it, exported into the ADT (validates, away from it untouched), gone on undo, and baked to the same result.
+        setvbuf(stdout, nullptr, _IONBF, 0);
+        char dataDir[1024] = {};
+        WideCharToMultiByte(CP_ACP, 0, __wargv[2], -1, dataDir, sizeof dataDir, nullptr, nullptr);
+        ComPtr<ID3D11Device> device;
+        ComPtr<ID3D11DeviceContext> context;
+        if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &device, nullptr, &context))) return 1;
+        Renderer renderer;
+        std::string error;
+        if (!renderer.Init(device.Get(), context.Get(), error)) { printf("renderer: %s\n", error.c_str()); return 1; }
+        MpqChain mpq;
+        mpq.Open(dataDir);
+        ChangeStore store;
+        TerrainAdapter terrain(mpq, renderer, store);
+        RoadStore roads(store);
+        store.Register(terrain);
+        store.Register(roads);
+        terrain.SetRoads(&roads);
+        roads.onChanged = [&](const std::string& map, const RoadStore::Cells& cells) { terrain.RefreshCells(map, cells); };
+        if (!terrain.SetMap("Kalimdor", error) || !terrain.LoadNow(40, 30, error)) { printf("%s\n", error.c_str()); return 1; }
+        int problems = 0;
+        auto check = [&](bool ok, const std::string& what) { printf("%s %s\n", ok ? "ok  " : "FAIL", what.c_str()); problems += !ok; };
+
+        // Across the tile through its middle, the points on the ground.
+        const float z = 30.5f * kTileSize, x0 = 40 * kTileSize + 40, x1 = 41 * kTileSize - 40, xm = (x0 + x1) / 2;
+        Road road;
+        road.id = roads.NextId();
+        road.map = "Kalimdor";
+        road.width = 8;
+        road.texture = "Tileset\\Barrens\\BarrensRoad01.blp";
+        road.shoulderTexture = "Tileset\\Barrens\\BarrensBaseDirt.blp";
+        for (float x : { x0, xm - 60, xm + 60, x1 }) road.points.push_back({ { x, *terrain.HeightAt(x, z + (x - xm) * 0.2f), z + (x - xm) * 0.2f } });
+        const float plainMid = *terrain.HeightAt(xm, z);
+        roads.Commit(nullptr, &road, "road check");
+        check(*terrain.HeightAt(xm, z) == plainMid, "the tiles keep the ground under the road");
+        check(std::fabs(*terrain.ShownHeightAt(xm, z) - plainMid) > 0.05f, "the road shows over it (" + std::to_string(*terrain.ShownHeightAt(xm, z) - plainMid) + " yd)");
+
+        const std::filesystem::path out = std::filesystem::temp_directory_path() / "wow-world-editor-roadcheck";
+        auto exportTile = [&]() -> std::optional<Adt> {
+            std::error_code ec;
+            std::filesystem::remove_all(out, ec);
+            terrain.Export(out, error);
+            std::ifstream f(out / "World" / "Maps" / "Kalimdor" / "Kalimdor_40_30.adt", std::ios::binary);
+            if (!f) return std::nullopt;
+            const std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+            check(ValidateAdt(bytes, false).empty(), "exported tile validates");
+            return ParseAdt(bytes, false);
+        };
+        const auto original = ParseAdt(*mpq.Read("World\\Maps\\Kalimdor\\Kalimdor_40_30.adt"), false);
+        const auto live = exportTile();
+        check(live.has_value(), "export writes the tile");
+        if (live && original)
+        {
+            const auto ref = terrain.ChunkAtGrid(int(std::floor(xm / kChunkSize)), int(std::floor(z / kChunkSize)));
+            const AdtChunk& c = live->chunks[size_t(ref->chunk)];
+            bool road01 = false;
+            for (uint32_t l = 0; l < c.layerCount; ++l) road01 |= live->textures[c.textureIds[l]].find("BarrensRoad01") != std::string::npos;
+            check(road01, "the chunk under the road has the road texture");
+            check(c.heights != original->chunks[size_t(ref->chunk)].heights, "and its heights are graded");
+            const AdtChunk& corner = live->chunks[0];   // the tile's corner, far from the road
+            check(corner.heights == original->chunks[0].heights && corner.layerCount == original->chunks[0].layerCount, "a chunk away from the road is untouched");
+        }
+        store.Undo();
+        std::error_code ec;
+        std::filesystem::remove_all(out, ec);
+        check(terrain.Export(out, error) == 0, "undo: nothing left to export");
+        store.Redo();
+
+        // Bake: the same ground as the live road, the road gone; undo brings both back.
+        const Road saved = *roads.Saved(road.id);
+        auto baked = terrain.BakeRoad(saved, "bake");
+        Change remove = roads.MakeChange(&saved, nullptr, "bake");
+        roads.Apply(remove);
+        std::vector<Change> parts;
+        if (baked) parts.push_back(std::move(*baked));
+        parts.push_back(std::move(remove));
+        store.Commit(std::move(parts), "bake");
+        check(roads.OnMap("Kalimdor").empty(), "baked: no road left");
+        const auto bakedTile = exportTile();
+        if (bakedTile && live)
+        {
+            float worst = 0;
+            for (size_t ci = 0; ci < live->chunks.size(); ++ci)
+                for (size_t j = 0; j < 145; ++j) worst = std::max(worst, std::fabs(bakedTile->chunks[ci].heights[j] - live->chunks[ci].heights[j]));
+            check(worst < 1e-3f, "baked heights match the live road's export (worst " + std::to_string(worst) + " yd)");
+        }
+        store.Undo();
+        check(roads.OnMap("Kalimdor").size() == 1 && *terrain.HeightAt(xm, z) == plainMid, "undo bake: road back, ground as it was");
+
+        // Speed on a long road: ~1000 yd over 3 x 3 tiles, 21 points. Moving one point redraws only the stretch around
+        // it; a setting changes the whole road.
+        for (int ty = 29; ty <= 31; ++ty)
+            for (int tx = 39; tx <= 41; ++tx) terrain.LoadNow(tx, ty, error);
+        Road longRoad = road;
+        longRoad.id = roads.NextId();
+        longRoad.points.clear();
+        for (int i = 0; i <= 20; ++i)
+        {
+            const float px = 39.3f * kTileSize + i * 50.0f, pz = 30.5f * kTileSize + std::sin(i * 0.7f) * 60.0f;
+            longRoad.points.push_back({ { px, terrain.HeightAt(px, pz).value_or(0), pz } });
+        }
+        roads.Commit(nullptr, &longRoad, "long road");
+        size_t redrawn = 0;
+        roads.onChanged = [&](const std::string& map, const RoadStore::Cells& cells) { redrawn = cells.size(); terrain.RefreshCells(map, cells); };
+        auto timed = [&](const char* what, auto edit) {
+            Road e = *roads.Saved(longRoad.id);
+            edit(e);
+            const auto t0 = std::chrono::steady_clock::now();
+            roads.Preview(&e);
+            const float ms = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - t0).count();
+            printf("     %s: %zu chunks redrawn, %.1f ms\n", what, redrawn, ms);
+            roads.Preview(nullptr);
+            return ms;
+        };
+        timed("move one point", [](Road& e) { e.points[10].pos.z += 8; });
+        timed("change the width", [](Road& e) { e.width += 1; });
+        check(redrawn > 0, "long road redraws");
+        std::filesystem::remove_all(out, ec);
+        printf("%d problem(s)\n", problems);
+        return problems ? 1 : 0;
+    }
     if (cmdLine && wcsstr(cmdLine, L"--sound-check") && __argc >= 3)
     {
         // `--sound-check <data dir>`: the sound tables on the client's files: sizes, Elwynn's ambience / music / intro
@@ -4387,7 +4534,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdLine, int)
         return problems ? 1 : 0;
     }
     if (cmdLine && wcsstr(cmdLine, L"--rewrite-check")) return RewriteCheck();
-    if (cmdLine && wcsstr(cmdLine, L"--selftest")) return FormatsSelfTest() && ChangesSelfTest() && TerrainSelfTest() && BlendSelfTest() && CatalogSelfTest() && BlueprintSelfTest() && TriggersSelfTest() && TransformSelfTest() ? 0 : 1;
+    if (cmdLine && wcsstr(cmdLine, L"--selftest")) return FormatsSelfTest() && ChangesSelfTest() && TerrainSelfTest() && BlendSelfTest() && CatalogSelfTest() && BlueprintSelfTest() && TriggersSelfTest() && TransformSelfTest() && RoadSelfTest() ? 0 : 1;
     if (cmdLine && wcsstr(cmdLine, L"--check")) return Check();
 
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);

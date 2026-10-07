@@ -25,6 +25,7 @@
 #include "Triggers.hpp"
 
 #include <d3d11.h>
+#include <chrono>
 #include <imgui.h>
 #include <DirectXMath.h>
 #include <windows.h>
@@ -54,7 +55,7 @@ public:
     bool WantsQuit() const { return m_quit; }
 
 private:
-    enum class Tool { Select, Sculpt, Copy, Holes, Objects, Paint, Creatures, Gameobjects, Zones, Triggers, Pois, Flights, Shade, Lights, Sound };
+    enum class Tool { Select, Sculpt, Copy, Holes, Objects, Paint, Creatures, Gameobjects, Zones, Triggers, Pois, Flights, Shade, Lights, Sound, Roads };
     /// Tools come in groups (the toolbar's buttons); a group remembers the tool last used in it.
     enum class Group { Terrain, Objects, Units, Regions, Atmosphere };
     static constexpr int kGroups = 5;
@@ -70,6 +71,7 @@ private:
         { Tool::Paint, Group::Terrain, "Paint", "T", ImGuiKey_T, "ground textures" },
         { Tool::Shade, Group::Terrain, "Shade", "U", ImGuiKey_U, "vertex colours (maps with vertex shading)" },
         { Tool::Holes, Group::Terrain, "Holes", "H", ImGuiKey_H, "cut and fill terrain holes" },
+        { Tool::Roads, Group::Terrain, "Roads", "", ImGuiKey_None, "roads and paths along splines: paint and grade the ground" },
         { Tool::Copy, Group::Terrain, "Copy", "C", ImGuiKey_C, "copy, paste and blend terrain" },
         { Tool::Objects, Group::Objects, "Place and edit", "O", ImGuiKey_O, "doodads and WMOs" },
         { Tool::Creatures, Group::Units, "Creatures", "N", ImGuiKey_N, "creature spawns and their paths" },
@@ -383,7 +385,7 @@ private:
     /// The active tool's selection, if it has one that can be moved.
     std::optional<Transformable> ActiveTransform();
     /// Whether the tool moves things with the shared controls (1 / 2 / 3 pick the handle, not a sculpt brush).
-    bool TransformTool() const { return m_tool == Tool::Objects || SpawnTool() || m_tool == Tool::Triggers || m_tool == Tool::Pois || m_tool == Tool::Flights || m_tool == Tool::Lights || m_tool == Tool::Sound; }
+    bool TransformTool() const { return m_tool == Tool::Objects || SpawnTool() || m_tool == Tool::Triggers || m_tool == Tool::Pois || m_tool == Tool::Flights || m_tool == Tool::Lights || m_tool == Tool::Sound || m_tool == Tool::Roads; }
     /// Move / rotate / scale handles on the selection; true while the mouse is over or dragging one.
     bool UpdateGizmo(const ImVec2& origin, const ImVec2& size);
     /// begin, preview(delta), commit in one go: keys, Alt+click and typed values.
@@ -406,6 +408,7 @@ private:
     std::optional<Transformable> FlightTransform();
     std::optional<Transformable> LightTransform();
     std::optional<Transformable> SoundTransform();
+    std::optional<Transformable> RoadTransform();
 
     // atmosphere: light volumes (Light.dbc) and their colour, fog and sky sets (AppLights.cpp)
     bool m_gameLight = false;          // viewport shows the game's light at the camera (View menu, Lights tool)
@@ -434,6 +437,24 @@ private:
     /// Adds a light at an editor position: its own colour set copied from the light there now.
     void AddLight(const DirectX::XMFLOAT3& at);
     void FlyToLight(const LightVolume& v);
+
+    // terrain: roads, editor-only splines that paint and grade the ground under them (AppRoads.cpp)
+    uint32_t m_roadSel = 0;                       // selected road (0: none)
+    std::optional<size_t> m_roadPoint;            // its selected point (none: the whole road)
+    bool m_roadDraw = false;                      // clicks on the ground add points to the selected road (or start one)
+    std::optional<std::pair<uint32_t, size_t>> m_roadHover;
+    Road m_roadStart;                             // the road when a move began
+    Road m_roadDefaults;                          // what a new road starts with (the last road's settings)
+    std::optional<Road> m_roadPending;            // a preview waiting its turn (long roads: previews are spaced out)
+    std::chrono::steady_clock::time_point m_roadPreviewAt{};
+    float m_roadPreviewMs = 0;                    // how long the last preview took
+    bool m_roadLines = true;                      // the Roads tool draws lines, points and handles (off: the road as it will look)
+    void DrawRoadsPanel(float width);
+    void RoadsViewport(const ImVec2& origin, const ImVec2& size, DirectX::FXMMATRIX viewProj);
+    void BuildRoadOverlay(std::vector<LineVertex>& lines) const;
+    /// Live edit of the selected road: shown at once, one undo step when `commit`.
+    void EditRoad(const Road& edited, bool commit, const std::string& label);
+    void BakeSelectedRoad();
 
     // atmosphere: zone sound (AreaTable ambience / music / intro) and sound emitters (SoundEmitters.dbc) (AppSound.cpp)
     bool m_soundZone = false;          // Zone sound tab edits the zone (true) or the area under the camera (false)
@@ -511,6 +532,7 @@ private:
     ChangeStore m_store;
     Lights m_lights{ m_mpq, m_store };   // atmosphere tables (AppLights.cpp)
     Sounds m_sounds{ m_mpq, m_store };   // sound tables (AppSound.cpp)
+    RoadStore m_roads{ m_store };        // editor-only road splines (AppRoads.cpp)
     TerrainAdapter m_terrain{ m_mpq, m_renderer, m_store };
     ModelRenderer m_models;
     ModelRenderer::DrawSettings m_modelSettings;

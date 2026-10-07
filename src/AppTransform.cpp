@@ -91,6 +91,7 @@ std::optional<App::Transformable> App::ActiveTransform()
     if (m_tool == Tool::Flights) return FlightTransform();
     if (m_tool == Tool::Lights) return LightTransform();
     if (m_tool == Tool::Sound) return SoundTransform();
+    if (m_tool == Tool::Roads) return RoadTransform();
     return std::nullopt;
 }
 
@@ -263,6 +264,66 @@ std::optional<App::Transformable> App::LightTransform()
         LightDraftCommit();
         CommitDbc({ { &m_lights.light, v.id, nullptr } }, "Delete light " + std::to_string(v.id), "export, then restart the client (light DBCs)");
         m_lightSel = 0;
+    };
+    return t;
+}
+
+std::optional<App::Transformable> App::RoadTransform()
+{
+    const Road* shown = m_roads.Find(m_roadSel);
+    if (!shown || !m_project || shown->points.empty() || !m_roadLines) return std::nullopt;   // lines hidden: no handles either
+    const Road r = *shown;
+    const bool point = m_roadPoint && *m_roadPoint < r.points.size();
+    std::vector<XMFLOAT3> where;
+    if (point) where.push_back(r.points[*m_roadPoint].pos);
+    else
+        for (const RoadPoint& p : r.points) where.push_back(p.pos);
+    Transformable t;
+    t.rotate = !point;
+    t.yawOnly = true;
+    t.scale = point ? Transformable::Scale::Uniform : Transformable::Scale::None;
+    t.limits = point ? "A point has no turn; scaling sets the road's width there." : "A whole road turns about the vertical; scale its points one by one.";
+    t.frame = point ? Store(XMMatrixTranslation(where[0].x, where[0].y, where[0].z)) : CentreFrame(where);
+    t.what = point ? "a point of road " + std::to_string(r.id) : "road " + std::to_string(r.id);
+    t.begin = [this, r] { m_roadStart = r; };
+    t.preview = [this, point](FXMMATRIX delta) {
+        Road e = m_roadStart;
+        if (point)
+        {
+            RoadPoint& p = e.points[*m_roadPoint];
+            p.pos = Moved(p.pos, delta);
+            const float s = XMVectorGetX(XMVector3Length(delta.r[0]));
+            if (std::fabs(s - 1.0f) > 1e-4f) p.width = std::clamp((p.width > 0 ? p.width : e.width) * s, 1.0f, 60.0f);
+        }
+        else
+            for (RoadPoint& p : e.points) p.pos = Moved(p.pos, delta);
+        m_roads.Preview(&e);
+    };
+    t.commit = [this](const std::string& label) {
+        if (const Road* now = m_roads.Find(m_roadSel)) EditRoad(Road(*now), true, label);
+    };
+    t.cancel = [this] { m_roads.Preview(nullptr); };
+    t.ground = [this, r, point] {
+        Road e = r;
+        for (size_t i = 0; i < e.points.size(); ++i)
+            if (!point || i == *m_roadPoint)
+                if (const auto h = m_terrain.HeightAt(e.points[i].pos.x, e.points[i].pos.z)) e.points[i].pos.y = *h;
+        EditRoad(e, true, "Drop " + std::string(point ? "a point of " : "") + "road " + std::to_string(e.id) + " to the ground");
+    };
+    t.remove = [this, r, point] {
+        if (point && r.points.size() > 1)
+        {
+            Road e = r;
+            e.points.erase(e.points.begin() + std::ptrdiff_t(*m_roadPoint));
+            m_roadPoint.reset();
+            EditRoad(e, true, "Delete a point of road " + std::to_string(e.id));
+        }
+        else if (const Road* saved = m_roads.Saved(r.id))
+        {
+            m_roads.Commit(saved, nullptr, "Delete road " + std::to_string(r.id));
+            m_roadSel = 0;
+            m_roadPoint.reset();
+        }
     };
     return t;
 }

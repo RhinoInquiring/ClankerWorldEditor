@@ -85,6 +85,17 @@ void ChangeStore::ForEach(const std::vector<Change>& list, const std::function<v
             fn(c.domain, c.data);
 }
 
+std::vector<ChangeStore::Part> ChangeStore::Parts(const std::vector<Change>& list)
+{
+    std::vector<Part> out;
+    for (const Change& c : list)
+        if (c.domain == kBatch)
+            for (const auto& p : c.data.at("changes")) out.push_back({ p.at("domain").get_ref<const std::string&>(), p.at("data") });
+        else
+            out.push_back({ c.domain, c.data });
+    return out;
+}
+
 void ChangeStore::Undo()
 {
     if (m_done.empty()) return;

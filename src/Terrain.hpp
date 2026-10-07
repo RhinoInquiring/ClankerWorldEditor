@@ -2,6 +2,7 @@
 
 #include "Changes.hpp"
 #include "Formats.hpp"
+#include "Roads.hpp"
 
 #include <DirectXMath.h>
 
@@ -204,6 +205,17 @@ public:
     /// The texture with the largest share at a point (the eyedropper).
     std::optional<std::string> TextureAt(float x, float z) const;
 
+    /// Roads drawn over the terrain: the renderer shows every chunk with the open map's roads applied, the tiles keep
+    /// the ground underneath (tools edit that), export writes the result.
+    void SetRoads(const RoadStore* roads);
+    /// Shows the road-covered look again for these chunk cells of `map` (after a road changed there).
+    void RefreshCells(const std::string& map, const RoadStore::Cells& cells);
+    /// The road written into the terrain as ordinary edits (heights and textures), loading the tiles it crosses; the
+    /// caller removes the road in the same undo step. Nothing when it changes nothing.
+    std::optional<Change> BakeRoad(const Road& road, const std::string& label);
+    /// The terrain height at a point as shown, roads included (Pick and HeightAt see the ground underneath).
+    std::optional<float> ShownHeightAt(float x, float z) const;
+
     /// Vertex shading (MCCV): the client reads it only on maps whose WDT turns it on (Northrend does, the old
     /// continents do not). Moves vertex colours towards `rgb` (0x7F = unchanged), or with erase back to neutral.
     bool VertexColors() const { return m_vertexColors; }
@@ -377,6 +389,11 @@ public:
 private:
     bool m_painting = false;
     std::map<std::pair<int, int>, nlohmann::json> m_paintBefore;   // (tile, chunk) -> layers before the stroke
+    const RoadStore* m_roads = nullptr;
+    /// The roads' lines, sampled once for every chunk drawn (until a road, an edit or the loaded tiles change).
+    const std::vector<RoadSample>& RoadLine(const Road& road) const;
+    mutable std::map<uint32_t, std::vector<RoadSample>> m_roadLines;
+    mutable std::tuple<uint64_t, uint64_t, size_t> m_roadLinesKey{};
     bool m_vertexColors = false;   // the open map's WDT has MPHD flag 0x2
     bool m_shading = false;
     std::map<std::pair<int, int>, std::vector<uint8_t>> m_shadeBefore;   // (tile, chunk) -> MCCV before the stroke

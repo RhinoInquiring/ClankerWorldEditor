@@ -358,7 +358,9 @@ TileStats Renderer::LoadTile(int key, const Adt& adt, const MpqChain& mpq, int l
 
     for (size_t ci = 0; ci < adt.chunks.size(); ++ci)
     {
-        const AdtChunk& c = adt.chunks[ci];
+        const auto shown = layer == 0 && m_chunkView ? m_chunkView(key, ci, adt.chunks[ci], adt.textures, true) : std::nullopt;
+        const AdtChunk& c = shown ? shown->chunk : adt.chunks[ci];
+        const std::vector<std::string>& textures = shown ? shown->textures : adt.textures;
         for (float h : c.heights)
         {
             stats.minHeight = std::min(stats.minHeight, c.baseY + h);
@@ -369,8 +371,8 @@ TileStats Renderer::LoadTile(int key, const Adt& adt, const MpqChain& mpq, int l
         tile.holes.push_back(c.holes);
 
         for (UINT l = 0; l < 4; ++l)
-            draw.textures[l] = l < c.layerCount && c.textureIds[l] < adt.textures.size()
-                ? Texture(adt.textures[c.textureIds[l]], mpq, stats) : m_white.Get();
+            draw.textures[l] = l < c.layerCount && c.textureIds[l] < textures.size()
+                ? Texture(textures[c.textureIds[l]], mpq, stats) : m_white.Get();
         BlpImage alpha;
         alpha.width = alpha.height = 64;
         alpha.mips.push_back(c.alpha);
@@ -532,7 +534,8 @@ void Renderer::UpdateChunk(int key, size_t index, const AdtChunk& chunk)
     if (it == m_tiles.end() || !it->second.vertices || index >= it->second.chunks.size()) return;
     TileGpu& tile = it->second;
     tile.bakeDirty = true;
-    BuildChunkVertices(tile, index, chunk);
+    const auto shown = tile.layer == 0 && m_chunkView ? m_chunkView(key, index, chunk, {}, false) : std::nullopt;
+    BuildChunkVertices(tile, index, shown ? shown->chunk : chunk);
     const UINT bytes = 145 * sizeof(TerrainVertex);
     const D3D11_BOX box{ UINT(index) * bytes, 0, 0, UINT(index + 1) * bytes, 1, 1 };
     m_context->UpdateSubresource(tile.vertices.Get(), 0, &box, tile.cpuVertices.data() + index * 145, 0, 0);
@@ -547,6 +550,14 @@ void Renderer::UpdateChunkTextures(int key, size_t index, const AdtChunk& c, con
 {
     auto it = m_tiles.find(key);
     if (it == m_tiles.end() || index >= it->second.chunks.size()) return;
+    if (it->second.layer == 0 && m_chunkView)
+        if (const auto shown = m_chunkView(key, index, c, textures, true))
+        {
+            const ChunkView view = std::exchange(m_chunkView, nullptr);   // once: the shown chunk is final
+            UpdateChunkTextures(key, index, shown->chunk, shown->textures, mpq);
+            m_chunkView = view;
+            return;
+        }
     ChunkDraw& draw = it->second.chunks[index];
     it->second.bakeDirty = true;
     TileStats ignored;

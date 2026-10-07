@@ -214,6 +214,9 @@ bool App::Init(HWND hwnd, ID3D11Device* device, ID3D11DeviceContext* context, bo
     m_models.SetLoader(&m_loader);
     m_terrain.SetLoader(&m_loader);
     m_store.Register(m_terrain);
+    m_store.Register(m_roads);
+    m_terrain.SetRoads(&m_roads);
+    m_roads.onChanged = [this](const std::string& map, const RoadStore::Cells& cells) { m_terrain.RefreshCells(map, cells); };
     m_store.Register(m_creatures);
     m_store.Register(m_gameobjects);
     for (DbcTable* table : DbcTables()) m_store.Register(*table);
@@ -1077,7 +1080,7 @@ void App::DrawCatalog()
         else if (item.kind == K::GroundTexture)
         {
             PickTexture(item.path);
-            m_tool = Tool::Paint;
+            if (m_tool != Tool::Roads) m_tool = Tool::Paint;   // Roads takes it from there for its centre or shoulder
         }
         else
         {
@@ -2344,7 +2347,7 @@ void App::HandleShortcuts()
     if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_V, global)) PasteAtCursor();
     if (ImGui::GetIO().KeyCtrl) return;
     for (const ToolInfo& t : kTools)
-        if (ImGui::IsKeyPressed(t.imKey, false)) m_tool = t.tool;
+        if (t.imKey != ImGuiKey_None && ImGui::IsKeyPressed(t.imKey, false)) m_tool = t.tool;
     for (int g = 0; g < kGroups; ++g)   // F1..F4, F6: tool groups
         if (ImGui::IsKeyPressed(GroupKey(g), false)) SetGroup(Group(g));
     const bool pathMode = m_path && m_tool == Tool::Creatures;
@@ -2389,6 +2392,9 @@ void App::HandleShortcuts()
         else if (m_tool == Tool::Lights && m_lightSel) m_lightSel = 0;
         else if (m_emitterPlace) m_emitterPlace = false;
         else if (m_tool == Tool::Sound && m_emitterSel) m_emitterSel = 0;
+        else if (m_roadDraw) m_roadDraw = false;
+        else if (m_tool == Tool::Roads && m_roadPoint) m_roadPoint.reset();
+        else if (m_tool == Tool::Roads && m_roadSel) m_roadSel = 0;
         else if (m_comparing) StopCompare();          // the map comes back as it is
         else if (!m_diffPending.empty()) { EndNewTiles(); m_diffPending.clear(); m_diffActive.clear(); }   // a review still on its way
         else if (m_pin) CancelPin();                  // first Esc: unpin, terrain goes back
@@ -2446,6 +2452,7 @@ void App::DrawMenuBar()
         ImGui::MenuItem("Far terrain (whole map, low detail)", nullptr, &m_drawOptions.farTerrain);
         ImGui::MenuItem("Terrain level of detail", nullptr, &m_drawOptions.lod);
         ImGui::MenuItem("Game lighting (time of day in Atmosphere > Lights)", nullptr, &m_gameLight);
+        ImGui::MenuItem("Road lines and points (Roads tool)", nullptr, &m_roadLines);
         ImGui::MenuItem("Creatures", nullptr, &m_showSpawns[int(SpawnKind::Creature)]);
         ImGui::MenuItem("Gameobjects", nullptr, &m_showSpawns[int(SpawnKind::GameObject)]);
         DrawEventFilter(330);
@@ -2676,6 +2683,11 @@ void App::BuildOverlay(std::vector<LineVertex>& lines) const
     if (m_tool == Tool::Sound)
     {
         BuildSoundOverlay(lines);
+        return;
+    }
+    if (m_tool == Tool::Roads)
+    {
+        BuildRoadOverlay(lines);
         return;
     }
     if (m_tool == Tool::Flights)
@@ -3009,6 +3021,10 @@ void App::DrawViewport(float dt)
     {
         SoundViewport(origin, size, viewProj);
     }
+    else if (m_tool == Tool::Roads)
+    {
+        RoadsViewport(origin, size, viewProj);
+    }
     else if (m_tool == Tool::Objects)
     {
         // Objects: click picks, dragging draws a box; Shift adds, Ctrl removes, Alt+click moves the selection there. The handles move, turn and scale.
@@ -3197,7 +3213,7 @@ void App::DrawViewport(float dt)
     const ImVec2 pad{ origin.x + 12, origin.y + 10 };
     if (!m_terrain.Map().empty())
     {
-        const char* tools[] = { "Select", "Sculpt", "Copy", "Holes", "Objects", "Paint", "Creatures", "Gameobjects", "Zones", "Triggers", "POIs", "Flights", "Shade", "Lights", "Sound" };
+        const char* tools[] = { "Select", "Sculpt", "Copy", "Holes", "Objects", "Paint", "Creatures", "Gameobjects", "Zones", "Triggers", "POIs", "Flights", "Shade", "Lights", "Sound", "Roads" };
         const char* modes[] = { "Raise", "Lower", "Flatten", "Smooth" };
         char caption[400];
         if (m_tool == Tool::Sculpt)
@@ -3229,6 +3245,8 @@ void App::DrawViewport(float dt)
                                     "click the ground: move the point there   Esc: stop" };
             snprintf(caption, sizeof caption, "%s   World > POIs   %s", m_terrain.Map().c_str(), picks[int(m_poiPick)]);
         }
+        else if (m_tool == Tool::Roads && m_roadDraw)
+            snprintf(caption, sizeof caption, "%s   World > Roads   click the ground: add a point   Ctrl+click: insert between   Enter / right-click: done", m_terrain.Map().c_str());
         else if (m_tool == Tool::Sound && m_emitterPlace)
             snprintf(caption, sizeof caption, "%s   World > Sound   click the ground: add an emitter   Shift+click: add and keep going   Esc: stop", m_terrain.Map().c_str());
         else if (m_tool == Tool::Lights && m_lightPlace)
@@ -3241,7 +3259,8 @@ void App::DrawViewport(float dt)
             // Every tool that moves things: the same caption and keys.
             const size_t selected = m_tool == Tool::Objects ? m_objSel.size() : SpawnTool() ? m_spawnSel.size()
                                   : m_tool == Tool::Triggers ? size_t(m_triggerSel != 0) : m_tool == Tool::Flights ? size_t(m_flightNode || m_flightPoint)
-                                  : m_tool == Tool::Lights ? size_t(m_lightSel != 0) : m_tool == Tool::Sound ? size_t(m_emitterSel != 0) : size_t(m_poiSel != 0);
+                                  : m_tool == Tool::Lights ? size_t(m_lightSel != 0) : m_tool == Tool::Sound ? size_t(m_emitterSel != 0)
+                                  : m_tool == Tool::Roads ? size_t(m_roadSel != 0) : size_t(m_poiSel != 0);
             snprintf(caption, sizeof caption, "%s   World > %s > %s (%s)   %zu selected   %s", m_terrain.Map().c_str(), tools[int(m_tool)],
                      m_gizmo == Gizmo::Move ? "Move" : m_gizmo == Gizmo::Rotate ? "Rotate" : "Scale", m_gizmoLocal ? "local" : "world", selected,
                      TransformHint().c_str());
@@ -3360,6 +3379,7 @@ void App::DrawToolsPanel()
     if (m_tool == Tool::Flights) DrawFlightsPanel(w);
     if (m_tool == Tool::Lights) DrawLightsPanel(w);
     if (m_tool == Tool::Sound) DrawSoundPanel(w);
+    if (m_tool == Tool::Roads) DrawRoadsPanel(w);
     if (SpawnTool()) DrawSpawnsPanel(w);
     if (m_tool == Tool::Objects && Section("Objects"))
     {

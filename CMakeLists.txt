@@ -49,6 +49,7 @@ add_executable(wow-world-editor WIN32
     src/AppFlights.cpp
     src/AppLights.cpp
     src/AppSound.cpp
+    src/AppRoads.cpp
     src/Differences.cpp
     src/AppInspect.cpp
     src/AppNpc.cpp
@@ -64,6 +65,7 @@ add_executable(wow-world-editor WIN32
     src/Areas.cpp
     src/Lights.cpp
     src/Sounds.cpp
+    src/Roads.cpp
     src/Assets.cpp
     src/Blend.cpp
     src/Blueprint.cpp

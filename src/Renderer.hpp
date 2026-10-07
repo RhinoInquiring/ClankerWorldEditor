@@ -8,6 +8,8 @@
 
 #include <array>
 #include <chrono>
+#include <functional>
+#include <optional>
 #include <map>
 #include <string>
 #include <unordered_map>
@@ -56,6 +58,13 @@ struct SceneLight
 class Renderer
 {
 public:
+    /// A map chunk as it should show, when something is drawn on top of the data it was given (roads): the chunk and the
+    /// texture list its ids index. Layer 0 tiles only; nothing = show the chunk as given.
+    struct ShownChunk { AdtChunk chunk; std::vector<std::string> textures; };
+    /// `paint` false: only the heights are wanted (a height change).
+    using ChunkView = std::function<std::optional<ShownChunk>(int key, size_t index, const AdtChunk& chunk, const std::vector<std::string>& textures, bool paint)>;
+    void SetChunkView(ChunkView view) { m_chunkView = std::move(view); }
+
     void SetSceneLight(const SceneLight& light) { m_light = light; }
     const SceneLight& Light() const { return m_light; }
     /// The sky gradient of the scene light behind everything (call first; nothing when the scene light is off).
@@ -117,6 +126,7 @@ public:
 private:
     class Loader* m_loader = nullptr;
     SceneLight m_light;
+    ChunkView m_chunkView;
     template <class T> using Com = Microsoft::WRL::ComPtr<T>;
     Com<ID3D11Buffer> m_farVertices, m_farIndices;
     std::vector<std::pair<int, UINT>> m_farTiles;   // tile key, first index (1536 indices each)

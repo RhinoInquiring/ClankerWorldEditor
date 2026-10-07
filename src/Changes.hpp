@@ -54,6 +54,9 @@ public:
     void Commit(std::vector<Change> parts, const std::string& label);
     /// Every change in `list` with batches opened up: fn(domain, data) per part, in order.
     static void ForEach(const std::vector<Change>& list, const std::function<void(const std::string& domain, const nlohmann::json& data)>& fn);
+    /// The same as a list to loop over (references into `list`).
+    struct Part { const std::string& domain; const nlohmann::json& data; };
+    static std::vector<Part> Parts(const std::vector<Change>& list);
 
     bool CanUndo() const { return !m_done.empty(); }
     bool CanRedo() const { return !m_undone.empty(); }

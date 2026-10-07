@@ -160,7 +160,7 @@ LoadedTile LoadedTile::Make(int x, int y, std::vector<uint8_t> bytes, Adt adt)
 std::map<int, size_t> TerrainAdapter::EditHashes(const std::vector<Change>& done, const std::string& map)
 {
     std::map<int, size_t> out;
-    for (const Change& c : done)
+    for (const ChangeStore::Part& c : ChangeStore::Parts(done))
     {
         if (c.domain != "terrain.heights" || c.data.value("map", std::string()) != map) continue;
         for (const char* field : { "edits", "layers", "holes", "areas", "colors", "liquids", "objects", "tiles" })
@@ -201,6 +201,16 @@ TileStats TerrainAdapter::FinishTile(int x, int y, std::vector<uint8_t> bytes, A
     const TileStats stats = m_renderer.LoadTile(tile.Key(), tile.adt, m_mpq);
     tile.maxHeight = stats.maxHeight;
     m_tiles[tile.Key()] = std::move(tile);
+    // Roads over this tile were drawn before its ground was known (and the roads beside it follow that ground too):
+    // draw the road cells on it and around it again.
+    if (m_roads)
+    {
+        RoadStore::Cells cells;
+        for (const Road* r : m_roads->OnMap(m_map))
+            for (const auto& [cell, hash] : RoadCellHashes(*r))
+                if (cell.first >= x * 16 - 2 && cell.first < x * 16 + 18 && cell.second >= y * 16 - 2 && cell.second < y * 16 + 18) cells.insert(cell);
+        if (!cells.empty()) RefreshCells(m_map, cells);
+    }
     return stats;
 }
 
@@ -294,18 +304,37 @@ std::optional<ChunkRef> TerrainAdapter::ChunkAtGrid(int gx, int gz) const
     return i < 0 ? std::nullopt : std::optional<ChunkRef>(ChunkRef{ it->first, i });
 }
 
+namespace
+{
+    /// Height inside a chunk: bilinear over the cell's four outer corners, close enough for overlays and roads.
+    float ChunkHeightAt(const AdtChunk& c, float x, float z)
+    {
+        const float lx = std::clamp((x - c.baseX) / kUnitSize, 0.0f, 7.999f), lz = std::clamp((z - c.baseZ) / kUnitSize, 0.0f, 7.999f);
+        const size_t col = size_t(lx), row = size_t(lz);
+        const float fx = lx - col, fz = lz - row;
+        const float tl = c.heights[row * 17 + col], tr = c.heights[row * 17 + col + 1];
+        const float bl = c.heights[(row + 1) * 17 + col], br = c.heights[(row + 1) * 17 + col + 1];
+        return c.baseY + (tl * (1 - fx) + tr * fx) * (1 - fz) + (bl * (1 - fx) + br * fx) * fz;
+    }
+
+    /// Height at a point of tile (tx, ty) parsed on its own (chunks found by their place in the tile).
+    std::optional<float> TileHeightAt(const Adt& adt, int tx, int ty, float x, float z)
+    {
+        const int col = int(std::floor((x - tx * kTileSize) / kChunkSize)), row = int(std::floor((z - ty * kTileSize) / kChunkSize));
+        if (col < 0 || row < 0 || col > 15 || row > 15) return std::nullopt;
+        const size_t i = size_t(row * 16 + col);
+        if (i < adt.chunks.size() && int(adt.chunks[i].indexX) == col && int(adt.chunks[i].indexY) == row) return ChunkHeightAt(adt.chunks[i], x, z);
+        for (const AdtChunk& c : adt.chunks)   // files out of order
+            if (int(c.indexX) == col && int(c.indexY) == row) return ChunkHeightAt(c, x, z);
+        return std::nullopt;
+    }
+}
+
 std::optional<float> TerrainAdapter::HeightAt(float x, float z) const
 {
     const auto ref = ChunkAtGrid(int(std::floor(x / kChunkSize)), int(std::floor(z / kChunkSize)));
     if (!ref) return std::nullopt;
-    const AdtChunk& c = *Chunk(*ref);
-    // Bilinear over the cell's four outer corners: close enough for overlays.
-    const float lx = std::clamp((x - c.baseX) / kUnitSize, 0.0f, 7.999f), lz = std::clamp((z - c.baseZ) / kUnitSize, 0.0f, 7.999f);
-    const size_t col = size_t(lx), row = size_t(lz);
-    const float fx = lx - col, fz = lz - row;
-    const float tl = c.heights[row * 17 + col], tr = c.heights[row * 17 + col + 1];
-    const float bl = c.heights[(row + 1) * 17 + col], br = c.heights[(row + 1) * 17 + col + 1];
-    return c.baseY + (tl * (1 - fx) + tr * fx) * (1 - fz) + (bl * (1 - fx) + br * fx) * fz;
+    return ChunkHeightAt(*Chunk(*ref), x, z);
 }
 
 std::optional<TerrainHit> TerrainAdapter::PickIn(const std::map<int, LoadedTile>& tiles, FXMVECTOR origin, FXMVECTOR dir, bool throughHoles)
@@ -494,7 +523,7 @@ bool TerrainAdapter::ReplayEdits(LoadedTile& tile, const std::string& map, const
 {
     const int x = tile.x, y = tile.y;
     bool objects = false;
-    for (const Change& c : done)
+    for (const ChangeStore::Part& c : ChangeStore::Parts(done))
     {
         if (c.domain != "terrain.heights" || c.data.at("map").get<std::string>() != map) continue;
         for (const auto& e : c.data.at("edits"))
@@ -821,7 +850,7 @@ std::optional<Change> TerrainAdapter::DeleteObjects(const std::set<ObjectRef>& r
 uint32_t TerrainAdapter::NextUniqueId() const
 {
     uint32_t next = kEditorUniqueIdBase;
-    for (const Change& c : m_store.Done())
+    for (const ChangeStore::Part& c : ChangeStore::Parts(m_store.Done()))
         if (c.domain == Domain())
         {
             for (const auto& e : c.data.value("objects", nlohmann::json::array())) next = std::max<uint32_t>(next, EntryUid(e) + 1);
@@ -2143,7 +2172,7 @@ void TerrainAdapter::RebuildOverlay()
     if (m_projectDir.empty()) return;
     std::error_code ec;
     fs::remove_all(m_projectDir / "overlay", ec);   // the overlay is the applied changes, nothing else
-    for (const Change& c : m_store.Done())
+    for (const ChangeStore::Part& c : ChangeStore::Parts(m_store.Done()))
         if (c.domain == Domain())
         {
             for (const auto& e : c.data.value("tiles", nlohmann::json::array())) SetTile(c.data.at("map"), e[0], e[1], e[2], true);
@@ -2266,7 +2295,7 @@ std::optional<Change> TerrainAdapter::AddTiles(const std::vector<NewTile>& tiles
 std::set<int> TerrainAdapter::EditedTiles(const std::string& map) const
 {
     std::set<int> tiles;
-    for (const Change& c : m_store.Done())
+    for (const ChangeStore::Part& c : ChangeStore::Parts(m_store.Done()))
         if (c.domain == Domain() && c.data.at("map").get<std::string>() == map)
         {
             for (const auto& e : c.data.at("edits")) tiles.insert(TileKey(e[0], e[1]));
@@ -2287,7 +2316,7 @@ std::optional<Adt> TerrainAdapter::EditedHeights(const std::string& map, int x, 
     const auto bytes = m_mpq.Read("World\\Maps\\" + map + "\\" + map + "_" + std::to_string(x) + "_" + std::to_string(y) + ".adt");
     auto adt = bytes ? ParseAdt(*bytes, false) : std::nullopt;   // alpha unused here
     if (!adt) return adt;
-    for (const Change& c : m_store.Done())
+    for (const ChangeStore::Part& c : ChangeStore::Parts(m_store.Done()))
         if (c.domain == Domain() && c.data.at("map") == map)
             for (const auto& e : c.data.at("edits"))
                 if (e[0] == x && e[1] == y && size_t(e[2]) < adt->chunks.size() && size_t(e[3]) < 145) adt->chunks[size_t(e[2])].heights[size_t(e[3])] = e[5];
@@ -2309,7 +2338,7 @@ void TerrainAdapter::FindCracks(std::vector<Problem>& problems) const
     // Final heights of the edited tiles: the client's tile plus the last value written to each vertex.
     std::map<std::pair<std::string, int>, std::map<std::pair<size_t, size_t>, float>> edits;
     std::set<std::pair<std::string, int>> whole;
-    for (const Change& c : m_store.Done())
+    for (const ChangeStore::Part& c : ChangeStore::Parts(m_store.Done()))
         if (c.domain == Domain())
         {
             for (const auto& e : c.data.at("edits")) edits[{ c.data.at("map"), TileKey(e[0], e[1]) }][{ size_t(e[2]), size_t(e[3]) }] = e[5];
@@ -2387,7 +2416,7 @@ size_t TerrainAdapter::Export(const fs::path& outDir, std::string& error, std::v
     std::map<std::pair<std::string, int>, TileEdits> tiles;
     std::set<std::string> addedMaps;   // maps that gained tiles: their WDT and WDL are exported too
     std::map<std::pair<std::string, int>, fs::path> minimaps;   // tile -> its minimap image (added tiles: the other version's)
-    for (const Change& c : m_store.Done())
+    for (const ChangeStore::Part& c : ChangeStore::Parts(m_store.Done()))
     {
         if (c.domain != Domain()) continue;
         const std::string map = c.data.at("map");
@@ -2408,11 +2437,69 @@ size_t TerrainAdapter::Export(const fs::path& outDir, std::string& error, std::v
     }
 
     // Final heights of any tile (edited or not), for normals that look across tile borders.
+    // Roads: written as the heights and textures they leave on the terrain as edited (the roads themselves are editor-only).
+    std::map<std::string, std::vector<const Road*>> roadsByMap;
+    if (m_roads)
+        for (const Road* r : m_roads->All()) roadsByMap[r->map].push_back(r);
+    // The ground the roads follow: the terrain as edited, without roads, any tile.
+    std::map<std::pair<std::string, int>, std::optional<Adt>> plainTiles;
+    auto groundOf = [&](const std::string& map) -> RoadGround {
+        return [&, map](float x, float z) -> std::optional<float> {
+            const int tx = int(std::floor(x / kTileSize)), ty = int(std::floor(z / kTileSize));
+            if (tx < 0 || ty < 0 || tx > 63 || ty > 63) return std::nullopt;
+            auto [it, added] = plainTiles.try_emplace({ map, TileKey(tx, ty) });
+            if (added) it->second = EditedHeights(map, tx, ty);
+            return it->second ? TileHeightAt(*it->second, tx, ty, x, z) : std::nullopt;
+        };
+    };
+    for (const auto& [map, roads] : roadsByMap)
+    {
+        const RoadGround ground = groundOf(map);
+        std::set<int> keys;
+        for (const Road* r : roads)
+        {
+            const float slack = RoadReach(*r);
+            for (const RoadSample& p : SampleRoad(*r))   // every yard of the line: long stretches cross tiles between points
+                for (int tz = int(std::floor((p.pos.z - slack) / kTileSize)); tz <= int(std::floor((p.pos.z + slack) / kTileSize)); ++tz)
+                    for (int tx = int(std::floor((p.pos.x - slack) / kTileSize)); tx <= int(std::floor((p.pos.x + slack) / kTileSize)); ++tx)
+                        if (tx >= 0 && tz >= 0 && tx < 64 && tz < 64) keys.insert(TileKey(tx, tz));
+        }
+        const auto wdt = m_mpq.Read("World\\Maps\\" + map + "\\" + map + ".wdt");
+        for (int key : keys)
+        {
+            const auto bytes = m_mpq.Read("World\\Maps\\" + map + "\\" + map + "_" + std::to_string(key % 64) + "_" + std::to_string(key / 64) + ".adt");
+            auto adt = bytes && wdt ? ParseAdt(*bytes, WdtBigAlpha(*wdt)) : std::nullopt;
+            if (!adt) continue;
+            LoadedTile plain{ key % 64, key / 64, {}, std::move(*adt) };
+            ReplayEdits(plain, map, m_store.Done());
+            for (size_t ci = 0; ci < plain.adt.chunks.size(); ++ci)
+            {
+                AdtChunk shown = plain.adt.chunks[ci];
+                LoadedTile textures;
+                textures.adt.textures = plain.adt.textures;
+                if (!ApplyRoads(roads, shown, textures.adt.textures, ground)) continue;
+                TileEdits& edits = tiles[{ map, key }];
+                for (size_t j = 0; j < 145; ++j)
+                    if (shown.heights[j] != plain.adt.chunks[ci].heights[j]) edits.heights[{ ci, j }] = shown.heights[j];
+                if (nlohmann::json after = LayerState(textures, shown); after != LayerState(plain, plain.adt.chunks[ci])) edits.layers[ci] = std::move(after);
+            }
+        }
+    }
+
     std::map<std::pair<std::string, int>, std::optional<Adt>> finals;
     auto heightsOf = [&](const std::string& map, int x, int y) -> const Adt* {
         if (x < 0 || y < 0 || x > 63 || y > 63) return nullptr;
         auto [it, added] = finals.try_emplace({ map, TileKey(x, y) });
-        if (added) it->second = EditedHeights(map, x, y);
+        if (added)
+        {
+            it->second = EditedHeights(map, x, y);
+            if (auto r = roadsByMap.find(map); it->second && r != roadsByMap.end())   // neighbours' edges as the roads leave them
+                for (AdtChunk& c : it->second->chunks)
+                {
+                    std::vector<std::string> unused;
+                    ApplyRoads(r->second, c, unused, groundOf(map));
+                }
+        }
         return it->second ? &*it->second : nullptr;
     };
     auto chunkAt = [](const Adt& a, int ix, int iy) -> const AdtChunk* {
@@ -2616,6 +2703,101 @@ size_t TerrainAdapter::Export(const fs::path& outDir, std::string& error, std::v
         if (!writeFile(outDir / "textures" / "Minimap" / "md5translate.trs", trs)) return written;
     }
     return written;
+}
+
+void TerrainAdapter::SetRoads(const RoadStore* roads)
+{
+    m_roads = roads;
+    m_renderer.SetChunkView([this](int, size_t, const AdtChunk& c, const std::vector<std::string>& textures, bool paint) -> std::optional<Renderer::ShownChunk> {
+        if (!m_roads) return std::nullopt;
+        const std::vector<const Road*> roads = m_roads->OnMap(m_map);
+        if (roads.empty()) return std::nullopt;
+        Renderer::ShownChunk shown{ c, textures };
+        if (!ApplyRoads(roads, shown.chunk, shown.textures, {}, paint, [this](const Road& r) -> const std::vector<RoadSample>& { return RoadLine(r); }))
+            return std::nullopt;
+        return shown;
+    });
+}
+
+const std::vector<RoadSample>& TerrainAdapter::RoadLine(const Road& road) const
+{
+    // Valid while the roads, the edits and the loaded ground stay as they are.
+    // ponytail: a sculpt stroke reshapes the ground before it commits; roads following it catch up when it does.
+    const auto key = std::tuple{ m_roads ? m_roads->Version() : 0, m_store.Revision(), m_tiles.size() };
+    if (key != m_roadLinesKey)
+    {
+        m_roadLines.clear();
+        m_roadLinesKey = key;
+    }
+    auto [it, added] = m_roadLines.try_emplace(road.id);
+    if (added) it->second = SampleRoad(road, [this](float x, float z) { return HeightAt(x, z); });
+    return it->second;
+}
+
+void TerrainAdapter::RefreshCells(const std::string& map, const RoadStore::Cells& cells)
+{
+    if (map != m_map) return;
+    for (const auto& [gx, gz] : cells)
+        if (const auto ref = ChunkAtGrid(gx, gz))
+        {
+            m_renderer.UpdateChunk(ref->tile, size_t(ref->chunk), *Chunk(*ref));
+            RefreshTextures(ref->tile, size_t(ref->chunk));
+        }
+}
+
+std::optional<float> TerrainAdapter::ShownHeightAt(float x, float z) const
+{
+    const auto ref = ChunkAtGrid(int(std::floor(x / kChunkSize)), int(std::floor(z / kChunkSize)));
+    if (!ref || !m_roads) return HeightAt(x, z);
+    AdtChunk c = *Chunk(*ref);
+    std::vector<std::string> unused;
+    if (!ApplyRoads(m_roads->OnMap(m_map), c, unused, {}, false, [this](const Road& r) -> const std::vector<RoadSample>& { return RoadLine(r); }))
+        return HeightAt(x, z);
+    return ChunkHeightAt(c, x, z);
+}
+
+std::optional<Change> TerrainAdapter::BakeRoad(const Road& road, const std::string& label)
+{
+    if (road.map != m_map || road.points.size() < 2) return std::nullopt;
+    // Every tile the road crosses must be loaded to be written.
+    const float reach = RoadReach(road);
+    std::string error;
+    std::set<int> keys;
+    for (const RoadSample& p : SampleRoad(road))
+        for (int tz = int(std::floor((p.pos.z - reach) / kTileSize)); tz <= int(std::floor((p.pos.z + reach) / kTileSize)); ++tz)
+            for (int tx = int(std::floor((p.pos.x - reach) / kTileSize)); tx <= int(std::floor((p.pos.x + reach) / kTileSize)); ++tx)
+                if (tx >= 0 && tz >= 0 && tx < 64 && tz < 64 && keys.insert(TileKey(tx, tz)).second) LoadNow(tx, tz, error);
+    // Every chunk worked out from the ground as it is, then written (the road follows the ground: writing as we go
+    // would feed baked heights back into its line).
+    struct Baked { int key; size_t ci; AdtChunk chunk; std::vector<std::string> textures; };
+    std::vector<Baked> baked;
+    const RoadGround ground = [this](float x, float z) { return HeightAt(x, z); };
+    for (int key : keys)
+        if (auto it = m_tiles.find(key); it != m_tiles.end())
+            for (size_t ci = 0; ci < it->second.adt.chunks.size(); ++ci)
+            {
+                Baked b{ key, ci, it->second.adt.chunks[ci], it->second.adt.textures };
+                if (ApplyRoads({ &road }, b.chunk, b.textures, ground)) baked.push_back(std::move(b));
+            }
+    Edits edits;
+    nlohmann::json layers = nlohmann::json::array();
+    for (Baked& b : baked)
+    {
+        LoadedTile& tile = m_tiles.at(b.key);
+        AdtChunk& c = tile.adt.chunks[b.ci];
+        for (size_t j = 0; j < 145; ++j)
+            if (b.chunk.heights[j] != c.heights[j]) edits[{ b.key, int(b.ci), int(j) }] = { c.heights[j], b.chunk.heights[j] };
+        nlohmann::json before = LayerState(tile, c);
+        for (const std::string& t : b.textures)   // the road's textures join the tile's list (ids stay valid: only appended)
+            if (std::find(tile.adt.textures.begin(), tile.adt.textures.end(), t) == tile.adt.textures.end()) tile.adt.textures.push_back(t);
+        // b.chunk's ids index b.textures; carry them over by name.
+        nlohmann::json after = [&] { LoadedTile names; names.adt.textures = b.textures; return LayerState(names, b.chunk); }();
+        c = b.chunk;
+        SetLayerState(tile, c, after);
+        if (after != before) layers.push_back({ tile.x, tile.y, int(b.ci), std::move(before), std::move(after) });
+    }
+    if (edits.empty() && layers.empty()) return std::nullopt;
+    return MakeChange(edits, layers, label);
 }
 
 bool TerrainSelfTest()
