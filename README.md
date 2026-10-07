@@ -120,6 +120,7 @@ drawn into place. Right: Blizzard's baked skins (left column) beside the editor'
 | Feature | What it does |
 | --- | --- |
 | [Server link](docs/server/server-link.md) | Connect to AzerothCore's database and SOAP; run GM commands; check a project for problems |
+| [Server data](docs/server/server-data.md) | Rebuild the server's maps, vmaps and mmaps for the maps the project exports, with AzerothCore's own tools; originals kept |
 
 ## More documentation
 

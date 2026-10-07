@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -12,6 +13,10 @@
 /// separators), zlib-compressed, with (listfile) and (attributes). Built beside it first, then moved over an older one;
 /// false (and `error`) when it cannot be written, e.g. a running client holds the old one open.
 bool WriteMpq(const std::filesystem::path& archive, const std::filesystem::path& root, std::string& error, size_t* files = nullptr);
+/// An uncompressed MPQ of `names`, each read when it is written (nothing held in memory but one file); names `read`
+/// cannot give are left out. `written` gets how many went in.
+bool WriteMpqFrom(const std::filesystem::path& archive, const std::vector<std::string>& names,
+                  const std::function<std::optional<std::vector<uint8_t>>(const std::string&)>& read, std::string& error, size_t* written = nullptr);
 
 /// True when the client loads archive `a` after archive `b` (file names, e.g. "patch-enUS-Z.MPQ"): `a`'s files win.
 bool LoadsAfter(const std::string& a, const std::string& b);

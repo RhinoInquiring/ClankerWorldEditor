@@ -57,6 +57,16 @@ public:
     /// The same as a list to loop over (references into `list`).
     struct Part { const std::string& domain; const nlohmann::json& data; };
     static std::vector<Part> Parts(const std::vector<Change>& list);
+    /// One change's parts (references into it).
+    static std::vector<Part> Parts(const Change& change);
+    /// data[key] by reference, or an empty array when it has none. Use this, not data.value(key, array()): that copies
+    /// the whole array (pasted texture layers are tens of kilobytes a chunk) on every read.
+    static const nlohmann::json& List(const nlohmann::json& data, const char* key)
+    {
+        static const nlohmann::json empty = nlohmann::json::array();
+        const auto it = data.find(key);
+        return it == data.end() ? empty : *it;
+    }
 
     bool CanUndo() const { return !m_done.empty(); }
     bool CanRedo() const { return !m_undone.empty(); }

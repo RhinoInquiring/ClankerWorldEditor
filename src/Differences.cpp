@@ -48,15 +48,15 @@ void Differences::Start(const MpqChain& baseChain, const std::string& baseMap, c
         try
         {
             const nlohmann::json j = nlohmann::json::parse(f);
-            for (const auto& t : j.value("tiles", nlohmann::json::array()))
+            for (const auto& t : ChangeStore::List(j, "tiles"))
             {
                 TileResult r{ t.at("key"), t.at("base"), t.at("other"), t.at("edits") };
                 for (const auto& c : t.at("cells"))
                     r.cells.push_back({ c[0], c[1], uint8_t(c[2]), c[3], uint16_t(c[4]), uint16_t(c[5]), c[6] });
                 cache[r.key] = std::move(r);
             }
-            for (const auto& c : j.value("pasted", nlohmann::json::array())) m_status[{ c[0], c[1] }] = Status::Pasted;
-            for (const auto& c : j.value("rejected", nlohmann::json::array())) m_status[{ c[0], c[1] }] = Status::Rejected;
+            for (const auto& c : ChangeStore::List(j, "pasted")) m_status[{ c[0], c[1] }] = Status::Pasted;
+            for (const auto& c : ChangeStore::List(j, "rejected")) m_status[{ c[0], c[1] }] = Status::Rejected;
         }
         catch (const std::exception&) {}   // an unreadable file is scanned afresh
 

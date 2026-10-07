@@ -103,6 +103,43 @@ bool WriteMpq(const std::filesystem::path& archive, const std::filesystem::path&
     return true;
 }
 
+bool WriteMpqFrom(const std::filesystem::path& archive, const std::vector<std::string>& names,
+                  const std::function<std::optional<std::vector<uint8_t>>(const std::string&)>& read, std::string& error, size_t* written)
+{
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    DWORD slots = 16;
+    while (slots < names.size() * 2 + 16) slots *= 2;
+    fs::create_directories(archive.parent_path(), ec);
+    fs::remove(archive, ec);
+    HANDLE h = nullptr;
+    if (!SFileCreateArchive(archive.string().c_str(), MPQ_CREATE_LISTFILE | MPQ_CREATE_ARCHIVE_V1, slots, &h))
+    {
+        error = "Cannot create " + archive.string() + " (error " + std::to_string(GetLastError()) + ")";
+        return false;
+    }
+    size_t count = 0;
+    for (const std::string& name : names)
+    {
+        const auto bytes = read(name);
+        if (!bytes) continue;   // the caller listed what might be there
+        HANDLE f = nullptr;
+        const std::string inside = Backslashes(name);
+        if (!SFileCreateFile(h, inside.c_str(), 0, DWORD(bytes->size()), 0, MPQ_FILE_REPLACEEXISTING, &f) ||
+            (!bytes->empty() && !SFileWriteFile(f, bytes->data(), DWORD(bytes->size()), 0)) || !SFileFinishFile(f))
+        {
+            error = "Cannot add " + inside + " (error " + std::to_string(GetLastError()) + ")";
+            SFileCloseArchive(h);
+            fs::remove(archive, ec);
+            return false;
+        }
+        ++count;
+    }
+    if (!SFileCloseArchive(h)) { error = "Cannot finish " + archive.string(); return false; }
+    if (written) *written = count;
+    return true;
+}
+
 void MpqChain::Close()
 {
     for (const Archive& a : m_archives)

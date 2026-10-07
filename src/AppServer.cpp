@@ -541,3 +541,156 @@ void App::DrawProjectSettingsModal()
     if (ImGui::Button("Cancel", { 120, 0 }) || ImGui::IsKeyPressed(ImGuiKey_Escape)) ImGui::CloseCurrentPopup();
     ImGui::EndPopup();
 }
+
+// ---------------------------------------------------------------------------------------------- server data
+
+std::vector<ServerMap> App::ServerMapsToBuild() const
+{
+    // Maps the project changes: terrain, objects, water, roads; a WMO-only map whose WMO moved gets its whole navmesh.
+    std::map<std::string, bool> maps;   // directory -> whole navmesh
+    for (const ChangeStore::Part& p : ChangeStore::Parts(m_store.Done()))
+        if (p.domain == m_terrain.Domain() && p.data.contains("map"))
+        {
+            bool& whole = maps[p.data.at("map").get<std::string>()];
+            whole |= p.data.contains("global");
+        }
+    for (const Road* r : m_roads.All()) maps.try_emplace(r->map, false);
+
+    std::vector<ServerMap> out;
+    for (const auto& [directory, whole] : maps)
+    {
+        ServerMap m;
+        m.directory = directory;
+        bool known = false;
+        for (const MapEntry& e : m_maps)
+            if (e.directory == directory) { m.id = e.id; known = true; }
+        if (!known) continue;
+        // Edited tiles (and those under roads) and their neighbours: a navmesh tile reads its neighbours' borders.
+        std::set<std::pair<int, int>> edited;
+        for (int key : m_terrain.EditedTiles(directory)) edited.insert({ key % 64, key / 64 });
+        for (const Road* r : m_roads.All())
+            if (r->map == directory)
+                for (const RoadSample& s : SampleRoad(*r)) edited.insert({ int(s.pos.x / kTileSize), int(s.pos.z / kTileSize) });
+        const auto wdt = m_mpq.Read("World\\Maps\\" + directory + "\\" + directory + ".wdt");
+        const std::vector<bool> present = wdt ? WdtTiles(*wdt) : std::vector<bool>(4096, true);
+        if (!whole && !m_serverWholeMesh)
+            for (const auto& [x, y] : edited)
+                for (int dy = -1; dy <= 1; ++dy)
+                    for (int dx = -1; dx <= 1; ++dx)
+                        if (x + dx >= 0 && y + dy >= 0 && x + dx < 64 && y + dy < 64 && present[size_t((y + dy) * 64 + x + dx)])
+                            m.mmapTiles.insert({ x + dx, y + dy });
+        out.push_back(std::move(m));
+    }
+    return out;
+}
+
+void App::StartServerData()
+{
+    const ServerProfile* p = m_project ? FindProfile(m_profiles, m_project->serverProfile) : nullptr;
+    if (!p || p->serverDir.empty()) { Log("Set the server folder first (File > Server setup)."); return; }
+    std::vector<ServerMap> maps;
+    for (ServerMap& m : ServerMapsToBuild())
+        if (!m_serverSkip.count(m.directory)) maps.push_back(std::move(m));
+    if (maps.empty()) { Log("No map to build server data for."); return; }
+    Export(false);   // the tools read the exported tiles
+    ServerDataJob::Options o;
+    o.tools = p->serverDir;
+    o.serverData = fs::path(p->serverDir) / "Data";
+    o.work = m_project->dir / "server-build" / "work";
+    o.exported = m_project->ClientOutDir();
+    o.backup = m_project->dir / "server-build" / "original";
+    o.layers = m_project->base.layers;
+    m_serverJobLog.clear();
+    m_serverJob.Start(std::move(o), std::move(maps));
+}
+
+void App::RestoreServerData()
+{
+    const ServerProfile* p = m_project ? FindProfile(m_profiles, m_project->serverProfile) : nullptr;
+    const fs::path original = m_project ? m_project->dir / "server-build" / "original" : fs::path();
+    if (!p || original.empty() || !fs::exists(original)) { Log("Nothing to restore."); return; }
+    // ponytail: files a build added (no original: new tiles, new models) stay; they are unused once the originals return.
+    std::error_code ec;
+    size_t restored = 0;
+    for (const auto& e : fs::recursive_directory_iterator(original, ec))
+    {
+        if (!e.is_regular_file()) continue;
+        const fs::path dest = fs::path(p->serverDir) / "Data" / fs::relative(e.path(), original, ec);
+        fs::copy_file(e.path(), dest, fs::copy_options::overwrite_existing, ec);
+        if (!ec) ++restored;
+    }
+    Log("Restored %zu server file(s) from %s: restart the worldserver.", restored, original.string().c_str());
+}
+
+void App::DrawServerDataWindow()
+{
+    for (const std::string& line : m_serverJob.TakeLog())
+    {
+        m_serverJobLog.push_back(line);
+        Log("%s", line.c_str());
+    }
+    if (!m_showServerData) return;
+    ImGui::SetNextWindowSize({ 560, 520 }, ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Server data", &m_showServerData)) { ImGui::End(); return; }
+    const float w = ImGui::GetContentRegionAvail().x;
+    const ServerProfile* p = m_project ? FindProfile(m_profiles, m_project->serverProfile) : nullptr;
+    ImGui::PushTextWrapPos(w);
+    ImGui::TextColored(kQuiet, "Maps, vmaps and mmaps for the maps this project exports, made by AzerothCore's own tools from "
+                               "a staging client that holds only that map; then only that map's files go into the server's Data.");
+    ImGui::PopTextWrapPos();
+    if (!p || p->serverDir.empty())
+    {
+        ImGui::TextColored(kWarn, "Set the server folder first (File > Server setup).");
+        ImGui::End();
+        return;
+    }
+    ImGui::Text("Server data: %s", (fs::path(p->serverDir) / "Data").string().c_str());
+
+    const bool running = m_serverJob.Running();
+    ImGui::SeparatorText("Maps");
+    const auto maps = ServerMapsToBuild();
+    if (maps.empty()) ImGui::TextColored(kQuiet, "The project changes no map yet.");
+    ImGui::BeginDisabled(running);
+    for (const ServerMap& m : maps)
+    {
+        bool on = !m_serverSkip.count(m.directory);
+        char text[200];
+        snprintf(text, sizeof text, "%s  (%u)   navmesh: %s", m.directory.c_str(), m.id,
+                 m.mmapTiles.empty() ? "every tile" : (std::to_string(m.mmapTiles.size()) + " tile(s) around the edits").c_str());
+        if (ImGui::Checkbox(text, &on))
+        {
+            if (on) m_serverSkip.erase(m.directory);
+            else m_serverSkip.insert(m.directory);
+        }
+    }
+    ImGui::Checkbox("Rebuild the whole navmesh of each map", &m_serverWholeMesh);
+    ImGui::SetItemTooltip("Off: only the navmesh tiles around the edits (seconds each).\nOn: every tile (a continent takes a long time).");
+    ImGui::EndDisabled();
+
+    ImGui::Separator();
+    if (running)
+    {
+        ImGui::ProgressBar(m_serverJob.Progress(), { w - 90, 0 });
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", { 80, 0 })) m_serverJob.Cancel();
+        ImGui::TextUnformatted(m_serverJob.Status().c_str());
+    }
+    else
+    {
+        ImGui::BeginDisabled(maps.empty());
+        if (ImGui::Button("Export and build", { (w - 8) / 2, 0 })) StartServerData();
+        ImGui::EndDisabled();
+        ImGui::SetItemTooltip("Exports the project, then builds and installs the server data. The worldserver loads it after a restart.");
+        ImGui::SameLine();
+        if (ImGui::Button("Restore the server's originals", { (w - 8) / 2, 0 })) RestoreServerData();
+        ImGui::SetItemTooltip("Puts back every server file a build replaced (saved in the project's server-build\\original).");
+        if (!m_serverJobLog.empty()) ImGui::TextUnformatted(m_serverJob.Status().c_str());
+    }
+    if (ImGui::BeginChild("log", { 0, 0 }, ImGuiChildFlags_Borders))
+    {
+        for (const std::string& line : m_serverJobLog) ImGui::TextUnformatted(line.c_str());
+        if (running) ImGui::SetScrollHereY(1.0f);
+    }
+    ImGui::EndChild();
+    ImGui::End();
+}

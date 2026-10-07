@@ -281,6 +281,7 @@ bool App::Init(HWND hwnd, ID3D11Device* device, ID3D11DeviceContext* context, bo
         { "Close project", "", [this] { GuardUnsaved([this] { CloseProject(); }); }, hasProject },
         { "Project settings...", "", [this] { OpenProjectSettings(); }, hasProject },
         { "Server setup...", "", [this] { OpenSetup(); }, hasProject },
+        { "Server: build server data (maps, vmaps, mmaps)", "", [this] { m_showServerData = true; }, hasProject },
         { "Check for problems", "", [this] { RunChecks(); }, hasProject },
         { "Window: NPC viewer", "", [this] { m_showNpc = true; m_npc.focus = true; }, always },
         { "Window: Sources", "", [this] { m_showSources = true; }, hasProject },
@@ -801,7 +802,7 @@ void App::CommitPlacement()
     if (m_heightBeforeInPlace) { m_pasteHeightMode = *m_heightBeforeInPlace; m_heightBeforeInPlace.reset(); }
     if (!change) { Log("Nothing pasted: the target chunks are not loaded."); return; }
     Log("%s (%zu chunks changed, %zu objects added).", change->label.c_str(), m_plan.chunks.size(),
-        change->data.value("objects", nlohmann::json::array()).size());
+        ChangeStore::List(change->data, "objects").size());
     // Landmarks of another version come along in the same undo step.
     std::vector<Change> parts = AddPastedPois(m_plan.pois, change->label);
     if (parts.empty()) { m_store.Commit(std::move(*change)); return; }
@@ -2313,6 +2314,7 @@ void App::Frame(float dt)
     UpdateNpc();
     DrawNpcViewer();
     DrawShortcuts();
+    DrawServerDataWindow();
     DrawChangesPanel();
     DrawProblemsPanel();
     if (ImGuiWindow* log = ImGui::FindWindowByName("Log"); log && log->DockId) ImGui::SetNextWindowDockID(log->DockId, ImGuiCond_FirstUseEver);
@@ -2424,6 +2426,7 @@ void App::DrawMenuBar()
         if (ImGui::MenuItem("Play test", "F5", false, m_project.has_value())) Export(true);
         if (ImGui::MenuItem("Build patch MPQ", "Ctrl+Shift+E", false, m_project.has_value())) BuildPatch(false);
         if (ImGui::MenuItem("Build patch MPQ and install into client", nullptr, false, m_project.has_value())) BuildPatch(true);
+        if (ImGui::MenuItem("Build server data (maps, vmaps, mmaps)...", nullptr, false, m_project.has_value())) m_showServerData = true;
         ImGui::Separator();
         if (ImGui::MenuItem("Project settings...", nullptr, false, m_project.has_value())) OpenProjectSettings();
         if (ImGui::MenuItem("Server setup...", nullptr, false, m_project.has_value())) OpenSetup();

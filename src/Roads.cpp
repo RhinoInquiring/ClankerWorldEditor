@@ -137,7 +137,7 @@ Road Road::FromJson(const nlohmann::json& j)
     r.id = j.value("id", 0u);
     r.name = j.value("name", std::string());
     r.map = j.value("map", std::string());
-    for (const auto& p : j.value("points", nlohmann::json::array())) r.points.push_back({ { p[0], p[1], p[2] }, p.size() > 3 ? float(p[3]) : 0.0f });
+    for (const auto& p : ChangeStore::List(j, "points")) r.points.push_back({ { p[0], p[1], p[2] }, p.size() > 3 ? float(p[3]) : 0.0f });
     r.width = j.value("width", 6.0f);
     r.texture = j.value("texture", std::string());
     r.shoulderTexture = j.value("shoulderTexture", std::string());

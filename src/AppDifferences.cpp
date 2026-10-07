@@ -290,6 +290,17 @@ void App::DrawDifferences()
         (r.status == Differences::Status::Rejected ? rejected : pending) += 1;
         newTerrain += newTerrainOnly(r) && r.status == Differences::Status::Pending;
     }
+    // Whole tiles waiting to be added: buttons as well as Enter (Enter can go to whatever ImGui has focused).
+    if (!m_diffNewTiles.empty())
+    {
+        ImGui::TextColored(kWarn, "%zu new tile(s) from %s, shown alone in the viewport:", m_diffNewTiles.size(), m_diffTarget.label.c_str());
+        ImGui::SameLine();
+        if (ImGui::Button(("Add " + std::to_string(m_diffNewTiles.size()) + " tile(s)  Enter").c_str())) AddDifferenceTiles();
+        ImGui::SameLine();
+        if (ImGui::Button("Reject  Del")) RejectDifference();
+        ImGui::SameLine();
+        if (ImGui::Button("Close  Esc")) { EndNewTiles(); m_diffPending.clear(); m_diffActive.clear(); }
+    }
     ImGui::TextColored(kAccent, "%zu area(s) to review", pending);
     ImGui::SameLine();
     ImGui::TextColored(kQuiet, "  %zu rejected   vs %s", rejected, m_diffs.OtherLabel().c_str());
@@ -349,6 +360,7 @@ void App::DrawDifferences()
         {
             const Differences::Region& r = *shown[n];
             ImGui::PushID(r.key.c_str());
+            ImGui::PushItemFlag(ImGuiItemFlags_NoNav, true);   // Enter belongs to the review (add tiles, paste), not to a focused card
             ImGui::BeginGroup();
             const bool active = r.key == m_diffActive;
             if (active) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.25f, 0.45f, 0.75f, 1));
@@ -392,6 +404,7 @@ void App::DrawDifferences()
             ImGui::TextColored(kQuiet, "%zu ch  %s%s", r.cells.size(), r.kinds & CellDiff::Water ? "water " : "",
                                r.newObjects ? ("+" + std::to_string(r.newObjects) + " obj").c_str() : "");
             ImGui::EndGroup();
+            ImGui::PopItemFlag();
             ImGui::PopID();
             if ((n + 1) % size_t(cols) != 0) ImGui::SameLine();
         }

@@ -159,16 +159,20 @@ LoadedTile LoadedTile::Make(int x, int y, std::vector<uint8_t> bytes, Adt adt)
 
 std::map<int, size_t> TerrainAdapter::EditHashes(const std::vector<Change>& done, const std::string& map)
 {
+    // A change never changes once made: its id and time stand for its content (dumping every vertex edit as text to
+    // hash it took over half a second on a long compare session).
     std::map<int, size_t> out;
-    for (const ChangeStore::Part& c : ChangeStore::Parts(done))
+    for (const Change& c : done)
     {
-        if (c.domain != "terrain.heights" || c.data.value("map", std::string()) != map) continue;
-        for (const char* field : { "edits", "layers", "holes", "areas", "colors", "liquids", "objects", "tiles" })
-            for (const auto& e : c.data.value(field, nlohmann::json::array()))
-            {
-                size_t& h = out[TileKey(e[0], e[1])];
-                h = h * 1000003u ^ std::hash<std::string>{}(e.dump());
-            }
+        const auto tiles = TilesOf(c);
+        const auto it = tiles.find(map);
+        if (it == tiles.end()) continue;
+        const size_t id = std::hash<uint64_t>{}(c.id) ^ (std::hash<int64_t>{}(c.time) << 1);
+        for (int key : it->second)
+        {
+            size_t& h = out[key];
+            h = h * 1000003u ^ id;
+        }
     }
     return out;
 }
@@ -196,7 +200,14 @@ bool TerrainAdapter::LoadTile(int x, int y, TileStats& stats, std::string& error
 TileStats TerrainAdapter::FinishTile(int x, int y, std::vector<uint8_t> bytes, Adt adt)
 {
     LoadedTile tile = LoadedTile::Make(x, y, std::move(bytes), std::move(adt));
-    if (ReplayEdits(tile, m_map, m_store.Done())) m_objectsChanged.insert(tile.Key());   // the project's edits, in order
+    // The project's edits, in order: only the changes that touch this tile.
+    std::vector<size_t> touching;
+    for (size_t i = 0; i < m_store.Done().size(); ++i)
+    {
+        const auto& byMap = CachedTilesOf(m_store.Done()[i]);
+        if (const auto it = byMap.find(m_map); it != byMap.end() && it->second.count(tile.Key())) touching.push_back(i);
+    }
+    if (ReplayEdits(tile, m_map, m_store.Done(), &touching)) m_objectsChanged.insert(tile.Key());
 
     const TileStats stats = m_renderer.LoadTile(tile.Key(), tile.adt, m_mpq);
     tile.maxHeight = stats.maxHeight;
@@ -519,11 +530,37 @@ nlohmann::json TerrainAdapter::RotateLiquidState(const nlohmann::json& state)
     return out;
 }
 
-bool TerrainAdapter::ReplayEdits(LoadedTile& tile, const std::string& map, const std::vector<Change>& done)
+std::map<std::string, std::set<int>> TerrainAdapter::TilesOf(const Change& change)
+{
+    std::map<std::string, std::set<int>> out;
+    for (const ChangeStore::Part& c : ChangeStore::Parts(change))
+    {
+        if (c.domain != "terrain.heights" || !c.data.contains("map")) continue;
+        std::set<int>& tiles = out[c.data.at("map").get<std::string>()];
+        for (const char* field : { "edits", "layers", "holes", "areas", "colors", "liquids", "objects", "tiles" })
+            for (const auto& e : ChangeStore::List(c.data, field)) tiles.insert(TileKey(e[0], e[1]));
+    }
+    return out;
+}
+
+const std::map<std::string, std::set<int>>& TerrainAdapter::CachedTilesOf(const Change& change) const
+{
+    auto [it, added] = m_changeTiles.try_emplace({ change.id, change.time, change.label });
+    if (added) it->second = TilesOf(change);
+    return it->second;
+}
+
+bool TerrainAdapter::ReplayEdits(LoadedTile& tile, const std::string& map, const std::vector<Change>& done, const std::vector<size_t>* only)
 {
     const int x = tile.x, y = tile.y;
     bool objects = false;
-    for (const ChangeStore::Part& c : ChangeStore::Parts(done))
+    std::vector<ChangeStore::Part> parts;
+    if (only)
+        for (size_t i : *only)
+            for (const ChangeStore::Part& p : ChangeStore::Parts(done[i])) parts.push_back(p);
+    else
+        parts = ChangeStore::Parts(done);
+    for (const ChangeStore::Part& c : parts)
     {
         if (c.domain != "terrain.heights" || c.data.at("map").get<std::string>() != map) continue;
         for (const auto& e : c.data.at("edits"))
@@ -532,18 +569,18 @@ bool TerrainAdapter::ReplayEdits(LoadedTile& tile, const std::string& map, const
                 const size_t ci = e[2], vi = e[3];
                 if (ci < tile.adt.chunks.size() && vi < 145) tile.adt.chunks[ci].heights[vi] = e[5];
             }
-        for (const auto& e : c.data.value("layers", nlohmann::json::array()))
+        for (const auto& e : ChangeStore::List(c.data, "layers"))
             if (e[0] == x && e[1] == y && size_t(e[2]) < tile.adt.chunks.size())
                 SetLayerState(tile, tile.adt.chunks[size_t(e[2])], e[4]);
-        for (const auto& e : c.data.value("holes", nlohmann::json::array()))
+        for (const auto& e : ChangeStore::List(c.data, "holes"))
             if (e[0] == x && e[1] == y && size_t(e[2]) < tile.adt.chunks.size()) tile.adt.chunks[size_t(e[2])].holes = e[4];
-        for (const auto& e : c.data.value("areas", nlohmann::json::array()))
+        for (const auto& e : ChangeStore::List(c.data, "areas"))
             if (e[0] == x && e[1] == y && size_t(e[2]) < tile.adt.chunks.size()) tile.adt.chunks[size_t(e[2])].areaId = e[4];
-        for (const auto& e : c.data.value("colors", nlohmann::json::array()))
+        for (const auto& e : ChangeStore::List(c.data, "colors"))
             if (e[0] == x && e[1] == y && size_t(e[2]) < tile.adt.chunks.size()) tile.adt.chunks[size_t(e[2])].colors = Base64Decode(e[4].get<std::string>());
-        for (const auto& e : c.data.value("liquids", nlohmann::json::array()))
+        for (const auto& e : ChangeStore::List(c.data, "liquids"))
             if (e[0] == x && e[1] == y && size_t(e[2]) < tile.adt.chunks.size()) SetLiquidState(tile.adt, tile.adt.chunks[size_t(e[2])], e[4]);
-        for (const auto& e : c.data.value("objects", nlohmann::json::array()))
+        for (const auto& e : ChangeStore::List(c.data, "objects"))
             if (e[0] == x && e[1] == y)
             {
                 ApplyObjectEntry(tile.adt, e, true);
@@ -561,7 +598,7 @@ void TerrainAdapter::RefreshTextures(int key, size_t chunk)
 
 void TerrainAdapter::Set(const Change& change, bool after)
 {
-    for (const auto& e : change.data.value("tiles", nlohmann::json::array()))   // added tiles: the overlay, whatever map is open
+    for (const auto& e : ChangeStore::List(change.data, "tiles"))   // added tiles: the overlay, whatever map is open
         SetTile(change.data.at("map"), e[0], e[1], e[2], after);
     if (const auto it = change.data.find("global"); it != change.data.end() && it->is_array() && it->size() == 2)
         SetGlobalWmo(change.data.at("map"), WmoFrom((*it)[after ? 1 : 0]));
@@ -577,7 +614,7 @@ void TerrainAdapter::Set(const Change& change, bool after)
     }
     for (const auto& [key, ci] : touched) m_renderer.UpdateChunk(key, size_t(ci), m_tiles.at(key).adt.chunks[size_t(ci)]);
 
-    for (const auto& e : change.data.value("layers", nlohmann::json::array()))
+    for (const auto& e : ChangeStore::List(change.data, "layers"))
     {
         auto it = m_tiles.find(TileKey(e[0], e[1]));
         const size_t ci = e[2];
@@ -586,7 +623,7 @@ void TerrainAdapter::Set(const Change& change, bool after)
         RefreshTextures(it->first, ci);
     }
 
-    for (const auto& e : change.data.value("holes", nlohmann::json::array()))
+    for (const auto& e : ChangeStore::List(change.data, "holes"))
     {
         auto it = m_tiles.find(TileKey(e[0], e[1]));
         const size_t ci = e[2];
@@ -595,13 +632,13 @@ void TerrainAdapter::Set(const Change& change, bool after)
         m_renderer.SetChunkHoles(it->first, ci, it->second.adt.chunks[ci].holes);
     }
 
-    for (const auto& e : change.data.value("areas", nlohmann::json::array()))
+    for (const auto& e : ChangeStore::List(change.data, "areas"))
     {
         auto it = m_tiles.find(TileKey(e[0], e[1]));
         if (it != m_tiles.end() && size_t(e[2]) < it->second.adt.chunks.size()) it->second.adt.chunks[size_t(e[2])].areaId = e[after ? 4 : 3];
     }
 
-    for (const auto& e : change.data.value("colors", nlohmann::json::array()))
+    for (const auto& e : ChangeStore::List(change.data, "colors"))
     {
         auto it = m_tiles.find(TileKey(e[0], e[1]));
         const size_t ci = e[2];
@@ -611,7 +648,7 @@ void TerrainAdapter::Set(const Change& change, bool after)
     }
 
     std::set<int> water;
-    for (const auto& e : change.data.value("liquids", nlohmann::json::array()))
+    for (const auto& e : ChangeStore::List(change.data, "liquids"))
     {
         auto it = m_tiles.find(TileKey(e[0], e[1]));
         if (it == m_tiles.end() || size_t(e[2]) >= it->second.adt.chunks.size()) continue;
@@ -620,7 +657,7 @@ void TerrainAdapter::Set(const Change& change, bool after)
     }
     for (int key : water) m_renderer.UpdateWater(key, m_tiles.at(key).adt.liquids, m_mpq);
 
-    const auto objects = change.data.value("objects", nlohmann::json::array());
+    const auto& objects = ChangeStore::List(change.data, "objects");
     for (auto& [key, tile] : m_tiles) SetObjects(tile, objects, after);
 }
 
@@ -853,8 +890,8 @@ uint32_t TerrainAdapter::NextUniqueId() const
     for (const ChangeStore::Part& c : ChangeStore::Parts(m_store.Done()))
         if (c.domain == Domain())
         {
-            for (const auto& e : c.data.value("objects", nlohmann::json::array())) next = std::max<uint32_t>(next, EntryUid(e) + 1);
-            for (const auto& e : c.data.value("tiles", nlohmann::json::array())) next = std::max<uint32_t>(next, uint32_t(e[3]) + 1);
+            for (const auto& e : ChangeStore::List(c.data, "objects")) next = std::max<uint32_t>(next, EntryUid(e) + 1);
+            for (const auto& e : ChangeStore::List(c.data, "tiles")) next = std::max<uint32_t>(next, uint32_t(e[3]) + 1);
         }
     // ponytail: ids only need to avoid each other and Blizzard's; scan every ADT of the map if a custom map uses this range.
     return next;
@@ -1392,9 +1429,9 @@ TerrainClipboard TerrainClipboard::FromJson(const nlohmann::json& j)
         if (c.contains("colors")) e.colors = Base64Decode(c.at("colors").get<std::string>());
         clip.chunks.push_back(std::move(e));
     }
-    for (const auto& d : j.value("doodads", nlohmann::json::array())) clip.doodads.push_back(DoodadFrom(d));
-    for (const auto& w : j.value("wmos", nlohmann::json::array())) clip.wmos.push_back(WmoFrom(w));
-    clip.pois = j.value("pois", nlohmann::json::array());
+    for (const auto& d : ChangeStore::List(j, "doodads")) clip.doodads.push_back(DoodadFrom(d));
+    for (const auto& w : ChangeStore::List(j, "wmos")) clip.wmos.push_back(WmoFrom(w));
+    clip.pois = ChangeStore::List(j, "pois");
     return clip;
 }
 
@@ -2175,7 +2212,7 @@ void TerrainAdapter::RebuildOverlay()
     for (const ChangeStore::Part& c : ChangeStore::Parts(m_store.Done()))
         if (c.domain == Domain())
         {
-            for (const auto& e : c.data.value("tiles", nlohmann::json::array())) SetTile(c.data.at("map"), e[0], e[1], e[2], true);
+            for (const auto& e : ChangeStore::List(c.data, "tiles")) SetTile(c.data.at("map"), e[0], e[1], e[2], true);
             if (const auto it = c.data.find("global"); it != c.data.end() && it->is_array() && it->size() == 2) SetGlobalWmo(c.data.at("map"), WmoFrom((*it)[1]));
         }
 }
@@ -2294,19 +2331,14 @@ std::optional<Change> TerrainAdapter::AddTiles(const std::vector<NewTile>& tiles
 
 std::set<int> TerrainAdapter::EditedTiles(const std::string& map) const
 {
+    // Each change's tiles are worked out once (the Maps panel asks every frame; walking every pasted vertex each time
+    // made long sessions crawl).
     std::set<int> tiles;
-    for (const ChangeStore::Part& c : ChangeStore::Parts(m_store.Done()))
-        if (c.domain == Domain() && c.data.at("map").get<std::string>() == map)
-        {
-            for (const auto& e : c.data.at("edits")) tiles.insert(TileKey(e[0], e[1]));
-            for (const auto& e : c.data.value("holes", nlohmann::json::array())) tiles.insert(TileKey(e[0], e[1]));
-            for (const auto& e : c.data.value("areas", nlohmann::json::array())) tiles.insert(TileKey(e[0], e[1]));
-            for (const auto& e : c.data.value("colors", nlohmann::json::array())) tiles.insert(TileKey(e[0], e[1]));
-            for (const auto& e : c.data.value("layers", nlohmann::json::array())) tiles.insert(TileKey(e[0], e[1]));
-            for (const auto& e : c.data.value("objects", nlohmann::json::array())) tiles.insert(TileKey(e[0], e[1]));
-            for (const auto& e : c.data.value("liquids", nlohmann::json::array())) tiles.insert(TileKey(e[0], e[1]));
-            for (const auto& e : c.data.value("tiles", nlohmann::json::array())) tiles.insert(TileKey(e[0], e[1]));
-        }
+    for (const Change& c : m_store.Done())
+    {
+        const auto& byMap = CachedTilesOf(c);
+        if (const auto it = byMap.find(map); it != byMap.end()) tiles.insert(it->second.begin(), it->second.end());
+    }
     return tiles;
 }
 
@@ -2342,7 +2374,7 @@ void TerrainAdapter::FindCracks(std::vector<Problem>& problems) const
         if (c.domain == Domain())
         {
             for (const auto& e : c.data.at("edits")) edits[{ c.data.at("map"), TileKey(e[0], e[1]) }][{ size_t(e[2]), size_t(e[3]) }] = e[5];
-            for (const auto& e : c.data.value("tiles", nlohmann::json::array())) whole.insert({ c.data.at("map"), TileKey(e[0], e[1]) });
+            for (const auto& e : ChangeStore::List(c.data, "tiles")) whole.insert({ c.data.at("map"), TileKey(e[0], e[1]) });
         }
     for (const auto& id : whole) edits[id];   // an added tile: all its chunks
     std::map<std::pair<std::string, int>, std::optional<Adt>> tiles;
@@ -2421,14 +2453,14 @@ size_t TerrainAdapter::Export(const fs::path& outDir, std::string& error, std::v
         if (c.domain != Domain()) continue;
         const std::string map = c.data.at("map");
         for (const auto& e : c.data.at("edits")) tiles[{ map, TileKey(e[0], e[1]) }].heights[{ size_t(e[2]), size_t(e[3]) }] = e[5];
-        for (const auto& e : c.data.value("layers", nlohmann::json::array())) tiles[{ map, TileKey(e[0], e[1]) }].layers[size_t(e[2])] = e[4];
-        for (const auto& e : c.data.value("holes", nlohmann::json::array())) tiles[{ map, TileKey(e[0], e[1]) }].holes[size_t(e[2])] = e[4];
-        for (const auto& e : c.data.value("areas", nlohmann::json::array())) tiles[{ map, TileKey(e[0], e[1]) }].areas[size_t(e[2])] = e[4];
-        for (const auto& e : c.data.value("colors", nlohmann::json::array())) tiles[{ map, TileKey(e[0], e[1]) }].colors[size_t(e[2])] = e[4];
-        for (const auto& e : c.data.value("objects", nlohmann::json::array())) tiles[{ map, TileKey(e[0], e[1]) }].objects.push_back(e);
-        for (const auto& e : c.data.value("liquids", nlohmann::json::array())) tiles[{ map, TileKey(e[0], e[1]) }].liquids[size_t(e[2])] = e[4];
+        for (const auto& e : ChangeStore::List(c.data, "layers")) tiles[{ map, TileKey(e[0], e[1]) }].layers[size_t(e[2])] = e[4];
+        for (const auto& e : ChangeStore::List(c.data, "holes")) tiles[{ map, TileKey(e[0], e[1]) }].holes[size_t(e[2])] = e[4];
+        for (const auto& e : ChangeStore::List(c.data, "areas")) tiles[{ map, TileKey(e[0], e[1]) }].areas[size_t(e[2])] = e[4];
+        for (const auto& e : ChangeStore::List(c.data, "colors")) tiles[{ map, TileKey(e[0], e[1]) }].colors[size_t(e[2])] = e[4];
+        for (const auto& e : ChangeStore::List(c.data, "objects")) tiles[{ map, TileKey(e[0], e[1]) }].objects.push_back(e);
+        for (const auto& e : ChangeStore::List(c.data, "liquids")) tiles[{ map, TileKey(e[0], e[1]) }].liquids[size_t(e[2])] = e[4];
         if (c.data.contains("global")) addedMaps.insert(map);   // its WDT carries the moved or replaced WMO
-        for (const auto& e : c.data.value("tiles", nlohmann::json::array()))
+        for (const auto& e : ChangeStore::List(c.data, "tiles"))
         {
             tiles[{ map, TileKey(e[0], e[1]) }];   // read through the overlay: the added tile as converted
             addedMaps.insert(map);

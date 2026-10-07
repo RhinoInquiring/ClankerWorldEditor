@@ -29,6 +29,7 @@
 #include "Lights.hpp"
 #include "Sounds.hpp"
 #include "Roads.hpp"
+#include "ServerData.hpp"
 
 #include <imgui.h>
 #include <imgui_impl_dx11.h>
@@ -1865,6 +1866,32 @@ namespace
         if (!otherWdt) return 1;
         const bool otherBig = WdtBigAlpha(*otherWdt), baseBig = WdtBigAlpha(*wdtOf(base));
         const std::vector<bool> theirs = WdtTiles(*otherWdt), ours = terrain.Present();
+        if (std::getenv("WWE_ALL"))
+        {
+            // Every tile only the other map has, one at a time: how many go in, and why the rest do not.
+            std::map<std::string, std::vector<std::string>> why;
+            size_t added = 0, tried = 0;
+            for (int k = 0; k < 4096; ++k)
+            {
+                if (!theirs[size_t(k)] || ours[size_t(k)]) continue;
+                ++tried;
+                const std::string name = std::to_string(k % 64) + "_" + std::to_string(k / 64);
+                const auto t = TerrainAdapter::ReadNewTile(mpq, other, k % 64, k / 64);
+                if (!t) { why["not readable"].push_back(name); continue; }
+                std::string err;
+                if (auto c = terrain.AddTiles({ *t }, otherBig, err)) { ++added; store.Commit(std::move(*c)); continue; }
+                const std::string reason = err.substr(err.find(':') == std::string::npos ? 0 : err.find(':') + 2);
+                why[reason.substr(0, 90)].push_back(name);
+            }
+            printf("%zu tile(s) only %s has: %zu added\n", tried, other.c_str(), added);
+            for (const auto& [reason, names] : why)
+            {
+                printf("  %zu refused: %s  e.g.", names.size(), reason.c_str());
+                for (size_t i = 0; i < names.size() && i < 6; ++i) printf(" %s", names[i].c_str());
+                printf("\n");
+            }
+            return added == tried ? 0 : 1;
+        }
         // Two tiles only the other map has, side by side when there are such; one with objects first (ids to check).
         std::vector<int> pick;
         auto hasObjects = [&](int k) {
@@ -4093,6 +4120,204 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdLine, int)
         return fly(true) < 50.0f ? 0 : 1;
     }
     if (cmdLine && wcsstr(cmdLine, L"--shade-check")) return ShadeCheck();
+    if (cmdLine && wcsstr(cmdLine, L"--perf-check") && __argc >= 3)
+    {
+        // `--perf-check <data dir>`: what a long compare session costs: 60 blended 4 x 4 pastes on Elwynn, then the work
+        // that runs with that history: the Maps panel's edited tiles (every frame), a tile load replaying the edits,
+        // a fresh object id, and one more paste.
+        setvbuf(stdout, nullptr, _IONBF, 0);
+        char dataDir[1024] = {};
+        WideCharToMultiByte(CP_ACP, 0, __wargv[2], -1, dataDir, sizeof dataDir, nullptr, nullptr);
+        ComPtr<ID3D11Device> device;
+        ComPtr<ID3D11DeviceContext> context;
+        if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &device, nullptr, &context))) return 1;
+        Renderer renderer;
+        std::string error;
+        if (!renderer.Init(device.Get(), context.Get(), error)) return 1;
+        MpqChain mpq;
+        mpq.Open(dataDir);
+        ChangeStore store;
+        TerrainAdapter terrain(mpq, renderer, store);
+        store.Register(terrain);
+        if (!terrain.SetMap("Azeroth", error)) return 1;
+        for (int ty = 47; ty <= 49; ++ty)
+            for (int tx = 31; tx <= 33; ++tx) terrain.LoadNow(tx, ty, error);
+        auto ms = [](auto t0) { return std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - t0).count(); };
+        std::set<ChunkRef> sel;
+        for (int dz = 0; dz < 4; ++dz)
+            for (int dx = 0; dx < 4; ++dx) sel.insert(*terrain.ChunkAtGrid(32 * 16 + 2 + dx, 48 * 16 + 2 + dz));
+        const TerrainClipboard clip = terrain.Copy(sel);
+        float lastPaste = 0;
+        for (int i = 0; i < 61; ++i)
+        {
+            const int gx = 31 * 16 + 2 + (i % 8) * 5, gz = 47 * 16 + 2 + (i / 8) * 5;
+            const auto t0 = std::chrono::steady_clock::now();
+            const PastePlan plan = terrain.PlanPaste(clip, gx, gz, 0.0f, PasteOptions{});
+            if (auto c = terrain.ApplyPlan(plan, "perf paste")) store.Commit(std::move(*c));
+            lastPaste = ms(t0);
+            if (i == 0) printf("first paste: %.1f ms\n", lastPaste);
+        }
+        printf("61st paste: %.1f ms (%zu changes)\n", lastPaste, store.Done().size());
+        auto t0 = std::chrono::steady_clock::now();
+        terrain.EditedTiles("Azeroth");
+        printf("edited tiles, first time (each change's tiles worked out once): %.2f ms\n", ms(t0));
+        t0 = std::chrono::steady_clock::now();
+        for (int i = 0; i < 100; ++i) terrain.EditedTiles("Azeroth");
+        printf("edited tiles after that (Maps panel, every frame): %.3f ms\n", ms(t0) / 100);
+        t0 = std::chrono::steady_clock::now();
+        LoadedTile tile = terrain.Tiles().at(TileKey(32, 48));
+        TerrainAdapter::ReplayEdits(tile, "Azeroth", store.Done());
+        printf("replay every edit on a tile: %.2f ms\n", ms(t0));
+        t0 = std::chrono::steady_clock::now();
+        std::vector<size_t> touching;   // as a tile load does it: only the changes touching the tile
+        for (size_t i = 0; i < store.Done().size(); ++i)
+            if (TerrainAdapter::TilesOf(store.Done()[i])["Azeroth"].count(TileKey(33, 49))) touching.push_back(i);
+        LoadedTile corner = terrain.Tiles().at(TileKey(33, 49));
+        TerrainAdapter::ReplayEdits(corner, "Azeroth", store.Done(), &touching);
+        printf("tile load replay (a tile %zu of the changes touch, index built cold): %.2f ms\n", touching.size(), ms(t0));
+        t0 = std::chrono::steady_clock::now();
+        for (int i = 0; i < 10; ++i) TerrainAdapter::EditHashes(store.Done(), "Azeroth");
+        printf("edit hashes (minimaps, differences): %.2f ms\n", ms(t0) / 10);
+        return 0;
+    }
+    if (cmdLine && wcsstr(cmdLine, L"--serverdata-check") && __argc >= 6)
+    {
+        // `--serverdata-check <data dir> <AC server dir> <map directory> <map id> [x,y ...]`: the server-data job for one map,
+        // installed into a scratch copy of nothing (never the server's own Data), then every file compared with the
+        // server's: an unedited map must come out byte for byte as AzerothCore's full extraction made it.
+        setvbuf(stdout, nullptr, _IONBF, 0);
+        auto arg = [](int i) {
+            char buf[1024] = {};
+            WideCharToMultiByte(CP_ACP, 0, __wargv[i], -1, buf, sizeof buf, nullptr, nullptr);
+            return std::string(buf);
+        };
+        const std::filesystem::path scratch = std::filesystem::temp_directory_path() / "wwe-sd";
+        std::error_code ec;
+        std::filesystem::remove_all(scratch, ec);
+        ServerDataJob::Options o;
+        o.tools = arg(3);
+        o.serverData = scratch / "Data";
+        o.work = std::filesystem::path("C:\\wwe-sd-work");   // short: map_extractor cuts paths at 127 characters
+        o.exported = scratch / "export";
+        o.backup = scratch / "backup";
+        o.layers = { { MpqLayer::Kind::MpqFolder, arg(2) } };
+        ServerMap m;
+        m.directory = arg(4);
+        m.id = uint32_t(std::stoul(arg(5)));
+        for (int i = 6; i < __argc; ++i)
+        {
+            const std::string t = arg(i);
+            m.mmapTiles.insert({ std::stoi(t.substr(0, t.find(','))), std::stoi(t.substr(t.find(',') + 1)) });
+        }
+        // WWE_RAISE=x,y: an "edited" tile in the export (chunk 0 raised 20 yd): its .map must change, the rest stay.
+        std::string raised;
+        if (const char* r = std::getenv("WWE_RAISE"))
+        {
+            const std::string t = r;
+            const std::string x = t.substr(0, t.find(',')), y = t.substr(t.find(',') + 1);
+            MpqChain chain;
+            chain.Open(arg(2));
+            const std::string name = "World\\Maps\\" + m.directory + "\\" + m.directory + "_" + x + "_" + y + ".adt";
+            auto bytes = chain.Read(name);
+            const auto adt = bytes ? ParseAdt(*bytes, false) : std::nullopt;
+            if (!adt) { printf("no tile %s\n", name.c_str()); return 1; }
+            for (size_t j = 0; j < 145; ++j)
+            {
+                float h;
+                std::memcpy(&h, bytes->data() + adt->chunks[0].mcvtOffset + j * 4, 4);
+                h += 20;
+                std::memcpy(bytes->data() + adt->chunks[0].mcvtOffset + j * 4, &h, 4);
+            }
+            const std::filesystem::path dest = o.exported / "World" / "Maps" / m.directory / (m.directory + "_" + x + "_" + y + ".adt");
+            std::filesystem::create_directories(dest.parent_path(), ec);
+            std::ofstream(dest, std::ios::binary).write(reinterpret_cast<const char*>(bytes->data()), std::streamsize(bytes->size()));
+            char file[32];
+            snprintf(file, sizeof file, "%03u%02d%02d.map", m.id, std::stoi(y), std::stoi(x));
+            raised = file;
+        }
+        ServerDataJob job;
+        const auto t0 = std::chrono::steady_clock::now();
+        job.Start(o, { m });
+        while (job.Running() || !job.TakeLog().empty())
+        {
+            for (const std::string& l : job.TakeLog()) printf("  %s\n", l.c_str());
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        }
+        for (const std::string& l : job.TakeLog()) printf("  %s\n", l.c_str());
+        printf("job %s in %.0f s\n", job.Succeeded() ? "succeeded" : "FAILED", std::chrono::duration<float>(std::chrono::steady_clock::now() - t0).count());
+        if (!job.Succeeded()) return 1;
+        // Compare with the server's own files. vmtiles: the extractor numbers model instances in one count over all it
+        // reads, so a run over one map numbers them otherwise than a run over the whole client; compare the spawns
+        // themselves (everything but the number and the tree node index that follows the numbering).
+        auto spawns = [](const std::string& d) {
+            std::multiset<std::string> out;
+            size_t p = 8;
+            uint32_t n = 0;
+            if (d.size() < 12) return out;
+            std::memcpy(&n, d.data() + p, 4);
+            p += 4;
+            for (uint32_t i = 0; i < n && p + 42 <= d.size(); ++i)
+            {
+                uint32_t flags = 0, nameLen = 0;
+                std::memcpy(&flags, d.data() + p, 4);
+                const size_t fixed = 4 + 2 + 4 + 28 + ((flags & 4) ? 24 : 0);   // flags, adtId, ID, pos, rot, scale [, bound]
+                std::memcpy(&nameLen, d.data() + p + fixed, 4);
+                std::string key = d.substr(p, 6) + d.substr(p + 10, fixed - 10) + d.substr(p + fixed + 4, nameLen);
+                out.insert(std::move(key));
+                p += fixed + 4 + nameLen + 4;   // + the node index
+            }
+            return out;
+        };
+        const std::filesystem::path server = std::filesystem::path(arg(3)) / "Data";
+        int problems = 0;
+        for (const char* sub : { "maps", "vmaps", "mmaps" })
+        {
+            size_t same = 0, differ = 0, missing = 0;
+            for (const auto& e : std::filesystem::directory_iterator(o.serverData / sub, ec))
+            {
+                std::ifstream a(e.path(), std::ios::binary), b(server / sub / e.path().filename(), std::ios::binary);
+                if (!b) { ++missing; continue; }
+                const std::string da((std::istreambuf_iterator<char>(a)), {}), db((std::istreambuf_iterator<char>(b)), {});
+                // A .map that differs in a byte or two inside its liquid heights: map_extractor itself is not repeatable
+                // there (run it twice on the same tile and it can differ), so that is not the pipeline's doing.
+                auto liquidNoise = [&]() {
+                    if (e.path().extension() != ".map" || da.size() != db.size() || da.size() < 44) return false;
+                    uint32_t lo = 0, ls = 0;
+                    std::memcpy(&lo, da.data() + 28, 4);
+                    std::memcpy(&ls, da.data() + 32, 4);
+                    size_t count = 0;
+                    for (size_t k = 0; k < da.size(); ++k)
+                        if (da[k] != db[k]) { if (k < lo || k >= size_t(lo) + ls) return false; ++count; }
+                    return count <= 4;
+                };
+                // The edited tile, its .map and its navmesh tile (same name): must have changed.
+                if (!raised.empty() && e.path().stem() == std::filesystem::path(raised).stem())
+                {
+                    printf("    %s (the raised tile): %s\n", e.path().filename().string().c_str(), da != db ? "changed, as it should" : "UNCHANGED");
+                    problems += da == db;
+                    continue;
+                }
+                if (da == db) ++same;
+                else if (e.path().extension() == ".vmtile" && spawns(da) == spawns(db)) ++same;   // renumbered only
+                else if (liquidNoise()) { ++same; printf("    %s: liquid heights differ by a byte (map_extractor is not repeatable there)\n", e.path().filename().string().c_str()); }
+                else
+                {
+                    size_t at = 0, count = 0;
+                    while (at < std::min(da.size(), db.size()) && da[at] == db[at]) ++at;
+                    for (size_t k = 0; k < std::min(da.size(), db.size()); ++k) count += da[k] != db[k];
+                    if (differ < 3)
+                        printf("    differs: %s\\%s (%zu vs %zu bytes, first at %zu, %zu bytes differ)\n", sub, e.path().filename().string().c_str(),
+                               da.size(), db.size(), at, count);
+                    ++differ;
+                }
+            }
+            printf("%-5s: %zu identical to the server's, %zu differ, %zu not in the server's\n", sub, same, differ, missing);
+            problems += int(differ);
+        }
+        std::filesystem::remove_all(scratch, ec);
+        printf("%d problem(s)\n", problems);
+        return problems ? 1 : 0;
+    }
     if (cmdLine && wcsstr(cmdLine, L"--road-check") && __argc >= 3)
     {
         // `--road-check <data dir>`: a Barrens-style road across Kalimdor 40_30: shown over the ground while the tiles keep

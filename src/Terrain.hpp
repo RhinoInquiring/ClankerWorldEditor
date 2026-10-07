@@ -304,7 +304,10 @@ public:
 
     /// Applies the project's terrain changes for `map` (heights, layers, holes, areas, water, objects) to a tile read
     /// from the client, in order; true when objects changed. Static and self-contained: safe on a worker thread.
-    static bool ReplayEdits(LoadedTile& tile, const std::string& map, const std::vector<Change>& done);
+    /// `only`: replay just these changes (by index into `done`; the ones touching the tile), or every change when null.
+    static bool ReplayEdits(LoadedTile& tile, const std::string& map, const std::vector<Change>& done, const std::vector<size_t>* only = nullptr);
+    /// The tiles a change touches, per map (its terrain parts, batches opened).
+    static std::map<std::string, std::set<int>> TilesOf(const Change& change);
 
     /// The project folder: added tiles are kept in its tiles/ and served from its overlay/ (MpqChain::SetOverlay).
     void SetProjectDir(const std::filesystem::path& dir) { m_projectDir = dir; }
@@ -390,6 +393,9 @@ private:
     bool m_painting = false;
     std::map<std::pair<int, int>, nlohmann::json> m_paintBefore;   // (tile, chunk) -> layers before the stroke
     const RoadStore* m_roads = nullptr;
+    /// TilesOf for the project's changes, worked out once each (a change never changes once made).
+    const std::map<std::string, std::set<int>>& CachedTilesOf(const Change& change) const;
+    mutable std::map<std::tuple<uint64_t, int64_t, std::string>, std::map<std::string, std::set<int>>> m_changeTiles;
     /// The roads' lines, sampled once for every chunk drawn (until a road, an edit or the loaded tiles change).
     const std::vector<RoadSample>& RoadLine(const Road& road) const;
     mutable std::map<uint32_t, std::vector<RoadSample>> m_roadLines;

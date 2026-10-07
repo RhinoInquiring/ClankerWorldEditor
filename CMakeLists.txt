@@ -66,6 +66,7 @@ add_executable(wow-world-editor WIN32
     src/Lights.cpp
     src/Sounds.cpp
     src/Roads.cpp
+    src/ServerData.cpp
     src/Assets.cpp
     src/Blend.cpp
     src/Blueprint.cpp

@@ -21,6 +21,7 @@
 #include "Flights.hpp"
 #include "Lights.hpp"
 #include "Sounds.hpp"
+#include "ServerData.hpp"
 #include "Pois.hpp"
 #include "Triggers.hpp"
 
@@ -437,6 +438,19 @@ private:
     /// Adds a light at an editor position: its own colour set copied from the light there now.
     void AddLight(const DirectX::XMFLOAT3& at);
     void FlyToLight(const LightVolume& v);
+
+    // server data: maps, vmaps and mmaps for the maps the project exports, with AzerothCore's tools (AppServer.cpp)
+    ServerDataJob m_serverJob;
+    bool m_showServerData = false;
+    bool m_serverWholeMesh = false;              // rebuild every navmesh tile of the map, not only around the edits
+    std::set<std::string> m_serverSkip;          // maps left out of the next build
+    std::vector<std::string> m_serverJobLog;
+    /// The maps the project exports, with the navmesh tiles to rebuild (edited tiles and their neighbours).
+    std::vector<ServerMap> ServerMapsToBuild() const;
+    void DrawServerDataWindow();
+    void StartServerData();
+    /// Puts back every server file a build replaced (the originals saved the first time).
+    void RestoreServerData();
 
     // terrain: roads, editor-only splines that paint and grade the ground under them (AppRoads.cpp)
     uint32_t m_roadSel = 0;                       // selected road (0: none)
