@@ -48,6 +48,7 @@ add_executable(wow-world-editor WIN32
     src/AppDifferences.cpp
     src/AppFlights.cpp
     src/AppLights.cpp
+    src/AppSound.cpp
     src/Differences.cpp
     src/AppInspect.cpp
     src/AppNpc.cpp
@@ -62,6 +63,7 @@ add_executable(wow-world-editor WIN32
     src/AppZones.cpp
     src/Areas.cpp
     src/Lights.cpp
+    src/Sounds.cpp
     src/Assets.cpp
     src/Blend.cpp
     src/Blueprint.cpp
@@ -87,7 +89,7 @@ add_executable(wow-world-editor WIN32
     src/Triggers.cpp)
 target_compile_definitions(wow-world-editor PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_link_libraries(wow-world-editor PRIVATE imgui StormLib::storm nlohmann_json::nlohmann_json
-    d3d11 d3dcompiler dxgi ole32 shell32 uuid windowscodecs advapi32 winhttp)
+    d3d11 d3dcompiler dxgi ole32 shell32 uuid windowscodecs advapi32 winhttp winmm)
 
 # AzerothCore DB link: the MySQL 8.x client library of a local MySQL install. Delay-loaded, so the editor starts
 # without it; the DLLs are copied next to the exe.

@@ -20,6 +20,7 @@
 #include "Terrain.hpp"
 #include "Flights.hpp"
 #include "Lights.hpp"
+#include "Sounds.hpp"
 #include "Pois.hpp"
 #include "Triggers.hpp"
 
@@ -53,7 +54,7 @@ public:
     bool WantsQuit() const { return m_quit; }
 
 private:
-    enum class Tool { Select, Sculpt, Copy, Holes, Objects, Paint, Creatures, Gameobjects, Zones, Triggers, Pois, Flights, Shade, Lights };
+    enum class Tool { Select, Sculpt, Copy, Holes, Objects, Paint, Creatures, Gameobjects, Zones, Triggers, Pois, Flights, Shade, Lights, Sound };
     /// Tools come in groups (the toolbar's buttons); a group remembers the tool last used in it.
     enum class Group { Terrain, Objects, Units, Regions, Atmosphere };
     static constexpr int kGroups = 5;
@@ -78,6 +79,7 @@ private:
         { Tool::Pois, Group::Regions, "POIs", "J", ImGuiKey_J, "map landmarks, gossip points, .tele bookmarks" },
         { Tool::Flights, Group::Regions, "Flights", "Y", ImGuiKey_Y, "flight masters' nodes and routes" },
         { Tool::Lights, Group::Atmosphere, "Lights", "L", ImGuiKey_L, "light volumes: sky, fog and sun colours by time of day" },
+        { Tool::Sound, Group::Atmosphere, "Sound", "M", ImGuiKey_M, "zone ambience, music and intro; sound emitters" },
     };
     static Group GroupOf(Tool t)
     {
@@ -381,7 +383,7 @@ private:
     /// The active tool's selection, if it has one that can be moved.
     std::optional<Transformable> ActiveTransform();
     /// Whether the tool moves things with the shared controls (1 / 2 / 3 pick the handle, not a sculpt brush).
-    bool TransformTool() const { return m_tool == Tool::Objects || SpawnTool() || m_tool == Tool::Triggers || m_tool == Tool::Pois || m_tool == Tool::Flights || m_tool == Tool::Lights; }
+    bool TransformTool() const { return m_tool == Tool::Objects || SpawnTool() || m_tool == Tool::Triggers || m_tool == Tool::Pois || m_tool == Tool::Flights || m_tool == Tool::Lights || m_tool == Tool::Sound; }
     /// Move / rotate / scale handles on the selection; true while the mouse is over or dragging one.
     bool UpdateGizmo(const ImVec2& origin, const ImVec2& size);
     /// begin, preview(delta), commit in one go: keys, Alt+click and typed values.
@@ -403,6 +405,7 @@ private:
     std::optional<Transformable> PathPointTransform();
     std::optional<Transformable> FlightTransform();
     std::optional<Transformable> LightTransform();
+    std::optional<Transformable> SoundTransform();
 
     // atmosphere: light volumes (Light.dbc) and their colour, fog and sky sets (AppLights.cpp)
     bool m_gameLight = false;          // viewport shows the game's light at the camera (View menu, Lights tool)
@@ -431,6 +434,25 @@ private:
     /// Adds a light at an editor position: its own colour set copied from the light there now.
     void AddLight(const DirectX::XMFLOAT3& at);
     void FlyToLight(const LightVolume& v);
+
+    // atmosphere: zone sound (AreaTable ambience / music / intro) and sound emitters (SoundEmitters.dbc) (AppSound.cpp)
+    bool m_soundZone = false;          // Zone sound tab edits the zone (true) or the area under the camera (false)
+    uint32_t m_emitterSel = 0;
+    std::optional<uint32_t> m_emitterHover;
+    bool m_emitterPlace = false;       // the next click on the ground adds an emitter with m_emitterSound
+    uint32_t m_emitterSound = 0;       // SoundEntries id for new emitters
+    SoundEmitter m_emitterStart;       // the selected emitter when a move began
+    SoundEmitter m_emitterEdit;        // ... and as the move shows it
+    std::vector<std::pair<uint32_t, std::string>> m_soundNames;   // every SoundEntries row (id, name), read once for the pickers
+    std::vector<SoundEmitter> EmittersOnMap() const;
+    void DrawSoundPanel(float width);
+    void SoundViewport(const ImVec2& origin, const ImVec2& size, DirectX::FXMMATRIX viewProj);
+    void BuildSoundOverlay(std::vector<LineVertex>& lines) const;
+    /// A searchable list of every SoundEntries row with a play button each; true when one was picked into `id`.
+    bool SoundPicker(const char* label, uint32_t& id, float width);
+    /// Plays a SoundEntries row (its first file), or logs why it cannot.
+    void PlayEntry(uint32_t id);
+    void CommitEmitter(uint32_t id, const std::optional<SoundEmitter>& after, const std::string& label);
 
     // regions: flight paths: taxi nodes, the paths between them and their points (AppFlights.cpp)
     void DrawFlightsPanel(float width);
@@ -488,6 +510,7 @@ private:
     Renderer m_renderer;
     ChangeStore m_store;
     Lights m_lights{ m_mpq, m_store };   // atmosphere tables (AppLights.cpp)
+    Sounds m_sounds{ m_mpq, m_store };   // sound tables (AppSound.cpp)
     TerrainAdapter m_terrain{ m_mpq, m_renderer, m_store };
     ModelRenderer m_models;
     ModelRenderer::DrawSettings m_modelSettings;
@@ -923,7 +946,8 @@ private:
     std::vector<DbcTable*> DbcTables()
     {
         return { &m_areas, &m_wmoAreas, &m_worldMaps, &m_mapOverlays, &m_triggers, &m_mapRows, &m_areaPois, &m_taxiNodes, &m_taxiPaths, &m_taxiPoints,
-                 &m_displayRows, &m_extraRows, &m_lights.light, &m_lights.params, &m_lights.intBands, &m_lights.floatBands, &m_lights.skyboxes };
+                 &m_displayRows, &m_extraRows, &m_lights.light, &m_lights.params, &m_lights.intBands, &m_lights.floatBands, &m_lights.skyboxes,
+                 &m_sounds.entries, &m_sounds.ambience, &m_sounds.music, &m_sounds.intro, &m_sounds.emitters };
     }
     uint32_t m_flightNode = 0, m_flightPath = 0;         // selected node, or selected path (one at a time)
     std::optional<size_t> m_flightPoint;                 // selected point of the selected path (index)

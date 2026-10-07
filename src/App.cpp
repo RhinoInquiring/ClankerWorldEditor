@@ -2387,6 +2387,8 @@ void App::HandleShortcuts()
         else if (m_tool == Tool::Flights && (m_flightNode || m_flightPath)) { m_flightNode = m_flightPath = 0; m_flightPoint.reset(); }
         else if (m_lightPlace) m_lightPlace = false;
         else if (m_tool == Tool::Lights && m_lightSel) m_lightSel = 0;
+        else if (m_emitterPlace) m_emitterPlace = false;
+        else if (m_tool == Tool::Sound && m_emitterSel) m_emitterSel = 0;
         else if (m_comparing) StopCompare();          // the map comes back as it is
         else if (!m_diffPending.empty()) { EndNewTiles(); m_diffPending.clear(); m_diffActive.clear(); }   // a review still on its way
         else if (m_pin) CancelPin();                  // first Esc: unpin, terrain goes back
@@ -2671,6 +2673,11 @@ void App::BuildOverlay(std::vector<LineVertex>& lines) const
         BuildLightOverlay(lines);
         return;
     }
+    if (m_tool == Tool::Sound)
+    {
+        BuildSoundOverlay(lines);
+        return;
+    }
     if (m_tool == Tool::Flights)
     {
         BuildFlightOverlay(lines);
@@ -2876,7 +2883,7 @@ void App::DrawViewport(float dt)
         }
         // Spawns, paths, triggers, POIs and flight nodes stand on WMO floors too (bridges, buildings, dungeons): the nearer
         // of the terrain and a WMO under the cursor. Terrain tools keep aiming at the terrain.
-        if (SpawnTool() || m_tool == Tool::Triggers || m_tool == Tool::Pois || m_tool == Tool::Flights || m_tool == Tool::Lights)
+        if (SpawnTool() || m_tool == Tool::Triggers || m_tool == Tool::Pois || m_tool == Tool::Flights || m_tool == Tool::Lights || m_tool == Tool::Sound)
         {
             ModelRenderer::DrawSettings wmos = m_modelSettings;
             wmos.doodads = false;
@@ -2997,6 +3004,10 @@ void App::DrawViewport(float dt)
     else if (m_tool == Tool::Lights)
     {
         LightsViewport(origin, size, viewProj);
+    }
+    else if (m_tool == Tool::Sound)
+    {
+        SoundViewport(origin, size, viewProj);
     }
     else if (m_tool == Tool::Objects)
     {
@@ -3186,7 +3197,7 @@ void App::DrawViewport(float dt)
     const ImVec2 pad{ origin.x + 12, origin.y + 10 };
     if (!m_terrain.Map().empty())
     {
-        const char* tools[] = { "Select", "Sculpt", "Copy", "Holes", "Objects", "Paint", "Creatures", "Gameobjects", "Zones", "Triggers", "POIs", "Flights", "Shade", "Lights" };
+        const char* tools[] = { "Select", "Sculpt", "Copy", "Holes", "Objects", "Paint", "Creatures", "Gameobjects", "Zones", "Triggers", "POIs", "Flights", "Shade", "Lights", "Sound" };
         const char* modes[] = { "Raise", "Lower", "Flatten", "Smooth" };
         char caption[400];
         if (m_tool == Tool::Sculpt)
@@ -3218,6 +3229,8 @@ void App::DrawViewport(float dt)
                                     "click the ground: move the point there   Esc: stop" };
             snprintf(caption, sizeof caption, "%s   World > POIs   %s", m_terrain.Map().c_str(), picks[int(m_poiPick)]);
         }
+        else if (m_tool == Tool::Sound && m_emitterPlace)
+            snprintf(caption, sizeof caption, "%s   World > Sound   click the ground: add an emitter   Shift+click: add and keep going   Esc: stop", m_terrain.Map().c_str());
         else if (m_tool == Tool::Lights && m_lightPlace)
             snprintf(caption, sizeof caption, "%s   World > Lights   click the ground: add a light   Shift+click: add and keep going   Esc: stop", m_terrain.Map().c_str());
         else if (m_tool == Tool::Objects && m_armed)
@@ -3228,7 +3241,7 @@ void App::DrawViewport(float dt)
             // Every tool that moves things: the same caption and keys.
             const size_t selected = m_tool == Tool::Objects ? m_objSel.size() : SpawnTool() ? m_spawnSel.size()
                                   : m_tool == Tool::Triggers ? size_t(m_triggerSel != 0) : m_tool == Tool::Flights ? size_t(m_flightNode || m_flightPoint)
-                                  : m_tool == Tool::Lights ? size_t(m_lightSel != 0) : size_t(m_poiSel != 0);
+                                  : m_tool == Tool::Lights ? size_t(m_lightSel != 0) : m_tool == Tool::Sound ? size_t(m_emitterSel != 0) : size_t(m_poiSel != 0);
             snprintf(caption, sizeof caption, "%s   World > %s > %s (%s)   %zu selected   %s", m_terrain.Map().c_str(), tools[int(m_tool)],
                      m_gizmo == Gizmo::Move ? "Move" : m_gizmo == Gizmo::Rotate ? "Rotate" : "Scale", m_gizmoLocal ? "local" : "world", selected,
                      TransformHint().c_str());
@@ -3346,6 +3359,7 @@ void App::DrawToolsPanel()
     if (m_tool == Tool::Pois) DrawPoisPanel(w);
     if (m_tool == Tool::Flights) DrawFlightsPanel(w);
     if (m_tool == Tool::Lights) DrawLightsPanel(w);
+    if (m_tool == Tool::Sound) DrawSoundPanel(w);
     if (SpawnTool()) DrawSpawnsPanel(w);
     if (m_tool == Tool::Objects && Section("Objects"))
     {

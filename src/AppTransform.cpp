@@ -90,6 +90,7 @@ std::optional<App::Transformable> App::ActiveTransform()
     if (m_tool == Tool::Pois) return PoiTransform();
     if (m_tool == Tool::Flights) return FlightTransform();
     if (m_tool == Tool::Lights) return LightTransform();
+    if (m_tool == Tool::Sound) return SoundTransform();
     return std::nullopt;
 }
 
@@ -262,6 +263,39 @@ std::optional<App::Transformable> App::LightTransform()
         LightDraftCommit();
         CommitDbc({ { &m_lights.light, v.id, nullptr } }, "Delete light " + std::to_string(v.id), "export, then restart the client (light DBCs)");
         m_lightSel = 0;
+    };
+    return t;
+}
+
+std::optional<App::Transformable> App::SoundTransform()
+{
+    if (!m_emitterSel || !m_project) return std::nullopt;
+    const nlohmann::json& row = m_sounds.emitters.Row(m_emitterSel);
+    if (row.is_null()) return std::nullopt;
+    const SoundEmitter e = m_emitterEdit.id == m_emitterSel ? m_emitterEdit : Sounds::FromRow(row);
+    Transformable t;
+    t.rotate = false;
+    t.limits = "An emitter is a point: no turn or scale.";
+    t.frame = Store(XMMatrixTranslation(e.pos.x, e.pos.y, e.pos.z));
+    t.what = "emitter " + std::to_string(e.id);
+    t.begin = [this, e] { m_emitterStart = m_emitterEdit = e; };
+    t.preview = [this](FXMMATRIX delta) {
+        m_emitterEdit = m_emitterStart;
+        m_emitterEdit.pos = Moved(m_emitterStart.pos, delta);
+    };
+    t.commit = [this](const std::string& label) {
+        CommitEmitter(m_emitterEdit.id, m_emitterEdit, label);
+        m_emitterEdit = {};
+    };
+    t.cancel = [this] { m_emitterEdit = {}; };
+    t.ground = [this, e] {
+        SoundEmitter g = e;
+        if (const auto h = GroundAt(g.pos.x, g.pos.z, g.pos.y + 1000)) g.pos.y = *h + 2;
+        CommitEmitter(g.id, g, "Drop sound emitter " + std::to_string(g.id) + " to the ground");
+    };
+    t.remove = [this, e] {
+        CommitEmitter(e.id, std::nullopt, "Delete sound emitter " + std::to_string(e.id));
+        m_emitterSel = 0;
     };
     return t;
 }

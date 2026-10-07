@@ -499,7 +499,7 @@ void App::DrawProjectSettingsModal()
             if (!r.first || r.last < r.first) valid = false;
             ImGui::PopID();
         }
-        for (const char* kind : { "area.id", "wmoarea.id", "worldmaparea.id", "worldmapoverlay.id", "areatrigger.id", "light.id", "lightparams.id" })   // DBC ids live in the client's files, not the database
+        for (const char* kind : { "area.id", "wmoarea.id", "worldmaparea.id", "worldmapoverlay.id", "areatrigger.id", "light.id", "lightparams.id", "soundemitter.id" })   // DBC ids live in the client's files, not the database
         {
             Project::IdRange& r = m_settingsRanges[kind];
             ImGui::PushID(kind);

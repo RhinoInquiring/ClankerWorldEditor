@@ -27,6 +27,7 @@
 #include "Pois.hpp"
 #include "Triggers.hpp"
 #include "Lights.hpp"
+#include "Sounds.hpp"
 
 #include <imgui.h>
 #include <imgui_impl_dx11.h>
@@ -36,6 +37,7 @@
 #include <dxgi.h>
 #include <objbase.h>
 #include <windows.h>
+#include <mmsystem.h>
 #include <wincodec.h>
 
 #include <algorithm>
@@ -4028,6 +4030,81 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdLine, int)
         return fly(true) < 50.0f ? 0 : 1;
     }
     if (cmdLine && wcsstr(cmdLine, L"--shade-check")) return ShadeCheck();
+    if (cmdLine && wcsstr(cmdLine, L"--sound-check") && __argc >= 3)
+    {
+        // `--sound-check <data dir>`: the sound tables on the client's files: sizes, Elwynn's ambience / music / intro
+        // resolved to names and files that exist, and where emitters stand (they must land on their map's terrain).
+        setvbuf(stdout, nullptr, _IONBF, 0);
+        char dataDir[1024] = {};
+        WideCharToMultiByte(CP_ACP, 0, __wargv[2], -1, dataDir, sizeof dataDir, nullptr, nullptr);
+        MpqChain mpq;
+        mpq.Open(dataDir);
+        ChangeStore store;
+        Sounds sounds(mpq, store);
+        AreaAdapter areas(mpq, store);
+        int problems = 0;
+        for (DbcTable* t : sounds.Tables())
+        {
+            const auto rows = t->Rows();
+            printf("%-20s %5zu rows, max id %u\n", t->Name().c_str(), rows.size(), rows.empty() ? 0u : rows.rbegin()->first);
+            if (rows.empty()) ++problems;
+        }
+        auto show = [&](const char* what, uint32_t entry) {
+            const auto s = sounds.Entry(entry);
+            size_t found = 0;
+            if (s)
+                for (const std::string& f : s->files) found += mpq.Read(f).has_value();
+            printf("  %-14s entry %5u %-30s %zu/%zu file(s) found%s%s\n", what, entry, s ? s->name.c_str() : "(none)", found, s ? s->files.size() : 0,
+                   s && !s->files.empty() ? ", first " : "", s && !s->files.empty() ? s->files[0].c_str() : "");
+            if (entry && (!s || (s->files.size() && !found))) ++problems;
+        };
+        const nlohmann::json elwynn = areas.Row(12);
+        const uint32_t amb = elwynn.value("AmbienceID", 0u), mus = elwynn.value("ZoneMusic", 0u), intro = elwynn.value("IntroSound", 0u);
+        printf("Elwynn Forest: ambience %u, music %u, intro %u\n", amb, mus, intro);
+        const nlohmann::json& a = sounds.ambience.Row(amb);
+        show("ambience day", a.value("AmbienceID[0]", 0u));
+        show("ambience night", a.value("AmbienceID[1]", 0u));
+        const nlohmann::json& m = sounds.music.Row(mus);
+        printf("  music set \"%s\", silence %u-%u ms\n", m.value("SetName", std::string()).c_str(), m.value("SilenceIntervalMin[0]", 0u), m.value("SilenceIntervalMax[0]", 0u));
+        show("music day", m.value("Sounds[0]", 0u));
+        show("music night", m.value("Sounds[1]", 0u));
+        show("intro", intro && !sounds.intro.Row(intro).is_null() ? sounds.intro.Row(intro).value("SoundID", 0u) : 0u);
+        // Emitters: which table their sound id names, and their positions against the map's tiles.
+        size_t inEntries = 0, onTile = 0, azeroth = 0;
+        const auto wdt = mpq.Read("World\\Maps\\Azeroth\\Azeroth.wdt");
+        const auto present = wdt ? WdtTiles(*wdt) : std::vector<bool>{};
+        for (const auto& [id, row] : sounds.emitters.Rows())
+        {
+            const uint32_t s = row.value("SoundEntryAdvancedID", 0u);
+            inEntries += !sounds.entries.Row(s).is_null();
+            const SoundEmitter e = Sounds::FromRow(row);
+            if (e.map != 0) continue;
+            ++azeroth;
+            const int tx = int(e.pos.x / kTileSize), ty = int(e.pos.z / kTileSize);
+            if (tx >= 0 && ty >= 0 && tx < 64 && ty < 64 && present.size() == 4096 && present[size_t(ty * 64 + tx)]) ++onTile;
+            if (azeroth <= 3) printf("  emitter %u \"%s\" editor %.0f %.0f %.0f (tile %d_%d)\n", id, e.name.c_str(), e.pos.x, e.pos.y, e.pos.z, tx, ty);
+        }
+        printf("emitters: %zu/%zu name a SoundEntries row; Azeroth %zu, %zu on a present tile\n", inEntries, sounds.emitters.Rows().size(), azeroth, onTile);
+        // The player opens both kinds the sound files come in (opened and closed, not played: no noise).
+        for (const char* path : { "Sound\\Ambience\\ZoneAmbience\\ForestNormalDay.wav", "Sound\\Music\\ZoneMusic\\Forest\\DayForest01.mp3" })
+        {
+            const auto bytes = mpq.Read(path);
+            const std::filesystem::path temp = std::filesystem::temp_directory_path() / ("wwe-sound-check" + std::filesystem::path(path).extension().string());
+            if (bytes) std::ofstream(temp, std::ios::binary).write(reinterpret_cast<const char*>(bytes->data()), std::streamsize(bytes->size()));
+            const std::wstring open = L"open \"" + temp.wstring() + L"\" type mpegvideo alias wwe_check";
+            const MCIERROR err = bytes ? mciSendStringW(open.c_str(), nullptr, 0, nullptr) : MCIERROR(1);
+            wchar_t length[64] = {};
+            if (!err) mciSendStringW(L"status wwe_check length", length, 64, nullptr);
+            mciSendStringW(L"close wwe_check", nullptr, 0, nullptr);
+            std::error_code ec;
+            std::filesystem::remove(temp, ec);
+            printf("player: %s %s (length %ls ms)\n", path, err ? "CANNOT OPEN" : "opens", length);
+            if (err) ++problems;
+        }
+        if ((azeroth && onTile * 10 < azeroth * 9) || inEntries != sounds.emitters.Rows().size()) ++problems;
+        printf("%d problem(s)\n", problems);
+        return problems ? 1 : 0;
+    }
     if (cmdLine && wcsstr(cmdLine, L"--light-check") && __argc >= 3)
     {
         // `--light-check <data dir>`: the light tables on the client's files: sizes, Goldshire at noon and midnight
