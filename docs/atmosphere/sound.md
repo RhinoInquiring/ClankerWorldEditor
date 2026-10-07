@@ -1,4 +1,4 @@
-# Sound
+# Sound and weather
 
 [Back to the README](../../README.md) · Atmosphere group (F6) · tool key **M**
 
@@ -15,6 +15,17 @@ The tab shows the area under the camera and, for a sub-area, its zone; choose wh
 Pick from the client's sets; **Play** previews a set's day or night sound (its first file), **Stop playing** stops it.
 None on a sub-area means the client plays the zone's. Rooms of buildings (WMOAreaTable) have their own sound fields;
 they are not edited here yet.
+
+## Weather
+
+The server rolls weather per zone from `game_weather`: for each season, the chance of rain, snow and sandstorm (the rest
+is clear). The tab shows the zone under the camera; **Give this zone weather** adds its row, the sliders set the
+chances (a season's total turns red past 100%), **Remove** takes the row out. Seasons follow the server's calendar,
+spring from March 20.
+
+Needs the world database (File > Server setup); changes write live, with undo. The worldserver reads `game_weather`
+only at start: restart it, then try a zone in game with `.wchange 1 0.5` (1 rain, 2 snow, 3 sandstorm; grade 0 to 1).
+`.wchange` only works in zones that had weather when the server started.
 
 ## Emitters
 

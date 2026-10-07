@@ -95,7 +95,7 @@ drawn into place. Right: Blizzard's baked skins (left column) beside the editor'
 | Feature | What it does |
 | --- | --- |
 | [Lights](docs/atmosphere/lights.md) | Light volumes (Light.dbc) as spheres on the map; sky, fog, sun and water colours by time of day; game lighting in the viewport |
-| [Sound](docs/atmosphere/sound.md) | A zone's ambience, music and intro, with previews; sound emitters placed in the world |
+| [Sound and weather](docs/atmosphere/sound.md) | A zone's ambience, music and intro, with previews; its rain, snow and sandstorm chances per season; sound emitters placed in the world |
 
 ### Map versions
 | Feature | What it does |

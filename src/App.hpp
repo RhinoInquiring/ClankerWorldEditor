@@ -79,7 +79,7 @@ private:
         { Tool::Pois, Group::Regions, "POIs", "J", ImGuiKey_J, "map landmarks, gossip points, .tele bookmarks" },
         { Tool::Flights, Group::Regions, "Flights", "Y", ImGuiKey_Y, "flight masters' nodes and routes" },
         { Tool::Lights, Group::Atmosphere, "Lights", "L", ImGuiKey_L, "light volumes: sky, fog and sun colours by time of day" },
-        { Tool::Sound, Group::Atmosphere, "Sound", "M", ImGuiKey_M, "zone ambience, music and intro; sound emitters" },
+        { Tool::Sound, Group::Atmosphere, "Sound", "M", ImGuiKey_M, "zone ambience, music, intro and weather; sound emitters" },
     };
     static Group GroupOf(Tool t)
     {
@@ -903,10 +903,13 @@ private:
                      m_gossipConditions{ m_store, "conditions", "SourceGroup", "SourceEntry", "SourceTypeOrReferenceId IN (14, 15)", "gossip" },
                      m_creatureTexts{ m_store, "creature_text", "CreatureID", "GroupID" };
     /// Every world-table adapter: registered, connected, synced, exported and checked alike.
+    TableRowsAdapter m_weather{ m_store, "game_weather", "zone" };   // weather chances per zone and season (Sound tool, Weather tab)
+    nlohmann::json m_weatherEdit;      // the zone's row while a slider is dragged
     std::vector<TableRowsAdapter*> TableAdapters()
     {
         return { &m_waypoints, &m_addons, &m_triggerRows, &m_teleports, &m_instances, &m_gossipPois, &m_teles, &m_npcTemplates, &m_npcModels, &m_npcEquips,
-                 &m_lootDrops, &m_lootPickpocket, &m_lootSkinning, &m_gossipMenus, &m_gossipOptions, &m_npcTexts, &m_gossipConditions, &m_creatureTexts };
+                 &m_lootDrops, &m_lootPickpocket, &m_lootSkinning, &m_gossipMenus, &m_gossipOptions, &m_npcTexts, &m_gossipConditions, &m_creatureTexts,
+                 &m_weather };
     }
     PoiKind m_poiKind = PoiKind::MapIcon;                 // POIs tool: the kind listed, placed and selected
     uint32_t m_poiSel = 0;                                // selected point id of m_poiKind (0 = none)

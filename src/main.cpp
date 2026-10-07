@@ -3433,6 +3433,46 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdLine, int)
         printf("%s\n", problems ? "FAILED" : "all passed");
         return problems ? 1 : 0;
     }
+    if (cmdLine && wcsstr(cmdLine, L"--weather-check") && __argc >= 3)
+    {
+        // `--weather-check <AC server dir>`: game_weather through the editor's adapter on the real world database: read
+        // Elwynn's row, change one chance, read it back from the database, undo, and confirm the row is as it was.
+        std::string password, note, error;
+        setvbuf(stdout, nullptr, _IONBF, 0);
+        const auto profile = ServerProfile::FromWorldserverConf(std::filesystem::path(__wargv[2]), password, note);
+        if (!profile) { printf("%s\n", note.c_str()); return 1; }
+        Db db;
+        if (!db.Connect(profile->dbHost, profile->dbPort, profile->dbUser, password, profile->worldDb, error)) { printf("db: %s\n", error.c_str()); return 1; }
+        try   // the adapter holds columns as text: a number read as one throws
+        {
+            ChangeStore store;
+            TableRowsAdapter weather(store, "game_weather", "zone");
+            store.Register(weather);
+            weather.SetDb(&db);
+            auto dbRow = [&]() {
+                auto rows = db.QueryRows("SELECT * FROM game_weather WHERE zone = 12", error);
+                return rows && !rows->empty() ? (*rows)[0] : nlohmann::json();
+            };
+            auto num = [](const nlohmann::json& r, const char* c) { return r.is_object() && r.contains(c) ? std::atoi(r.at(c).get<std::string>().c_str()) : -1; };
+            const nlohmann::json original = dbRow();
+            const auto rows = weather.Rows(12);
+            printf("Elwynn (12): %zu row(s), spring rain %d%%\n", rows.size(), rows.empty() ? -1 : num(rows[0], "spring_rain_chance"));
+            if (rows.empty()) { printf("no stock weather row for Elwynn\n"); return 1; }
+            nlohmann::json after = rows[0];
+            const int want = num(rows[0], "spring_rain_chance") == 50 ? 49 : 50;
+            after["spring_rain_chance"] = std::to_string(want);
+            Change c = weather.MakeChange(12, rows, { after }, "weather check");
+            weather.Apply(c);
+            store.Commit(c);
+            const int written = num(dbRow(), "spring_rain_chance");
+            store.Undo();
+            const bool restored = dbRow() == original;
+            printf("written %d (want %d), undo restores the row: %s%s\n", written, want, restored ? "yes" : "NO",
+                   weather.LastError().empty() ? "" : (", error: " + weather.LastError()).c_str());
+            return written == want && restored ? 0 : 1;
+        }
+        catch (const std::exception& e) { printf("exception: %s\n", e.what()); return 1; }
+    }
     if (cmdLine && wcsstr(cmdLine, L"--spawn-check") && __argc >= 3)
     {
         // `--spawn-check <AC server dir>`: the creature and gameobject adapters against the real world database, cleaning up after

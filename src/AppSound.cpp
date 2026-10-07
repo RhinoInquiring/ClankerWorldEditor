@@ -24,6 +24,14 @@ std::optional<ImVec2> ToScreen(FXMMATRIX viewProj, const XMFLOAT3& p, const ImVe
     return ImVec2{ origin.x + (XMVectorGetX(c) / w * 0.5f + 0.5f) * size.x, origin.y + (0.5f - XMVectorGetY(c) / w * 0.5f) * size.y };
 }
 
+/// A database column as a number: the table adapters hold every column as text.
+int Num(const nlohmann::json& row, const char* column)
+{
+    const auto it = row.find(column);
+    if (it == row.end() || it->is_null()) return 0;
+    return it->is_string() ? std::atoi(it->get<std::string>().c_str()) : it->get<int>();
+}
+
 bool Contains(const std::string& text, const std::string& filter)
 {
     if (filter.empty()) return true;
@@ -275,6 +283,90 @@ void App::DrawSoundPanel(float w)
             }
         }
         if (ImGui::Button("Stop playing", { w, 0 })) StopSound();
+    }
+
+    if (Section("Weather"))
+    {
+        // game_weather: chances per season for the zone under the camera (the server rolls weather per zone).
+        uint32_t zone = 0;
+        if (const auto ref = m_terrain.ChunkAtGrid(int(std::floor(m_camera.pos.x / kChunkSize)), int(std::floor(m_camera.pos.z / kChunkSize))))
+            if (const AdtChunk* c = m_terrain.Chunk(*ref); c && c->areaId) zone = m_areas.ZoneOf(c->areaId);
+        if (!m_weather.Connected())
+            ImGui::TextColored(kQuiet, "Connect the world database (File > Server setup):\nweather lives in game_weather.");
+        else if (!zone)
+            ImGui::TextColored(kQuiet, "Fly over the terrain: the weather of the zone\nunder the camera shows here.");
+        else
+        {
+            ImGui::Text("Zone: %s", AreaLabel(zone).c_str());
+            const auto rows = m_weather.Rows(zone);
+            auto commit = [&](const std::vector<nlohmann::json>& after, const std::string& label) {
+                Change c = m_weather.MakeChange(zone, rows, after, label);
+                m_weather.Apply(c);
+                m_store.Commit(std::move(c));
+                if (!m_weather.LastError().empty()) Log("%s", m_weather.LastError().c_str());
+                else Log("%s: restart the worldserver (it reads game_weather only at start).", label.c_str());
+            };
+            ImGui::BeginDisabled(!m_project);
+            if (rows.empty())
+            {
+                ImGui::TextColored(kQuiet, "This zone has no weather: always clear.");
+                if (ImGui::Button("Give this zone weather", { w, 0 }))
+                {
+                    nlohmann::json row = { { "zone", std::to_string(zone) }, { "ScriptName", "" } };
+                    for (const char* s : { "spring", "summer", "fall", "winter" })
+                        for (const char* k : { "rain", "snow", "storm" }) row[std::string(s) + "_" + k + "_chance"] = "0";
+                    commit({ row }, "Weather for " + AreaLabel(zone));
+                }
+            }
+            else
+            {
+                // Follows the table (undo, another zone) except while a slider is held.
+                if (!m_weatherEdit.is_object() || Num(m_weatherEdit, "zone") != int(zone) || !ImGui::IsAnyItemActive()) m_weatherEdit = rows.front();
+                const char* seasons[4] = { "spring", "summer", "fall", "winter" };
+                const char* kinds[3] = { "rain", "snow", "storm" };
+                bool done = false;
+                if (ImGui::BeginTable("weather", 5, ImGuiTableFlags_SizingStretchSame))
+                {
+                    ImGui::TableSetupColumn("Season", ImGuiTableColumnFlags_WidthFixed, 56);
+                    ImGui::TableSetupColumn("Rain %");
+                    ImGui::TableSetupColumn("Snow %");
+                    ImGui::TableSetupColumn("Sandstorm %");
+                    ImGui::TableSetupColumn("Clear", ImGuiTableColumnFlags_WidthFixed, 40);
+                    ImGui::TableHeadersRow();
+                    for (const char* s : seasons)
+                    {
+                        ImGui::TableNextRow();
+                        ImGui::TableNextColumn();
+                        ImGui::TextUnformatted(s);
+                        int sum = 0;
+                        for (const char* k : kinds)
+                        {
+                            const std::string field = std::string(s) + "_" + k + "_chance";
+                            int v = Num(m_weatherEdit, field.c_str());
+                            ImGui::TableNextColumn();
+                            ImGui::SetNextItemWidth(-1);
+                            if (ImGui::SliderInt(("##" + field).c_str(), &v, 0, 100, "%d")) m_weatherEdit[field] = std::to_string(v);
+                            done |= ImGui::IsItemDeactivatedAfterEdit();
+                            sum += v;
+                        }
+                        ImGui::TableNextColumn();
+                        if (sum > 100) ImGui::TextColored({ 1.0f, 0.4f, 0.35f, 1 }, "%d%%", 100 - sum);
+                        else ImGui::TextColored(kQuiet, "%d%%", 100 - sum);
+                    }
+                    ImGui::EndTable();
+                }
+                if (done && m_weatherEdit != rows.front()) commit({ m_weatherEdit }, "Weather of " + AreaLabel(zone));
+                ImGui::TextColored(kQuiet, "Each season's chances add up to at most 100%%;\nthe rest is clear weather.");
+                if (ImGui::Button("Remove this zone's weather", { w, 0 }))
+                {
+                    commit({}, "Remove the weather of " + AreaLabel(zone));
+                    m_weatherEdit = nlohmann::json();
+                }
+            }
+            ImGui::EndDisabled();
+            ImGui::TextColored(kQuiet, "Seasons follow the server's calendar (spring\nfrom March 20). Try it in game: .wchange 1 0.5\n"
+                                       "(1 rain, 2 snow, 3 sandstorm; grade 0-1).");
+        }
     }
 
     if (Section("Emitters"))
