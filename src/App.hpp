@@ -56,7 +56,7 @@ public:
     bool WantsQuit() const { return m_quit; }
 
 private:
-    enum class Tool { Select, Sculpt, Copy, Holes, Objects, Paint, Creatures, Gameobjects, Zones, Triggers, Pois, Flights, Shade, Lights, Sound, Roads };
+    enum class Tool { Select, Sculpt, Copy, Holes, Objects, Paint, Creatures, Gameobjects, Zones, Triggers, Pois, Flights, Shade, Lights, Sound, Roads, Water };
     /// Tools come in groups (the toolbar's buttons); a group remembers the tool last used in it.
     enum class Group { Terrain, Objects, Units, Regions, Atmosphere };
     static constexpr int kGroups = 5;
@@ -72,6 +72,7 @@ private:
         { Tool::Paint, Group::Terrain, "Paint", "T", ImGuiKey_T, "ground textures" },
         { Tool::Shade, Group::Terrain, "Shade", "U", ImGuiKey_U, "vertex colours (maps with vertex shading)" },
         { Tool::Holes, Group::Terrain, "Holes", "H", ImGuiKey_H, "cut and fill terrain holes" },
+        { Tool::Water, Group::Terrain, "Water", "", ImGuiKey_None, "paint, level and remove water, magma and slime" },
         { Tool::Roads, Group::Terrain, "Roads", "", ImGuiKey_None, "roads and paths along splines: paint and grade the ground" },
         { Tool::Copy, Group::Terrain, "Copy", "C", ImGuiKey_C, "copy, paste and blend terrain" },
         { Tool::Objects, Group::Objects, "Place and edit", "O", ImGuiKey_O, "doodads and WMOs" },
@@ -97,7 +98,11 @@ private:
     {
         DirectX::XMFLOAT3 pos{ 0, 0, 0 };
         float yaw = 0, pitch = -0.5f, speed = 80.0f;
+        /// Top-down: looks straight down, yaw turns the map. pitch keeps the angle features set (FlyTo and the
+        /// like), so a move they make can be followed to the spot they aimed at.
+        bool topDown = false;
         DirectX::XMVECTOR Forward() const;
+        DirectX::XMVECTOR Heading() const;   // level direction of yaw
         DirectX::XMMATRIX View() const;
     };
 
@@ -126,6 +131,7 @@ private:
     bool m_placementShown = false;   // the Placement tab existed last frame (it comes forward when placing starts)
     std::set<uint32_t> m_spawnSelShown;   // the spawn selection last frame (a new one brings the Selected tab forward)
     bool m_pathTabShown = false;          // a path was being edited last frame (starting one brings the Path tab forward)
+    bool m_vertexTabShown = false;        // Sculpt > Vertices was on last frame (switching to it brings its tab forward)
     uint32_t m_buildingTabUid = 0;        // the building picked last frame (picking another brings the Building tab forward)
     void DrawMapsPanel();
     /// Rebuilds the Maps panel picture when the selected map's loaded terrain changed (edits, undo, streaming).
@@ -316,6 +322,7 @@ private:
     void PasteAtCursor();
     void RotateClipboard(int quarterTurns);
     void RotateSelectionInPlace();
+    void RevertSelectionToClient();
     /// Height shift applied to the clipboard at this anchor (snap mode adds the ground offset).
     float PasteOffsetAt(int gx, int gz) const;
     /// Tilt for Follow slope (zero otherwise), written into the paste options.
@@ -325,7 +332,15 @@ private:
     void ClearPlacementView();
     void CommitPlacement();
     void CancelPin();
-    void SelectMap(size_t index);
+    /// A version of a map in the Maps window: a base layer holding its WDT (the topmost is the one edited), or a compare
+    /// source whose Map.dbc has the same id (its folder may differ). archive: the base archive holding the WDT, its layer
+    /// read alone; -1 = the project's own files (Project) or a compare source resolved whole.
+    struct MapVersion { size_t source = 0; int archive = -1; std::string directory, label; bool edited = false; };
+    std::vector<std::vector<MapVersion>> m_mapVersions;   // per m_maps entry
+    int m_mapVersion = 0;                                 // the selected map's version shown
+    std::map<std::string, std::vector<size_t>> m_wdtArchives;   // map folder -> base archives holding its WDT (cleared when the sources change)
+    const MapVersion* SelectedMapVersion() const;
+    void SelectMap(size_t index, int version = 0);
     /// Runs `then` now, or after the user saves or discards unsaved changes.
     void GuardUnsaved(std::function<void()> then);
 
@@ -567,6 +582,22 @@ private:
     Camera m_camera;
     int m_loadRadius = 2;
     std::optional<int> m_focusTile;   // tile key whose height the camera snaps to once it streams in
+    // Top-down view: height above the ground, and the camera as it was left last frame (a feature that moved it
+    // since gets re-centred on the spot it aimed at, see FollowTopDown).
+    float m_topYaw = DirectX::XM_PI;   // top-down turn: north (-z, the top of the map) up; Shift+right drag changes it
+    float m_topHeight = 350.0f, m_topGoal = 350.0f;   // the zoom eases from height to goal
+    DirectX::XMFLOAT2 m_topVel{};                      // key panning speed (across, along the heading), eased
+    bool m_panning = false;                            // middle drag pans the top-down map
+    std::optional<std::pair<DirectX::XMFLOAT3, float>> m_topSeen;
+    void SetTopDown(bool on);
+    void FollowTopDown();
+    /// Puts the camera on an area (centre, size in yards): top-down straight over it and zoomed to fit, else from the south.
+    void FrameArea(float cx, float cz, float span);
+    DirectX::XMFLOAT3 CameraTarget() const;   // where the camera looks on the ground
+    /// The viewport projection: perspective, or flat (orthographic) in top-down, as wide as the perspective view
+    /// would be at the ground. Top-down reaches 3000 yd above the camera so peaks under it still draw.
+    DirectX::XMMATRIX Projection(float aspect, float nearZ, float farZ) const;
+    DirectX::XMFLOAT3 ViewEye() const;   // detail and model distances count from here (top-down: the ground below)
     std::optional<std::pair<float, float>> m_flyGround;   // FlyTo: editor x, z whose ground height the camera takes once loaded
     DrawOptions m_drawOptions;
     Tool m_tool = Tool::Sculpt;
@@ -618,6 +649,11 @@ private:
 
     // Ghost layers: other versions of the map (other clients, single patch archives).
     Ghosts m_ghosts;
+    // CDN files fetched in the background (CASC sources): the count last seen, when misses were last retried, and
+    // ghost tiles drawn with white stand-ins (layer id, tile key) to load again once their textures land.
+    uint64_t m_cdnArrivalsSeen = 0;
+    double m_cdnRefreshAt = 0;
+    std::set<std::pair<int, int>> m_ghostTilesMissingTextures;
     int m_soloLayer = 0, m_copyLayer = 0;          // 0 = the map itself
 
     // Compare: the selected chunks shown as each other version in turn, pinned in place like a paste ([ and ] cycle,
@@ -836,6 +872,18 @@ private:
     float m_pasteOffset = 0;
     bool m_pasteHeights = true, m_pasteTextures = true, m_pasteHoles = true, m_pasteObjects = true, m_pasteWater = true;
     bool m_holeCut = true;          // Holes tool: cut (true) or fill; Ctrl inverts while dragging
+    bool m_impassMode = false;      // Holes tool: paints the chunks' impassable flag instead (cut = set)
+    // Paint > Swap: the texture swapped out (for the active texture, or removed)
+    std::string m_swapFrom;
+    bool m_swapBrush = false, m_swapRemove = false;
+    std::string SwapLabel() const;
+    float m_vertexStep = 1.0f, m_vertexHeight = 0.0f;   // Sculpt > Vertices
+    void EditVertices(TerrainAdapter::VertexOp op, float amount);
+    WaterBrush m_water;             // Water tool; Ctrl swaps Add and Remove while dragging
+    bool m_waterFromClick = true;   // Add: each stroke matches the water it starts on or near, else m_waterDepth above the ground
+    static constexpr float kWaterMatchRadius = 80.0f;   // yards to look for water to match
+    float m_waterDepth = 2.0f;
+    void DrawWaterPanel(float w);
     float m_holeRadius = 1.0f;      // yards; small values hit only the cell under the cursor
     bool m_ghostPreview = true;
     int m_clipVersion = 0;                       // bumps when the clipboard changes (copy, rotate)
@@ -903,7 +951,26 @@ private:
     uint32_t m_spawnModelVersion[2] = { ~0u, ~0u };      // adapter version each kind's model tile was built from
     TableRowsAdapter m_waypoints{ m_store, "waypoint_data", "id", "point" }, m_addons{ m_store, "creature_addon", "guid" };
     AreaTriggerAdapter m_triggers{ m_mpq, m_store };      // AreaTrigger.dbc: what the client fires
-    MapRowsAdapter m_mapRows{ m_mpq, m_store };           // Map.dbc corpse entrance
+    MapRowsAdapter m_mapRows{ m_mpq, m_store };           // Map.dbc: corpse entrance, new maps
+    DbcTable m_mapDifficulty{ m_mpq, m_store, "MapDifficulty", { { "ID", 0, 'i' }, { "MapID", 1, 'i' }, { "Difficulty", 2, 'i' }, { "Message_lang", 3, 's' },
+                                                                 { "RaidDuration", 20, 'i' }, { "MaxPlayers", 21, 'i' }, { "Difficultystring", 22, 's' } }, 23 };
+    // File > New map: a Map.dbc row (and MapDifficulty / instance_template for instances), WDT, WDL and flat tiles.
+    struct NewMapForm
+    {
+        std::string directory, name = "New map", texture;
+        int kind = 0, maxPlayers = 5, x = 32, y = 32, size = 2;   // kind = Map.dbc InstanceType: 0 world, 1 dungeon, 2 raid
+        uint32_t like = 0, area = 0;
+        float height = 0;
+        bool bigAlpha = true;
+    };
+    NewMapForm m_newMap;
+    bool m_newMapOpen = false;
+    std::string m_newMapError;
+    uint64_t m_mapListVersion = ~0ull;
+    void OpenNewMap();
+    void DrawNewMapModal();
+    bool CreateNewMap(std::string& error);
+    void RefreshMapList();
     TableRowsAdapter m_triggerRows{ m_store, "areatrigger", "entry" }, m_teleports{ m_store, "areatrigger_teleport", "ID" },
                      m_instances{ m_store, "instance_template", "map" };
     uint32_t m_triggerSel = 0;                            // selected trigger id (0 = none)
@@ -984,7 +1051,7 @@ private:
     /// Every client DBC the project edits: registered, reset, exported alike.
     std::vector<DbcTable*> DbcTables()
     {
-        return { &m_areas, &m_wmoAreas, &m_worldMaps, &m_mapOverlays, &m_triggers, &m_mapRows, &m_areaPois, &m_taxiNodes, &m_taxiPaths, &m_taxiPoints,
+        return { &m_areas, &m_wmoAreas, &m_worldMaps, &m_mapOverlays, &m_triggers, &m_mapRows, &m_mapDifficulty, &m_areaPois, &m_taxiNodes, &m_taxiPaths, &m_taxiPoints,
                  &m_displayRows, &m_extraRows, &m_lights.light, &m_lights.params, &m_lights.intBands, &m_lights.floatBands, &m_lights.skyboxes,
                  &m_sounds.entries, &m_sounds.ambience, &m_sounds.music, &m_sounds.intro, &m_sounds.emitters };
     }

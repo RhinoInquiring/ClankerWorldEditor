@@ -99,6 +99,8 @@ public:
         std::erase_if(m_meshes, [](const auto& m) { return !m.second; });
         std::erase_if(m_thumbs, [](const auto& t) { return t.second.failed; });
     }
+    /// Batches still drawn with the white stand-in load their texture again (it may have arrived since).
+    void RefreshTextures(const MpqChain& mpq);
 
     size_t ModelCount() const { return m_meshes.size(); }
     size_t InstanceCount() const { return m_instances.size(); }
@@ -117,6 +119,7 @@ private:
             bool rawLiquid = false;                                             // magma / slime: texture colours as they are
             int16_t uvAnim = -1, weight = -1, color = -1;                       // texture animation links (ModelSkeleton)
             bool twoSided = true;                                               // false: back faces hidden
+            std::string textureName;                                            // to load it again when it arrives later (CDN)
         };
         Com<ID3D11Buffer> vertices, indices;
         std::vector<Batch> batches;

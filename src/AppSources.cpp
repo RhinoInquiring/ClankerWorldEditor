@@ -38,7 +38,7 @@ std::optional<std::string> PickMpq(HWND owner)
 
 const char* KindLabel(MpqLayer::Kind k)
 {
-    return k == MpqLayer::Kind::MpqFolder ? "MPQ folder" : k == MpqLayer::Kind::MpqFile ? "MPQ" : "Unpacked";
+    return k == MpqLayer::Kind::MpqFolder ? "MPQ folder" : k == MpqLayer::Kind::MpqFile ? "MPQ" : k == MpqLayer::Kind::Casc ? "CASC" : "Unpacked";
 }
 }
 
@@ -58,7 +58,9 @@ void App::ApplySources()
         const auto& b = m_project->base.layers;
         if (a.size() != b.size()) return true;
         for (size_t i = 0; i < a.size(); ++i)
-            if (a[i].kind != b[i].kind || a[i].path != b[i].path || a[i].enabled != b[i].enabled || a[i].installed != b[i].installed) return true;
+            if (a[i].kind != b[i].kind || a[i].path != b[i].path || a[i].enabled != b[i].enabled || a[i].installed != b[i].installed ||
+                a[i].product != b[i].product)
+                return true;
         return false;
     }();
     m_project->base = m_sourcesEdit.front();
@@ -74,6 +76,7 @@ void App::ApplySources()
     }
     std::string error;
     if (!m_project->Save(error)) { Log("%s", error.c_str()); return; }
+    m_mapListVersion = ~0ull;   // labels may have changed: the Maps window reads them again
     // Compare sources only: the ghost sources start over, the rest stays open.
     StopCompare();
     m_diffs.Cancel();
@@ -120,10 +123,11 @@ void App::DrawSources()
             if (ImGui::SmallButton("Remove source")) removeSource = int(si);
         }
         int move = 0, moveFrom = -1, removeLayer = -1;
-        if (ImGui::BeginTable("##layers", 6, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_BordersInnerV))
+        if (ImGui::BeginTable("##layers", 7, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_BordersInnerV))
         {
             ImGui::TableSetupColumn("On");
             ImGui::TableSetupColumn("Kind");
+            ImGui::TableSetupColumn("Label", ImGuiTableColumnFlags_WidthFixed, 140);
             ImGui::TableSetupColumn("Path", ImGuiTableColumnFlags_WidthStretch);
             ImGui::TableSetupColumn("Players have it");
             ImGui::TableSetupColumn("Gives");
@@ -139,6 +143,22 @@ void App::DrawSources()
                 ImGui::TableNextColumn();
                 ImGui::TextUnformatted(KindLabel(l.kind));
                 ImGui::TableNextColumn();
+                ImGui::SetNextItemWidth(-FLT_MIN);
+                ImGui::InputTextWithHint("##label", "label", &l.label);
+                ImGui::SetItemTooltip("Your name for this layer. The Maps window shows it beside every map whose\n"
+                                      "files this layer supplies (base layers; the topmost layer holding the map wins).");
+                ImGui::TableNextColumn();
+                if (l.kind == MpqLayer::Kind::Casc)   // which product of the install
+                {
+                    ImGui::SetNextItemWidth(160);
+                    if (ImGui::BeginCombo("##product", l.product.c_str()))
+                    {
+                        for (const std::string& p : CascProducts(l.path))
+                            if (ImGui::Selectable(p.c_str(), p == l.product)) l.product = p;
+                        ImGui::EndCombo();
+                    }
+                    ImGui::SameLine();
+                }
                 ImGui::TextUnformatted(l.path.c_str());
                 ImGui::SetItemTooltip("%s", l.path.c_str());
                 ImGui::TableNextColumn();
@@ -151,7 +171,7 @@ void App::DrawSources()
                 {
                     const auto& r = opened->Report()[li];
                     if (!r.note.empty()) ImGui::TextColored(kWarn, "%s", r.note.c_str());
-                    else if (l.kind == MpqLayer::Kind::Folder) ImGui::Text("%zu files", r.files);
+                    else if (l.kind == MpqLayer::Kind::Folder || l.kind == MpqLayer::Kind::Casc) ImGui::Text("%zu files", r.files);
                     else ImGui::Text("%zu archive(s)", r.archives);
                 }
                 else
@@ -179,6 +199,17 @@ void App::DrawSources()
         if (ImGui::Button("+ Unpacked folder"))
             if (auto dir = PickFolder(m_hwnd, L"A folder of unpacked game files (the one holding World, DBFilesClient, Textures...)"))
                 s.layers.push_back({ MpqLayer::Kind::Folder, *dir, true, si != 0 });   // in the base: new art the patch must carry
+        ImGui::SameLine();
+        if (ImGui::Button("+ CASC"))
+            if (auto dir = PickFolder(m_hwnd, L"A modern client's install folder (the one holding .build.info)"))
+            {
+                const auto products = CascProducts(*dir);
+                if (products.empty()) m_scanNotes[si] = "No .build.info in " + *dir + ": pick the install folder (it holds Data and .build.info).";
+                else   // players do not have these files: what the edits use goes into the patch
+                    s.layers.push_back({ MpqLayer::Kind::Casc, *dir, true, false, "", "", products.front() });
+            }
+        ImGui::SetItemTooltip("A modern client's CASC storage (Classic, retail). Pick the product in the row. Names come from\n"
+                              "listfile.csv beside the editor (wowdev community listfile).");
         ImGui::SameLine();
         // A scan: what a folder holds, MPQs and unpacked trees at any depth, each its own layer.
         auto note = [&](const std::string& root, const LayerScan& scan, size_t added) {
@@ -230,8 +261,13 @@ void App::DrawSources()
     if (removeSource > 0) m_sourcesEdit.erase(m_sourcesEdit.begin() + removeSource);
     ImGui::Separator();
     if (ImGui::Button("+ Compare source"))
-        if (auto dir = PickFolder(m_hwnd, L"Another version: a client folder, its Data folder, or any folder of MPQs"))
-            m_sourcesEdit.push_back({ std::filesystem::path(*dir).filename().string(), { { MpqLayer::Kind::MpqFolder, *dir, true, true } } });
+        if (auto dir = PickFolder(m_hwnd, L"Another version: a client folder, its Data folder, any folder of MPQs, or a modern install (.build.info)"))
+        {
+            const auto products = CascProducts(*dir);   // a modern install: its CASC storage, first product
+            m_sourcesEdit.push_back({ std::filesystem::path(*dir).filename().string(),
+                                      { products.empty() ? MpqLayer{ MpqLayer::Kind::MpqFolder, *dir, true, true }
+                                                         : MpqLayer{ MpqLayer::Kind::Casc, *dir, true, false, "", "", products.front() } } });
+        }
     ImGui::SameLine(0, 24);
     if (ImGui::Button("Apply")) ApplySources();
     ImGui::SetItemTooltip("Saves the sources in project.json. A base change reopens the project; compare sources reattach.");

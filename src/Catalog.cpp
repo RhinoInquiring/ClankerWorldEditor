@@ -26,8 +26,9 @@ Catalog::Kind Catalog::Classify(const std::string& p)
     if (EndsWith(p, ".m2")) return Kind::Doodad;
     if (EndsWith(p, ".wmo"))
     {
-        // Group files (Name_000.wmo) belong to their root; only roots are placeable.
-        const size_t n = p.size();
+        // Group files (Name_000.wmo, newer LODs Name_000_lod1.wmo) belong to their root; only roots are placeable.
+        size_t n = p.size();
+        if (n > 9 && p.compare(n - 9, 4, "_lod") == 0 && std::isdigit((unsigned char)p[n - 5])) n -= 5;
         const bool group = n > 8 && p[n - 8] == '_' && std::isdigit((unsigned char)p[n - 7]) && std::isdigit((unsigned char)p[n - 6]) &&
                            std::isdigit((unsigned char)p[n - 5]);
         return group ? Kind::Other : Kind::Wmo;
@@ -109,6 +110,7 @@ bool CatalogSelfTest()
     if (Catalog::Classify("world\\azeroth\\elwynn\\passivedoodads\\trees\\elwynntreemid01.m2") != K::Doodad) return false;
     if (Catalog::Classify("world\\wmo\\azeroth\\buildings\\stormwind\\stormwind.wmo") != K::Wmo) return false;
     if (Catalog::Classify("world\\wmo\\azeroth\\buildings\\stormwind\\stormwind_012.wmo") != K::Other) return false;
+    if (Catalog::Classify("world\\wmo\\azeroth\\buildings\\stormwind\\stormwind_012_lod1.wmo") != K::Other) return false;
     if (Catalog::Classify("tileset\\elwynn\\elwynngrassbase.blp") != K::GroundTexture) return false;
     if (Catalog::Classify("tileset\\elwynn\\elwynngrassbase_s.blp") != K::Texture) return false;
     if (Catalog::Classify("interface\\icons\\inv_misc_qblp.blp") != K::Texture) return false;

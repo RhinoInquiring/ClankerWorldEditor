@@ -25,6 +25,11 @@ Direct3D device. Checks that write files use a temporary folder and remove it.
 | --- | --- |
 | `--plan-check <Data>` | Copy, rotate, blended paste, objects, furniture carrying, area paint, export |
 | `--water-check <Data> <map> <x> <y>` | Dry over wet and back, undo/redo, rotation, export of water |
+| `--water-tool-check <Data>` | Water tool on Azeroth 32_48: add, keep level beside, level, slope, remove, magma takes lake cells, flat ocean, undo/redo, export read-back |
+| `--sculpt-check <Data>` | Falloff shapes, sloped flatten lands on its plane, fill only, vertex selection moves with no cracks, even out, undo |
+| `--newmap-check <Data>` | New map: Map.dbc + MapDifficulty rows, WDT/WDL, 2 x 2 flat tiles as one step; loads, exports, undo, redo, overlay rebuilt on reopen |
+| `--impass-check <Data>` | Impassable brush sets MCNK 0x2, export writes exactly those flags, clear, undo |
+| `--swap-check <Data>` | Texture swap: merge into an existing layer (shares add per texel), swap for a new texture, remove, export validates, undo |
 | `--blueprint-check <Data> <map> <x> <y> <out.png>` | Save, load and draw a blueprint |
 | `--model-check <Data> <map> <x> <y>` | Every model a tile places loads, boxes fit |
 | `--dialogue-check <AC server dir>` | Dialogue tables against the world database: menu, submenu, texts, option, conditions and a bark as one batch; a non-gossip condition under the same id is never touched; undo leaves nothing |
@@ -42,7 +47,7 @@ Direct3D device. Checks that write files use a temporary folder and remove it.
 | Command | Checks |
 | --- | --- |
 | `--ghost-check <Data> <other client> <map> <x> <y>` | Tile versions, ghost layers, copy from a ghost |
-| `--compare-check <Data> <map> <x> <y>` | Edge layout, every `<map>_*` copy's difference, cycling cost |
+| `--compare-check <Data> <map> <x> <y>` | Edge layout, every `<map>_*` copy's difference, cycling cost, object-replacing paste, revert to client, undo |
 | `--diff-check <Data> <base map> <other map>` | Whole-map scan, areas, rejection, rescan from saved results |
 | `--diff-objects <Data> <base map> <other map> <zone id>` | Buildings each difference area carries, and why |
 | `--tiles-check <Data> <base map> <other map>` | Adding tiles: heights, alpha, water, ids, far heights, undo, overlay, export, packing |

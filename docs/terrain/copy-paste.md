@@ -48,6 +48,14 @@ copied chunks come along too, with **Objects**.
 **Edit > Rotate selection in place** turns the selected chunks a quarter about their centre, with the objects on them
 (same ids, one undo step).
 
+## Revert to the client
+
+**Edit > Revert selection to client** (also a button under the clipboard) puts the selected chunks back as the client
+has them: heights, textures, holes, water, and objects (the client's restored, the ones edits added removed, as a
+[compare](../versions/compare.md#objects) paste does). No blend band: the chunks around stay as they are. It is one undo
+step on top of your edits, which stay in the history. Chunks on tiles the project added have no client version and are
+left alone; vertex shading the client's chunk lacks stays.
+
 ## See also
 
 - [Blueprints](blueprints.md): keep a copy for later

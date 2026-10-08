@@ -135,7 +135,7 @@ void Loader::PrepareModel(const std::string& name, bool wmo)
         if (auto root = m_mpq->Read(name); root && WmoRootInfo(*root, groups, bounds))
         {
             std::vector<std::vector<uint8_t>> files;
-            for (uint32_t g = 0; g < groups; ++g) files.push_back(m_mpq->Read(WmoGroupName(name, g)).value_or(std::vector<uint8_t>{}));
+            for (uint32_t g = 0; g < groups; ++g) files.push_back(m_mpq->Read(WmoGroupFile(name, *root, g)).value_or(std::vector<uint8_t>{}));
             mesh = ParseWmo(*root, files);
         }
     }

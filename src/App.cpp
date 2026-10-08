@@ -163,12 +163,112 @@ namespace
 
 XMVECTOR App::Camera::Forward() const
 {
+    if (topDown) return XMVectorSet(0, -1, 0, 0);
     return XMVectorSet(std::cos(pitch) * std::sin(yaw), std::sin(pitch), std::cos(pitch) * std::cos(yaw), 0);
 }
 
 XMMATRIX App::Camera::View() const
 {
-    return XMMatrixLookToRH(XMLoadFloat3(&pos), Forward(), XMVectorSet(0, 1, 0, 0));
+    return XMMatrixLookToRH(XMLoadFloat3(&pos), Forward(), topDown ? Heading() : XMVectorSet(0, 1, 0, 0));
+}
+
+XMVECTOR App::Camera::Heading() const
+{
+    return XMVectorSet(std::sin(yaw), 0, std::cos(yaw), 0);
+}
+
+XMFLOAT3 App::CameraTarget() const
+{
+    // The view ray of the angled camera (pitch, even in top-down) onto the ground; not loaded yet -> a guess
+    // 40 yd down, as FlyTo frames things.
+    Camera angled = m_camera;
+    angled.topDown = false;
+    const XMVECTOR p0 = XMLoadFloat3(&m_camera.pos), dir = angled.Forward();
+    XMFLOAT3 t;
+    if (const auto hit = m_terrain.Pick(p0, dir, false)) return hit->pos;
+    const float drop = m_camera.pos.y - m_terrain.HeightAt(m_camera.pos.x, m_camera.pos.z).value_or(m_camera.pos.y - 40.0f);
+    const float along = angled.pitch < -0.05f ? std::max(drop, 0.0f) / std::tan(-angled.pitch) : 0.0f;
+    XMStoreFloat3(&t, XMVectorAdd(p0, XMVectorScale(m_camera.Heading(), along)));
+    t.y = m_camera.pos.y - drop;
+    return t;
+}
+
+XMMATRIX App::Projection(float aspect, float nearZ, float farZ) const
+{
+    if (!m_camera.topDown) return XMMatrixPerspectiveFovRH(XMConvertToRadians(60.0f), aspect, nearZ, farZ);
+    const float tall = 2.0f * m_topHeight * std::tan(XMConvertToRadians(30.0f));
+    return XMMatrixOrthographicRH(tall * aspect, tall, -3000.0f, std::max(farZ, m_topHeight + 3000.0f));
+}
+
+XMFLOAT3 App::ViewEye() const
+{
+    XMFLOAT3 e = m_camera.pos;
+    if (m_camera.topDown) e.y = m_terrain.HeightAt(e.x, e.z).value_or(e.y - m_topHeight);   // the ground, however far the map was panned
+    return e;
+}
+
+void App::SetTopDown(bool on)
+{
+    if (on == m_camera.topDown) return;
+    const XMFLOAT3 t = CameraTarget();
+    m_camera.topDown = on;
+    m_topSeen.reset();
+    m_topGoal = m_topHeight;
+    m_topVel = { 0, 0 };
+    if (on)
+    {
+        m_camera.yaw = m_topYaw;
+        m_camera.pos = { t.x, m_camera.pos.y, t.z };
+        FollowTopDown();
+        return;
+    }
+    // Back to the angled camera, framing the same spot.
+    const float dist = std::min(m_topHeight, 300.0f);
+    XMStoreFloat3(&m_camera.pos, XMVectorSubtract(XMLoadFloat3(&t), XMVectorScale(m_camera.Heading(), dist)));
+    m_camera.pos.y = t.y + dist * 0.68f;
+    m_camera.pitch = -0.6f;
+}
+
+void App::FrameArea(float cx, float cz, float span)
+{
+    const float ground = m_terrain.HeightAt(cx, cz).value_or(m_camera.pos.y - 100.0f);
+    if (m_camera.topDown)   // straight over its middle, zoomed so all of it is on screen
+    {
+        m_topHeight = m_topGoal = std::clamp((span * 1.3f + 40.0f) / (2.0f * std::tan(XMConvertToRadians(30.0f))), 30.0f, 3000.0f);
+        m_camera.pos = { cx, ground + m_topHeight, cz };
+        m_topVel = { 0, 0 };
+        m_topSeen = { m_camera.pos, m_camera.pitch };   // placed exactly: nothing to follow
+        return;
+    }
+    // From the south, high enough to see all of it.
+    const float dist = span * 0.9f + 60.0f;
+    m_camera.pos = { cx, ground + dist * 0.68f, cz - dist };
+    m_camera.yaw = 0;
+    m_camera.pitch = -0.6f;
+}
+
+void App::FollowTopDown()
+{
+    if (!m_camera.topDown) return;
+    // Something else moved the camera (fly-to, differences, focus tile...): over the spot it aimed at. Only its
+    // height changed (ground streamed in): stay put. Then sit m_topHeight above the ground there.
+    if (m_topSeen)
+    {
+        const XMFLOAT3& was = m_topSeen->first;
+        if (was.x != m_camera.pos.x || was.z != m_camera.pos.z || m_topSeen->second != m_camera.pitch)
+        {
+            const XMFLOAT3 t = CameraTarget();
+            m_camera.pos.x = t.x;
+            m_camera.pos.z = t.z;
+            m_camera.pos.y = t.y + m_topHeight;
+            m_camera.yaw = m_topYaw;   // features aim from the south; the map keeps its turn
+        }
+        else if (was.y != m_camera.pos.y)
+            m_camera.pos.y = m_terrain.HeightAt(m_camera.pos.x, m_camera.pos.z).value_or(m_camera.pos.y) + m_topHeight;
+    }
+    else if (const auto h = m_terrain.HeightAt(m_camera.pos.x, m_camera.pos.z))
+        m_camera.pos.y = *h + m_topHeight;
+    m_topSeen = { m_camera.pos, m_camera.pitch };
 }
 
 bool App::Init(HWND hwnd, ID3D11Device* device, ID3D11DeviceContext* context, bool firstRun)
@@ -177,6 +277,7 @@ bool App::Init(HWND hwnd, ID3D11Device* device, ID3D11DeviceContext* context, bo
     m_device = device;
     m_context = context;
     m_buildLayout = firstRun;
+    SetCdnAsync(true);   // CASC files not on disk: fetched in the background, the window never waits on the network
 
     // Gizmo: bold handles with clear arrowheads, a little larger than ImGuizmo's default, and arrows that
     // always point along +X/+Y/+Z instead of flipping towards the camera.
@@ -269,17 +370,21 @@ bool App::Init(HWND hwnd, ID3D11Device* device, ID3D11DeviceContext* context, bo
         { "Rotate clipboard clockwise", "R", [this] { RotateClipboard(1); }, [this] { return !m_clipboard.Empty(); } },
         { "Rotate clipboard counter-clockwise", "Shift+R", [this] { RotateClipboard(3); }, [this] { return !m_clipboard.Empty(); } },
         { "Rotate selection in place", "", [this] { RotateSelectionInPlace(); }, [this] { return !m_selection.empty(); } },
+        { "Revert selection to client", "", [this] { RevertSelectionToClient(); }, [this] { return !m_selection.empty(); } },
         { "Clear selection", "Esc", [this] { m_selection.clear(); }, [this] { return !m_selection.empty(); } },
         { "Sculpt: Raise", "1", [this] { m_tool = Tool::Sculpt; m_brush.mode = Brush::Mode::Raise; }, always },
         { "Sculpt: Lower", "2", [this] { m_tool = Tool::Sculpt; m_brush.mode = Brush::Mode::Lower; }, always },
         { "Sculpt: Flatten", "3", [this] { m_tool = Tool::Sculpt; m_brush.mode = Brush::Mode::Flatten; }, always },
         { "Sculpt: Smooth", "4", [this] { m_tool = Tool::Sculpt; m_brush.mode = Brush::Mode::Smooth; }, always },
+        { "Sculpt: Select vertices", "5", [this] { m_tool = Tool::Sculpt; m_brush.mode = Brush::Mode::Vertices; }, always },
         { "Focus camera on tile", "F", [this] { FocusTile(); }, [this] { return !m_terrain.Tiles().empty(); } },
+        { "View: top-down", "Ctrl+T", [this] { SetTopDown(!m_camera.topDown); }, always },
         { "Toggle wireframe", "", [this] { m_drawOptions.wireframe = !m_drawOptions.wireframe; }, always },
         { "Toggle object boxes", "", [this] { m_drawOptions.showObjects = !m_drawOptions.showObjects; }, always },
         { "Reset panel layout", "", [this] { m_buildLayout = true; }, always },
         { "Close project", "", [this] { GuardUnsaved([this] { CloseProject(); }); }, hasProject },
         { "Project settings...", "", [this] { OpenProjectSettings(); }, hasProject },
+        { "New map...", "", [this] { OpenNewMap(); }, hasProject },
         { "Server setup...", "", [this] { OpenSetup(); }, hasProject },
         { "Server: build server data (maps, vmaps, mmaps)", "", [this] { m_showServerData = true; }, hasProject },
         { "Check for problems", "", [this] { RunChecks(); }, hasProject },
@@ -383,6 +488,7 @@ bool App::OpenProject(const std::string& dir)
 
     CloseProject();
     const size_t archives = m_mpq.Open(project->base.layers);
+    m_mpq.SetMapsFromLowestLayer(true);   // each map as its own source has it (the client's), mods' copies are other versions
     for (size_t i = 0; i < project->base.layers.size() && i < m_mpq.Report().size(); ++i)
         if (!m_mpq.Report()[i].note.empty())
             Log("Base layer %s: %s", project->base.layers[i].path.c_str(), m_mpq.Report()[i].note.c_str());
@@ -390,6 +496,8 @@ bool App::OpenProject(const std::string& dir)
     m_terrain.SetProjectDir(project->dir);
     if (!archives) Log("The project's base files have no archives: check Sources (View > Sources).");
     if (auto dbc = m_mpq.Read("DBFilesClient\\Map.dbc")) m_maps = ParseMapDbc(*dbc);
+    m_mapListVersion = ~0ull;   // the Maps window rebuilds the list (project rows, source labels) on its next draw
+    m_wdtArchives.clear();
     std::vector<std::string> blueprintErrors;
     m_blueprints = Blueprint::LoadAll(project->BlueprintsDir(), blueprintErrors);
     m_blueprintThumbs.clear();
@@ -545,8 +653,12 @@ void App::Export(bool playTest)
     // Textures and models the edits use that only another client has go into the patch too.
     if (const size_t dropped = m_terrain.TakeDroppedEffects())
         Log("%zu texture layer(s) had ground effects this client does not know (from another map); exported without them.", dropped);
+    SetCdnAsync(false);   // the patch must be complete: wait for CDN files
     const AssetReport assets = CopyMissingAssets(m_mpq, tiles, out);
+    SetCdnAsync(true);
     if (!assets.copied.empty()) Log("Added %zu file(s) from other clients that this client lacks (e.g. %s).", assets.copied.size(), assets.copied[0].c_str());
+    if (!assets.converted.empty()) Log("Converted %zu newer-client file(s) to 3.3.5a; %zu change(s) noted in Problems.", assets.converted.size(), assets.notes.size());
+    for (const auto& n : assets.notes) m_problems.push_back({ Problem::Severity::Warning, "Assets", "3.3.5a conversion: " + n });
     for (const SpawnAdapter* spawns : { &m_creatures, &m_gameobjects })
     {
         if (!spawns->ExportSql(m_project->dir / "out" / "server", error)) Log("%s", error.c_str());
@@ -658,7 +770,7 @@ void App::BuildPatch(bool install)
 
 void App::Undo()
 {
-    if (m_terrain.Stroking() || m_terrain.HoleStroking() || m_terrain.AreaStroking() || !m_store.CanUndo()) return;
+    if (m_terrain.Stroking() || m_terrain.HoleStroking() || m_terrain.AreaStroking() || m_terrain.Watering() || !m_store.CanUndo()) return;
     ClearPlacementView();
     Log("Undo: %s", m_store.Done().back().label.c_str());
     m_store.Undo();
@@ -666,7 +778,7 @@ void App::Undo()
 
 void App::Redo()
 {
-    if (m_terrain.Stroking() || m_terrain.HoleStroking() || m_terrain.AreaStroking() || !m_store.CanRedo()) return;
+    if (m_terrain.Stroking() || m_terrain.HoleStroking() || m_terrain.AreaStroking() || m_terrain.Watering() || !m_store.CanRedo()) return;
     ClearPlacementView();
     Log("Redo: %s", m_store.Undone().back().label.c_str());
     m_store.Redo();
@@ -853,6 +965,20 @@ void App::RotateClipboard(int quarterTurns)
     if (m_clipboard.Empty()) return;
     for (int i = 0; i < quarterTurns % 4; ++i) m_clipboard.RotateClockwise();
     ++m_clipVersion;
+}
+
+void App::RevertSelectionToClient()
+{
+    if (m_selection.empty() || m_terrain.Stroking()) return;
+    ClearPlacementView();
+    std::set<std::pair<int, int>> cells;
+    for (ChunkRef ref : m_selection) cells.insert(m_terrain.GridOf(ref));
+    size_t skipped = 0;
+    auto change = RevertToClient(m_terrain, m_mpq, cells, skipped);
+    if (skipped) Log("%zu chunk(s) are on tiles the project added; the client has nothing to revert them to.", skipped);
+    if (!change) { Log("Nothing to revert: the selection is as the client has it."); return; }
+    Log("%s", change->label.c_str());
+    m_store.Commit(std::move(*change));
 }
 
 void App::RotateSelectionInPlace()
@@ -2124,19 +2250,288 @@ void App::ApplySelection(const std::set<ChunkRef>& hits)
         m_selection = hits;
 }
 
-void App::SelectMap(size_t index)
+const App::MapVersion* App::SelectedMapVersion() const
+{
+    if (m_mapIndex < 0 || size_t(m_mapIndex) >= m_mapVersions.size()) return nullptr;
+    const auto& versions = m_mapVersions[size_t(m_mapIndex)];
+    return size_t(m_mapVersion) < versions.size() ? &versions[size_t(m_mapVersion)] : nullptr;
+}
+
+void App::SelectMap(size_t index, int version)
 {
     m_mapIndex = int(index);
+    m_mapVersion = version;
     const auto& m = m_maps[index];
-    const auto wdt = m_mpq.Read("World\\Maps\\" + m.directory + "\\" + m.directory + ".wdt");
+    const MapVersion* v = SelectedMapVersion();
+    if (!v) m_mapVersion = 0;
+    // The version's own files: a lower base layer resolved alone, a compare source as its client would.
+    auto read = [&](const std::string& ext) -> std::optional<std::vector<uint8_t>> {
+        const std::string dir = v ? v->directory : m.directory, name = "World\\Maps\\" + dir + "\\" + dir + ext;
+        if (!v || v->edited) return m_mpq.Read(name);
+        if (v->source == 0) return m_mpq.ReadFromLayer(size_t(v->archive), name);
+        return m_ghosts.Chain(v->source).Read(name);
+    };
+    const auto wdt = read(".wdt");
     m_mapTiles = wdt ? WdtTiles(*wdt) : std::vector<bool>();
     m_mapGlobal = wdt ? WdtGlobalWmo(*wdt) : std::nullopt;
-    const auto wdl = m_mpq.Read("World\\Maps\\" + m.directory + "\\" + m.directory + ".wdl");
+    const auto wdl = read(".wdl");
     m_mapWdl = wdl ? ParseWdl(*wdl) : std::vector<std::vector<int16_t>>{};
-    m_mapPreviewDir = m.directory;
+    m_mapPreviewDir = !v || v->edited ? m.directory : std::string();   // other versions never take the open map's edits
     m_mapPreviewKey = ~0ull;
     m_mapPreview.Reset();
     m_mapPreviewTexture.Reset();
+}
+
+void App::RefreshMapList()
+{
+    // The maps: the client's Map.dbc (the lowest layer's, never a pack's) with the maps the project made, then the maps
+    // each source's own Map.dbc adds (ids the client lacks). A source is a base layer, or the layers sharing its label
+    // (a mod's MPQ and its loose files); compare sources are read too, for their versions.
+    m_mapListVersion = m_mapRows.Version();
+    const std::string selected = m_mapIndex >= 0 && size_t(m_mapIndex) < m_maps.size() ? m_maps[size_t(m_mapIndex)].directory : std::string();
+    const int selectedVersion = m_mapVersion;
+    std::vector<MapEntry> maps;
+    for (const auto& [id, row] : m_mapRows.Rows())
+        maps.push_back({ id, row.value("Directory", std::string()), row.value("MapName_lang", std::string()) });
+    if (!maps.empty()) m_maps = std::move(maps);   // else not the 3.3.5 layout: keep what ParseMapDbc read
+
+    struct Group { std::string label; std::set<size_t> layers; bool hasDbc = false; std::map<uint32_t, MapEntry> rows; };
+    std::vector<Group> groups;
+    if (m_project)
+        for (size_t li = 0; li < m_project->base.layers.size(); ++li)
+        {
+            const MpqLayer& l = m_project->base.layers[li];
+            if (!l.enabled) continue;
+            const std::string label = l.label.empty() ? fs::path(l.path).filename().string() : l.label;
+            auto g = std::find_if(groups.begin(), groups.end(), [&](const Group& x) { return !l.label.empty() && x.label == label; });
+            if (g == groups.end()) g = groups.insert(groups.end(), Group{ label });
+            g->layers.insert(li);
+        }
+    const std::string mapDbc = "DBFilesClient\\Map.dbc";
+    for (Group& g : groups)   // the topmost archive of the group holding a Map.dbc
+        for (size_t a = 0; a < m_mpq.Names().size() && !g.hasDbc; ++a)
+            if (g.layers.count(m_mpq.ArchiveLayer(a)) && m_mpq.Has(a, mapDbc))
+                if (const auto dbc = m_mpq.ReadFrom(a, mapDbc))
+                {
+                    g.hasDbc = true;
+                    for (const MapEntry& e : ParseMapDbc(*dbc)) g.rows[e.id] = e;
+                }
+    std::set<uint32_t> known;
+    for (const MapEntry& m : m_maps) known.insert(m.id);
+    for (const Group& g : groups)
+        for (const auto& [id, e] : g.rows)
+            if (known.insert(id).second) m_maps.push_back(e);
+    std::sort(m_maps.begin(), m_maps.end(), [](const MapEntry& a, const MapEntry& b) { return a.id < b.id; });
+
+    std::vector<std::map<uint32_t, std::string>> compareDirs(m_ghosts.Sources().size());
+    for (size_t s = 1; s < compareDirs.size(); ++s)
+        if (const auto dbc = m_ghosts.Chain(s).Read(mapDbc))
+            for (const MapEntry& e : ParseMapDbc(*dbc)) compareDirs[s][e.id] = e.directory;
+    auto wdtOf = [](const std::string& dir) { return "World\\Maps\\" + dir + "\\" + dir + ".wdt"; };
+    auto wdtArchives = [&](const std::string& dir) -> const std::vector<size_t>& {
+        // Archives holding a WDT, worked out once per set of sources (a scan of every archive takes about a second).
+        auto [it, fresh] = m_wdtArchives.try_emplace(dir);
+        if (fresh)
+            for (size_t a = 0; a < m_mpq.Names().size(); ++a)
+                if (m_mpq.Has(a, wdtOf(dir))) it->second.push_back(a);
+        return it->second;
+    };
+
+    m_mapVersions.assign(m_maps.size(), {});
+    for (size_t i = 0; i < m_maps.size(); ++i)
+    {
+        MapEntry& m = m_maps[i];
+        auto& versions = m_mapVersions[i];
+        const std::string wdt = wdtOf(m.directory);
+        std::error_code ec;
+        const auto layer = m_mpq.LayerOf(wdt);   // the lowest layer holding the map: where it is edited from
+        if (!layer && fs::exists(m_mpq.OverlayPath(wdt), ec)) m.source = "Project";
+        else
+        {
+            m.source.clear();
+            for (const Group& g : groups)
+                if (layer && g.layers.count(*layer)) m.source = g.label;
+        }
+        if (m.source == "Project") versions.push_back({ 0, -1, m.directory, "Project", true });
+        const auto home = m_mpq.MapHome(wdt);
+        for (const Group& g : groups)
+        {
+            // What this source calls the map (its Map.dbc; a source without one is taken to have the same folder).
+            const auto row = g.rows.find(m.id);
+            if (g.hasDbc && row == g.rows.end()) continue;
+            const std::string dir = g.hasDbc ? row->second.directory : m.directory;
+            for (size_t a : wdtArchives(dir))
+                if (g.layers.count(m_mpq.ArchiveLayer(a)))
+                {
+                    const bool edited = m.source != "Project" && dir == m.directory && home && m_mpq.ArchiveLayer(a) == m_mpq.ArchiveLayer(*home);
+                    versions.push_back({ 0, int(a), dir, g.label + (dir == m.directory ? "" : " (" + dir + ")"), edited });
+                    break;
+                }
+        }
+        std::stable_partition(versions.begin(), versions.end(), [](const MapVersion& v) { return v.edited; });   // first row: the edited one
+        for (size_t s = 1; s < compareDirs.size(); ++s)
+            if (const auto it = compareDirs[s].find(m.id); it != compareDirs[s].end() && m_ghosts.Chain(s).HasOwn(wdtOf(it->second)))
+                versions.push_back({ s, -1, it->second, m_ghosts.Sources()[s].name + (it->second == m.directory ? "" : " (" + it->second + ")"), false });
+    }
+    m_mapIndex = -1;
+    for (size_t i = 0; i < m_maps.size(); ++i)
+        if (m_maps[i].directory == selected) SelectMap(i, selectedVersion);
+}
+
+void App::OpenNewMap()
+{
+    if (!m_project) return;
+    m_newMap = NewMapForm{};
+    m_newMap.texture = m_activeTexture.empty() ? "Tileset\\Elwynn\\ElwynnGrassBase.blp" : m_activeTexture;
+    m_newMapError.clear();
+    m_newMapOpen = true;
+}
+
+bool App::CreateNewMap(std::string& error)
+{
+    NewMapForm& f = m_newMap;
+    if (f.directory.empty() || f.directory.size() > 48 ||
+        !std::all_of(f.directory.begin(), f.directory.end(), [](char c) { return std::isalnum((unsigned char)c) || c == '_'; }))
+    { error = "Folder name: letters, digits and _ only (it becomes World\\Maps\\<name>\\)."; return false; }
+    auto lower = [](std::string s) { for (char& c : s) c = char(std::tolower((unsigned char)c)); return s; };
+    for (const MapEntry& m : m_maps)
+        if (lower(m.directory) == lower(f.directory)) { error = "Map " + std::to_string(m.id) + " already uses the folder " + m.directory + "."; return false; }
+    if (m_mpq.Read("World\\Maps\\" + f.directory + "\\" + f.directory + ".wdt")) { error = "The game files already have a map in that folder."; return false; }
+    if (f.texture.empty() || !m_mpq.Read(f.texture)) { error = "Ground texture not found: " + f.texture; return false; }
+    const int last = std::min(63, f.x + f.size - 1), lastY = std::min(63, f.y + f.size - 1);
+    if (f.x < 0 || f.y < 0 || f.size < 1) { error = "Tiles out of the 64 x 64 grid."; return false; }
+
+    const Project::IdRange range = m_project->Range("map.id");
+    const uint32_t id = range.first ? m_mapRows.FreeId(range.first, range.last) : 0;
+    if (!id) { error = "No free Map.dbc id in the project's map.id range (File > Project settings)."; return false; }
+    const bool instance = f.kind != 0;
+    uint32_t difficultyId = 0;
+    if (instance)
+    {
+        const Project::IdRange r = m_project->Range("mapdifficulty.id");
+        difficultyId = r.first ? m_mapDifficulty.FreeId(r.first, r.last) : 0;
+        if (!difficultyId) { error = "No free MapDifficulty id in the project's mapdifficulty.id range (File > Project settings)."; return false; }
+    }
+
+    // Map.dbc: the "like" map's loading screen, minimap icon scale, expansion and time of day; ours for the rest.
+    nlohmann::json row = m_mapRows.Row(f.like);
+    if (row.is_null()) row = nlohmann::json::object();
+    row["ID"] = id;
+    row["Directory"] = f.directory;
+    row["MapName_lang"] = f.name;
+    row["InstanceType"] = uint32_t(f.kind);
+    row["MapDescription0_lang"] = "";
+    row["MapDescription1_lang"] = "";
+    row["AreaTableID"] = 0u;
+    row["CorpseMapID"] = 0xFFFFFFFFu;   // -1: no corpse entrance yet (Triggers > Entrances sets one)
+    row["Corpse[0]"] = 0.0f;
+    row["Corpse[1]"] = 0.0f;
+    row["MaxPlayers"] = instance ? uint32_t(f.maxPlayers) : 0u;
+    row["RaidOffset"] = 0u;
+    const std::string label = "New map " + f.directory + " (" + std::to_string(id) + ")";
+    std::vector<Change> parts;
+    parts.push_back(m_mapRows.MakeChange(id, nullptr, row, label));
+    m_mapRows.Apply(parts.back());
+    if (instance)   // AzerothCore looks up an instance's difficulty (players, reset) here
+    {
+        const nlohmann::json d = { { "ID", difficultyId }, { "MapID", id }, { "Difficulty", 0u }, { "Message_lang", "" },
+                                   { "RaidDuration", f.kind == 2 ? 604800u : 0u }, { "MaxPlayers", uint32_t(f.maxPlayers) }, { "Difficultystring", "" } };
+        parts.push_back(m_mapDifficulty.MakeChange(difficultyId, nullptr, d, label));
+        m_mapDifficulty.Apply(parts.back());
+        if (m_db.Connected())
+        {
+            parts.push_back(m_instances.MakeChange(id, {}, { { { "map", std::to_string(id) }, { "parent", "0" }, { "script", "" }, { "allowMount", "0" } } }, label));
+            m_instances.Apply(parts.back());
+        }
+    }
+
+    // The WDT and WDL, then flat tiles through the added-tiles path (overlay, export, minimap, server data).
+    parts.push_back(m_terrain.CreateMap(f.directory, f.bigAlpha ? 0x4u : 0u));
+    std::string terrainError;
+    GoToTile(f.directory, f.x + (last - f.x) / 2, f.y + (lastY - f.y) / 2);   // opens it (empty until the tiles below)
+    if (m_terrain.Map() != f.directory) error = "The new map did not open.";
+    std::vector<TerrainAdapter::NewTile> tiles;
+    for (int ty = f.y; ty <= lastY; ++ty)
+        for (int tx = f.x; tx <= last; ++tx)
+            tiles.push_back({ tx, ty, BlankAdt(tx, ty, f.height, f.texture, f.area), {} });
+    if (error.empty())
+        if (auto added = m_terrain.AddTiles(tiles, f.bigAlpha, terrainError)) parts.push_back(std::move(*added));
+        else error = "Tiles not added: " + terrainError;
+    if (!error.empty())
+    {
+        for (auto it = parts.rbegin(); it != parts.rend(); ++it)   // nothing half made
+            for (Adapter* a : std::initializer_list<Adapter*>{ &m_mapRows, &m_mapDifficulty, &m_instances, &m_terrain })
+                if (it->domain == a->Domain()) a->Revert(*it);
+        RefreshMapList();
+        return false;
+    }
+    m_store.Commit(std::move(parts), label);
+    RefreshMapList();
+    Log("%s: %zu flat tile(s) at %.1f. Export writes its Map.dbc row, WDT and tiles; restart the client and worldserver to use it.",
+        label.c_str(), tiles.size(), f.height);
+    return true;
+}
+
+void App::DrawNewMapModal()
+{
+    if (m_newMapOpen) { ImGui::OpenPopup("New map"); m_newMapOpen = false; }
+    ImGui::SetNextWindowSize({ 560, 0 }, ImGuiCond_Appearing);
+    if (!m_project || !ImGui::BeginPopupModal("New map", nullptr, ImGuiWindowFlags_NoResize)) return;
+    NewMapForm& f = m_newMap;
+    const float field = ImGui::GetContentRegionAvail().x - 150;
+    ImGui::SetNextItemWidth(field);
+    ImGui::InputText("Folder", &f.directory);
+    ImGui::SetItemTooltip("World\\Maps\\<folder>\\: letters, digits and _, unique.");
+    ImGui::SetNextItemWidth(field);
+    ImGui::InputText("Name", &f.name);
+    ImGui::SetNextItemWidth(field);
+    const char* kinds[] = { "World (open map)", "Dungeon", "Raid" };
+    ImGui::Combo("Kind", &f.kind, kinds, 3);
+    if (f.kind)
+    {
+        ImGui::SetNextItemWidth(field);
+        ImGui::SliderInt("Players", &f.maxPlayers, 1, 40);
+    }
+    std::string likeName = MapLabel(f.like);
+    ImGui::SetNextItemWidth(field);
+    if (ImGui::BeginCombo("Like", likeName.c_str()))
+    {
+        for (const MapEntry& m : m_maps)
+            if (ImGui::Selectable((std::to_string(m.id) + "  " + (m.name.empty() ? m.directory : m.name)).c_str(), m.id == f.like)) f.like = m.id;
+        ImGui::EndCombo();
+    }
+    ImGui::SetItemTooltip("Loading screen, minimap icon scale, expansion and flags are copied from this map.");
+
+    ImGui::SeparatorText("Ground");
+    ImGui::SetNextItemWidth(field);
+    ImGui::SliderInt("Tiles across", &f.size, 1, 8);
+    ImGui::SetItemTooltip("A square of size x size tiles (533 yd each).");
+    ImGui::SetNextItemWidth(field / 2 - 4);
+    ImGui::SliderInt("##tx", &f.x, 0, 64 - f.size);
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(field / 2 - 4);
+    ImGui::SliderInt("First tile x, y##ty", &f.y, 0, 64 - f.size);
+    ImGui::SetNextItemWidth(field);
+    ImGui::InputFloat("Height", &f.height, 1.0f, 10.0f, "%.1f yd");
+    ImGui::SetNextItemWidth(field);
+    ImGui::InputText("Texture", &f.texture);
+    ImGui::SetItemTooltip("Ground texture of every chunk. Pick one in Catalog > Ground textures first to have it here.");
+    ImGui::Checkbox("8-bit alpha (finer texture blends, as Northrend)", &f.bigAlpha);
+    int area = int(f.area);
+    ImGui::SetNextItemWidth(field);
+    if (ImGui::InputInt("Area id", &area)) f.area = uint32_t(std::max(area, 0));
+    ImGui::SetItemTooltip("AreaTable id for every chunk (0 = none). Zones > Paint sets areas later.");
+
+    if (!m_newMapError.empty()) ImGui::TextColored(kWarn, "%s", m_newMapError.c_str());
+    ImGui::Separator();
+    if (ImGui::Button("Create", { 120, 0 }))
+    {
+        m_newMapError.clear();
+        if (CreateNewMap(m_newMapError)) ImGui::CloseCurrentPopup();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel", { 120, 0 })) ImGui::CloseCurrentPopup();
+    ImGui::EndPopup();
 }
 
 void App::RefreshMapPreview()
@@ -2241,6 +2636,27 @@ void App::Frame(float dt)
     }
     if (!error.empty()) Log("%s", error.c_str());
 
+    // Files fetched from the CDN in the background since the last look: ask again for what was missing.
+    if (const uint64_t arrived = CdnArrivals(); arrived != m_cdnArrivalsSeen && ImGui::GetTime() - m_cdnRefreshAt > 1.5)
+    {
+        m_cdnArrivalsSeen = arrived;
+        m_cdnRefreshAt = ImGui::GetTime();
+        m_renderer.ForgetMissingTextures();
+        m_models.ForgetFailed();
+        m_models.RefreshTextures(m_mpq);
+        for (Ghosts::Layer& layer : m_ghosts.Layers()) layer.missing.clear();
+        for (auto it = m_ghostTilesMissingTextures.begin(); it != m_ghostTilesMissingTextures.end();)
+        {
+            const Ghosts::Layer* layer = m_ghosts.Find(it->first);
+            const auto tile = layer ? layer->tiles.find(it->second) : decltype(layer->tiles)::const_iterator{};
+            if (layer && tile != layer->tiles.end() &&
+                m_renderer.LoadTile(Ghosts::Key(it->first, it->second), tile->second.adt, m_ghosts.Chain(layer->source), it->first).texturesMissing)
+                ++it;
+            else
+                it = m_ghostTilesMissingTextures.erase(it);
+        }
+    }
+
     // Ghost layers stream around the camera like the map; the solo layer brings its objects along.
     if (!m_terrain.Map().empty() && !m_ghosts.Layers().empty())
     {
@@ -2255,7 +2671,8 @@ void App::Frame(float dt)
             if (const Ghosts::Layer* layer = m_ghosts.Find(id))
             {
                 const LoadedTile& tile = layer->tiles.at(key);
-                m_renderer.LoadTile(Ghosts::Key(id, key), tile.adt, m_ghosts.Chain(layer->source), id);
+                if (m_renderer.LoadTile(Ghosts::Key(id, key), tile.adt, m_ghosts.Chain(layer->source), id).texturesMissing)
+                    m_ghostTilesMissingTextures.insert({ id, key });
                 if (id == m_soloLayer) m_models.AddTile(Ghosts::Key(id, key), tile.adt, m_ghosts.Chain(layer->source), id);
             }
     }
@@ -2323,6 +2740,7 @@ void App::Frame(float dt)
     DrawNewProjectModal();
     DrawSetupModal();
     DrawProjectSettingsModal();
+    DrawNewMapModal();
     DrawUnsavedModal();
     DrawSaveBlueprintModal();
     DrawPalette();
@@ -2346,6 +2764,7 @@ void App::HandleShortcuts()
     if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_C, global)) CopySelection();
     if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_V, global)) PasteInPlace();
     if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_B, global)) OpenSaveBlueprint();
+    if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_T, global)) SetTopDown(!m_camera.topDown);
     if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_V, global)) PasteAtCursor();
     if (ImGui::GetIO().KeyCtrl) return;
     for (const ToolInfo& t : kTools)
@@ -2402,15 +2821,32 @@ void App::HandleShortcuts()
         else if (m_pin) CancelPin();                  // first Esc: unpin, terrain goes back
         else if (m_placing) m_placing = false;        // second: stop placing
         else if (m_tool == Tool::Objects && !m_objSel.empty()) m_objSel.clear();
+        else if (m_tool == Tool::Sculpt && m_terrain.SelectedVertices()) m_terrain.ClearVertexSelection();
         else if (pathMode) CancelPathEdit();          // leave path editing, nothing saved
         else if (m_spawnArmed) m_spawnArmed.reset();
         else if (SpawnTool() && !m_spawnSel.empty()) m_spawnSel.clear();
         else m_selection.clear();                     // then: clear the selection
     }
     const std::pair<ImGuiKey, Brush::Mode> modes[] = { { ImGuiKey_1, Brush::Mode::Raise }, { ImGuiKey_2, Brush::Mode::Lower },
-                                                       { ImGuiKey_3, Brush::Mode::Flatten }, { ImGuiKey_4, Brush::Mode::Smooth } };
+                                                       { ImGuiKey_3, Brush::Mode::Flatten }, { ImGuiKey_4, Brush::Mode::Smooth },
+                                                       { ImGuiKey_5, Brush::Mode::Vertices } };
     for (const auto& [key, mode] : modes)
         if (!TransformTool() && ImGui::IsKeyPressed(key, false)) { m_tool = Tool::Sculpt; m_brush.mode = mode; }
+    if (m_tool == Tool::Sculpt && m_terrain.SelectedVertices())
+    {
+        const float step = m_vertexStep * (ImGui::GetIO().KeyShift ? 5.0f : 1.0f);
+        if (ImGui::IsKeyPressed(ImGuiKey_PageUp)) EditVertices(TerrainAdapter::VertexOp::Move, step);
+        if (ImGui::IsKeyPressed(ImGuiKey_PageDown)) EditVertices(TerrainAdapter::VertexOp::Move, -step);
+    }
+}
+
+void App::EditVertices(TerrainAdapter::VertexOp op, float amount)
+{
+    if (auto change = m_terrain.EditSelectedVertices(op, amount))
+    {
+        Log("%s", change->label.c_str());
+        m_store.Commit(std::move(*change));
+    }
 }
 
 void App::DrawMenuBar()
@@ -2429,6 +2865,7 @@ void App::DrawMenuBar()
         if (ImGui::MenuItem("Build server data (maps, vmaps, mmaps)...", nullptr, false, m_project.has_value())) m_showServerData = true;
         ImGui::Separator();
         if (ImGui::MenuItem("Project settings...", nullptr, false, m_project.has_value())) OpenProjectSettings();
+        if (ImGui::MenuItem("New map...", nullptr, false, m_project.has_value())) OpenNewMap();
         if (ImGui::MenuItem("Server setup...", nullptr, false, m_project.has_value())) OpenSetup();
         ImGui::Separator();
         if (ImGui::MenuItem("Close project", nullptr, false, m_project.has_value())) GuardUnsaved([this] { CloseProject(); });
@@ -2445,6 +2882,9 @@ void App::DrawMenuBar()
         if (ImGui::MenuItem("Paste at cursor", "Ctrl+V", false, !m_clipboard.Empty())) PasteAtCursor();
         if (ImGui::MenuItem("Clear selection", "Esc", false, !m_selection.empty())) m_selection.clear();
         ImGui::Separator();
+        if (ImGui::MenuItem("Rotate selection in place", nullptr, false, !m_selection.empty())) RotateSelectionInPlace();
+        if (ImGui::MenuItem("Revert selection to client", nullptr, false, !m_selection.empty())) RevertSelectionToClient();
+        ImGui::Separator();
         if (ImGui::MenuItem("Command palette...", "Ctrl+P")) { m_paletteOpen = true; m_paletteQuery[0] = 0; }
         ImGui::EndMenu();
     }
@@ -2459,6 +2899,7 @@ void App::DrawMenuBar()
         ImGui::MenuItem("Creatures", nullptr, &m_showSpawns[int(SpawnKind::Creature)]);
         ImGui::MenuItem("Gameobjects", nullptr, &m_showSpawns[int(SpawnKind::GameObject)]);
         DrawEventFilter(330);
+        if (ImGui::MenuItem("Top-down view", "Ctrl+T", m_camera.topDown)) SetTopDown(!m_camera.topDown);
         if (ImGui::MenuItem("Focus camera on tile", "F", false, !m_terrain.Tiles().empty())) FocusTile();
         ImGui::Separator();
         ImGui::MenuItem("Sources", nullptr, &m_showSources);
@@ -2734,6 +3175,15 @@ void App::BuildOverlay(std::vector<LineVertex>& lines) const
         BuildZoneOverlay(lines);
         return;
     }
+    if (m_tool == Tool::Holes && m_hover && m_impassMode)
+    {
+        for (const ChunkRef& ref : m_terrain.ChunksAt(m_hover->pos, 250.0f))   // impassable chunks nearby
+            if (m_terrain.Chunk(ref)->flags & 0x2u) chunkOutline(ref, { 1, 0.25f, 0.2f, 0.8f }, 0.6f);
+        const bool set = m_holeCut != ImGui::GetIO().KeyCtrl;
+        for (const ChunkRef& ref : m_terrain.ChunksAt(m_hover->pos, m_holeRadius))
+            chunkOutline(ref, set ? XMFLOAT4{ 1, 0.5f, 0.3f, 1 } : XMFLOAT4{ 0.35f, 1, 0.45f, 1 }, 0.9f);
+        return;
+    }
     if (m_tool == Tool::Holes && m_hover)
     {
         for (const auto& [ref, bit] : m_terrain.HoleCellsAt(m_hover->pos, 120.0f))   // existing holes nearby
@@ -2780,10 +3230,32 @@ void App::BuildOverlay(std::vector<LineVertex>& lines) const
 
     // Brush: outer ring at the radius, inner ring where the falloff is half. Only the brush tools have one; tools that
     // pick things (units, triggers, points, nodes) show their own hover instead.
-    if (m_tool != Tool::Sculpt && m_tool != Tool::Paint && m_tool != Tool::Shade) return;
+    if (m_tool == Tool::Sculpt && m_terrain.SelectedVertices())   // selected vertices: small yellow crosses
+    {
+        const XMFLOAT4 yellow{ 1, 0.85f, 0.2f, 1 };
+        size_t shown = 0;
+        for (const XMFLOAT3& p : m_terrain.SelectedVertexPositions())
+        {
+            if (++shown > 40000) break;   // ponytail: cap; a huge selection only needs to look selected
+            lines.push_back({ { p.x - 0.8f, p.y + 0.2f, p.z }, yellow }); lines.push_back({ { p.x + 0.8f, p.y + 0.2f, p.z }, yellow });
+            lines.push_back({ { p.x, p.y + 0.2f, p.z - 0.8f }, yellow }); lines.push_back({ { p.x, p.y + 0.2f, p.z + 0.8f }, yellow });
+        }
+    }
+    if (m_tool != Tool::Sculpt && m_tool != Tool::Paint && m_tool != Tool::Shade && m_tool != Tool::Water) return;
     const XMFLOAT4 ringColors[2] = { { 1, 1, 1, 0.9f }, { 1, 1, 1, 0.35f } };
     const PaintBrush* soft = m_tool == Tool::Paint ? &m_paint : m_tool == Tool::Shade ? &m_shadeBrush : nullptr;
-    const float radius = soft ? soft->radius : m_brush.radius;
+    const float radius = soft ? soft->radius : m_tool == Tool::Water ? m_water.radius : m_brush.radius;
+    if (m_tool == Tool::Water && m_water.mode == WaterBrush::Mode::Level)   // where Level puts the surface
+    {
+        XMFLOAT3 prev{};
+        for (int i = 0; i <= 64; ++i)
+        {
+            const float a = i * XM_2PI / 64;
+            const XMFLOAT3 p{ m_hover->pos.x + std::cos(a) * radius, m_water.level, m_hover->pos.z + std::sin(a) * radius };
+            if (i) { lines.push_back({ prev, { 0.3f, 0.7f, 1, 1 } }); lines.push_back({ p, { 0.3f, 0.7f, 1, 1 } }); }
+            prev = p;
+        }
+    }
     const float radii[2] = { radius, soft ? std::max(radius * soft->hardness, 0.5f) : radius * 0.5f };
     for (int ring = 0; ring < 2; ++ring)
     {
@@ -2837,10 +3309,26 @@ void App::DrawViewport(float dt)
         else if (m_spawnArmed && SpawnTool()) { m_spawnArmed.reset(); Log("Stopped placing."); }
     }
     if (!ImGui::IsMouseDown(ImGuiMouseButton_Right)) m_looking = false;
-    if (m_looking)
+    FollowTopDown();
+    // Top-down grabs the map instead of looking around: right or middle drag pans it under the cursor (Shift+right
+    // drag turns it), keys glide a screen a second whatever the zoom, and the wheel zooms smoothly towards the cursor.
+    const float topYd = 2.0f * m_topHeight * std::tan(XMConvertToRadians(30.0f)) / size.y;   // top-down: yards per pixel
+    const XMVECTOR heading = m_camera.Heading(), across = XMVector3Normalize(XMVector3Cross(heading, XMVectorSet(0, 1, 0, 0)));
+    if (m_camera.topDown && ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Middle)) m_panning = true;
+    if (!ImGui::IsMouseDown(ImGuiMouseButton_Middle)) m_panning = false;
+    if (m_camera.topDown && ((m_looking && !io.KeyShift) || m_panning))
+    {
+        XMVECTOR p = XMLoadFloat3(&m_camera.pos);
+        p = XMVectorSubtract(p, XMVectorScale(across, io.MouseDelta.x * topYd));
+        p = XMVectorAdd(p, XMVectorScale(heading, io.MouseDelta.y * topYd));
+        XMStoreFloat3(&m_camera.pos, p);
+        m_topVel = { 0, 0 };
+    }
+    else if (m_looking)
     {
         m_camera.yaw -= io.MouseDelta.x * 0.005f;
-        m_camera.pitch = std::clamp(m_camera.pitch - io.MouseDelta.y * 0.005f, -1.55f, 1.55f);
+        if (m_camera.topDown) m_topYaw = m_camera.yaw;
+        if (!m_camera.topDown) m_camera.pitch = std::clamp(m_camera.pitch - io.MouseDelta.y * 0.005f, -1.55f, 1.55f);
     }
     if ((hovered || m_looking || ImGui::IsWindowFocused()) && !io.WantTextInput)
     {
@@ -2848,7 +3336,17 @@ void App::DrawViewport(float dt)
         const XMVECTOR fwd = m_camera.Forward();
         const XMVECTOR right = XMVector3Normalize(XMVector3Cross(fwd, XMVectorSet(0, 1, 0, 0)));
         XMVECTOR p = XMLoadFloat3(&m_camera.pos);
-        if (!io.KeyCtrl)
+        if (m_camera.topDown)
+        {
+            const auto key = [](ImGuiKey k) { return ImGui::IsKeyDown(k) ? 1.0f : 0.0f; };
+            const float pace = topYd * size.y * (io.KeyShift ? 3.0f : 1.0f) * !io.KeyCtrl;   // a screen height a second
+            const float ease = 1.0f - std::exp(-dt * 12.0f);
+            m_topVel.x += ((key(ImGuiKey_D) - key(ImGuiKey_A)) * pace - m_topVel.x) * ease;
+            m_topVel.y += ((key(ImGuiKey_W) - key(ImGuiKey_S)) * pace - m_topVel.y) * ease;
+            p = XMVectorAdd(p, XMVectorAdd(XMVectorScale(across, m_topVel.x * dt), XMVectorScale(heading, m_topVel.y * dt)));
+            if (!io.KeyCtrl) m_topGoal = std::clamp(m_topGoal * std::exp((key(ImGuiKey_E) - key(ImGuiKey_Q)) * dt * 1.5f), 30.0f, 3000.0f);   // E out, Q in
+        }
+        else if (!io.KeyCtrl)
         {
             if (ImGui::IsKeyDown(ImGuiKey_W)) p = XMVectorAdd(p, XMVectorScale(fwd, speed));
             if (ImGui::IsKeyDown(ImGuiKey_S)) p = XMVectorSubtract(p, XMVectorScale(fwd, speed));
@@ -2859,7 +3357,8 @@ void App::DrawViewport(float dt)
         }
         if (hovered && io.MouseWheel != 0)
         {
-            if (io.KeyCtrl && m_tool == Tool::Holes) m_holeRadius = std::clamp(m_holeRadius * (io.MouseWheel > 0 ? 1.2f : 0.83f), 1.0f, 60.0f);
+            if (io.KeyCtrl && m_tool == Tool::Water) m_water.radius = std::clamp(m_water.radius * (io.MouseWheel > 0 ? 1.15f : 0.87f), 1.0f, 150.0f);
+            else if (io.KeyCtrl && m_tool == Tool::Holes) m_holeRadius = std::clamp(m_holeRadius * (io.MouseWheel > 0 ? 1.2f : 0.83f), 1.0f, 60.0f);
             else if (io.KeyCtrl && m_tool == Tool::Zones) m_areaRadius = std::clamp(m_areaRadius * (io.MouseWheel > 0 ? 1.15f : 0.87f), 1.0f, 300.0f);
             else if (io.KeyCtrl && m_tool == Tool::Paint) m_paint.radius = std::clamp(m_paint.radius * (io.MouseWheel > 0 ? 1.15f : 0.87f), 1.0f, 150.0f);
             else if (io.KeyCtrl && m_tool == Tool::Shade) m_shadeBrush.radius = std::clamp(m_shadeBrush.radius * (io.MouseWheel > 0 ? 1.15f : 0.87f), 1.0f, 150.0f);
@@ -2870,14 +3369,31 @@ void App::DrawViewport(float dt)
                 m_camera.speed = std::clamp(m_camera.speed * (io.MouseWheel > 0 ? 1.25f : 0.8f), 10.0f, 1000.0f);
                 m_speedShownUntil = ImGui::GetTime() + 1.5;
             }
+            else if (m_camera.topDown) m_topGoal = std::clamp(m_topGoal * std::pow(0.8f, io.MouseWheel), 30.0f, 3000.0f);
             else p = XMVectorAdd(p, XMVectorScale(fwd, io.MouseWheel * 20.0f));
         }
         XMStoreFloat3(&m_camera.pos, p);
     }
+    else m_topVel = { 0, 0 };
+    if (m_camera.topDown && m_topGoal != m_topHeight)   // the zoom eases to its goal, the ground under the cursor staying put
+    {
+        float h = m_topHeight + (m_topGoal - m_topHeight) * (1.0f - std::exp(-dt * 14.0f));
+        if (std::fabs(m_topGoal - h) < 0.05f) h = m_topGoal;
+        XMVECTOR p = XMLoadFloat3(&m_camera.pos);
+        if (hovered)
+        {
+            const float keep = 1.0f - h / m_topHeight;
+            const float ox = (io.MousePos.x - origin.x - size.x / 2) * topYd, oy = (io.MousePos.y - origin.y - size.y / 2) * topYd;
+            p = XMVectorAdd(p, XMVectorSubtract(XMVectorScale(across, ox * keep), XMVectorScale(heading, oy * keep)));
+        }
+        XMStoreFloat3(&m_camera.pos, XMVectorAdd(p, XMVectorSet(0, h - m_topHeight, 0, 0)));
+        m_topHeight = h;
+    }
+    if (m_camera.topDown) m_topSeen = { m_camera.pos, m_camera.pitch };   // our own moves are not a feature's
 
     // Picking under the mouse.
     const float aspect = size.x / size.y;
-    const XMMATRIX proj = XMMatrixPerspectiveFovRH(XMConvertToRadians(60.0f), aspect, 1.0f, 6000.0f);
+    const XMMATRIX proj = Projection(aspect, 1.0f, 6000.0f);
     const XMMATRIX viewProj = m_camera.View() * proj;
     m_hover.reset();
     if (hovered && !m_looking)
@@ -2941,10 +3457,42 @@ void App::DrawViewport(float dt)
     // Tools.
     if (m_tool == Tool::Sculpt)
     {
-        if (ImGui::IsItemActivated() && ImGui::IsMouseDown(ImGuiMouseButton_Left) && m_hover) m_terrain.BeginStroke(*m_hover);
+        if (m_brush.mode == Brush::Mode::Vertices)   // drag selects, Ctrl+drag deselects
+        {
+            if (ImGui::IsItemActive() && ImGui::IsMouseDown(ImGuiMouseButton_Left) && m_hover) m_terrain.SelectVertices(m_hover->pos, m_brush.radius, !io.KeyCtrl);
+        }
+        else if (ImGui::IsItemActivated() && ImGui::IsMouseDown(ImGuiMouseButton_Left) && m_hover && io.KeyAlt && m_brush.mode == Brush::Mode::Flatten)
+        {
+            m_brush.height = m_hover->pos.y;   // Alt+click: flatten to this height
+            m_brush.fixedHeight = true;
+        }
+        else if (ImGui::IsItemActivated() && ImGui::IsMouseDown(ImGuiMouseButton_Left) && m_hover) m_terrain.BeginStroke(*m_hover);
         if (m_terrain.Stroking() && ImGui::IsMouseDown(ImGuiMouseButton_Left) && m_hover) m_terrain.StrokeStep(m_hover->pos, m_brush, dt);
         if (m_terrain.Stroking() && !ImGui::IsMouseDown(ImGuiMouseButton_Left))
             if (auto change = m_terrain.EndStroke(m_brush)) m_store.Commit(std::move(*change));
+    }
+    else if (m_tool == Tool::Paint && m_swapBrush)
+    {
+        // Swap: drag swaps under the brush, Alt+click picks the texture to swap out.
+        const std::string to = m_swapRemove ? std::string() : m_activeTexture;
+        if (ImGui::IsItemActivated() && ImGui::IsMouseDown(ImGuiMouseButton_Left) && m_hover)
+        {
+            if (io.KeyAlt)
+            {
+                if (const auto t = m_terrain.TextureAt(m_hover->pos.x, m_hover->pos.z)) m_swapFrom = *t;
+            }
+            else if (m_swapFrom.empty() || (to.empty() && !m_swapRemove))
+                Log("Swap needs a texture to swap out (Alt+click the ground) and one to put in (the active texture).");
+            else
+                m_terrain.BeginPaint();
+        }
+        if (m_terrain.Painting() && ImGui::IsMouseDown(ImGuiMouseButton_Left) && m_hover) m_terrain.SwapStep(m_hover->pos, m_paint.radius, m_swapFrom, to);
+        if (m_terrain.Painting() && !ImGui::IsMouseDown(ImGuiMouseButton_Left))
+            if (auto change = m_terrain.EndPaint(SwapLabel()))
+            {
+                Log("%s (%zu chunks)", change->label.c_str(), change->data.at("layers").size());
+                m_store.Commit(std::move(*change));
+            }
     }
     else if (m_tool == Tool::Paint)
     {
@@ -2992,10 +3540,55 @@ void App::DrawViewport(float dt)
     {
         SpawnsViewport(origin, size, viewProj);
     }
+    else if (m_tool == Tool::Water)
+    {
+        // Drag paints; Ctrl swaps Add and Remove; Alt+click takes the level and liquid under the cursor.
+        WaterBrush b = m_water;
+        if (io.KeyCtrl && b.mode != WaterBrush::Mode::Level) b.mode = b.mode == WaterBrush::Mode::Add ? WaterBrush::Mode::Remove : WaterBrush::Mode::Add;
+        if (ImGui::IsItemActivated() && ImGui::IsMouseDown(ImGuiMouseButton_Left) && m_hover)
+        {
+            const auto there = m_terrain.WaterAt(m_hover->pos.x, m_hover->pos.z);
+            if (io.KeyAlt)
+            {
+                m_water.level = there ? there->first : m_hover->pos.y;
+                if (there) m_water.type = there->second;
+            }
+            else
+            {
+                if (b.mode == WaterBrush::Mode::Add && m_waterFromClick)
+                {
+                    // Match the water the stroke starts on, or the nearest water around: same liquid, same level, no
+                    // seam. Nothing near: the ground there plus the depth, in the chosen liquid.
+                    const auto match = there ? there : m_terrain.NearestWater(m_hover->pos.x, m_hover->pos.z, kWaterMatchRadius);
+                    m_water.level = b.level = match ? match->first : m_hover->pos.y + m_waterDepth;
+                    if (match) m_water.type = b.type = match->second;
+                }
+                m_terrain.BeginWater(m_hover->pos);
+            }
+        }
+        if (m_terrain.Watering() && ImGui::IsMouseDown(ImGuiMouseButton_Left) && m_hover) m_terrain.WaterStep(m_hover->pos, b);
+        if (m_terrain.Watering() && !ImGui::IsMouseDown(ImGuiMouseButton_Left))
+            if (auto change = m_terrain.EndWater(b))
+            {
+                Log("%s", change->label.c_str());
+                m_store.Commit(std::move(*change));
+            }
+    }
     else if (m_tool == Tool::Holes)
     {
         const bool cut = m_holeCut != io.KeyCtrl;
-        if (ImGui::IsItemActivated() && ImGui::IsMouseDown(ImGuiMouseButton_Left) && m_hover) m_terrain.BeginHoles();
+        if (m_impassMode)
+        {
+            if (ImGui::IsItemActivated() && ImGui::IsMouseDown(ImGuiMouseButton_Left) && m_hover) m_terrain.BeginImpass();
+            if (m_terrain.Impassing() && ImGui::IsMouseDown(ImGuiMouseButton_Left) && m_hover) m_terrain.ImpassStep(m_hover->pos, m_holeRadius, cut);
+            if (m_terrain.Impassing() && !ImGui::IsMouseDown(ImGuiMouseButton_Left))
+                if (auto change = m_terrain.EndImpass())
+                {
+                    Log("%s", change->label.c_str());
+                    m_store.Commit(std::move(*change));
+                }
+        }
+        else if (ImGui::IsItemActivated() && ImGui::IsMouseDown(ImGuiMouseButton_Left) && m_hover) m_terrain.BeginHoles();
         if (m_terrain.HoleStroking() && ImGui::IsMouseDown(ImGuiMouseButton_Left) && m_hover) m_terrain.HoleStep(m_hover->pos, m_holeRadius, cut);
         if (m_terrain.HoleStroking() && !ImGui::IsMouseDown(ImGuiMouseButton_Left))
             if (auto change = m_terrain.EndHoles()) m_store.Commit(std::move(*change));
@@ -3116,7 +3709,10 @@ void App::DrawViewport(float dt)
                     }
                 }
                 constexpr float kNear = 1.0f, kFar = 6000.0f;
-                auto linear = [&](float d) { return kNear * kFar / (kFar - d * (kFar - kNear)); };
+                const float orthoFar = std::max(kFar, m_topHeight + 3000.0f);   // as Projection
+                auto linear = [&](float d) {
+                    return m_camera.topDown ? -3000.0f + d * (orthoFar + 3000.0f) : kNear * kFar / (kFar - d * (kFar - kNear));
+                };
 
                 // A chunk counts when any of five sample points is inside the box and not hidden by terrain.
                 const size_t samples[5] = { 4 * 17 + 9 + 3, 1 * 17 + 9 + 1, 1 * 17 + 9 + 6, 6 * 17 + 9 + 1, 6 * 17 + 9 + 6 };
@@ -3181,12 +3777,12 @@ void App::DrawViewport(float dt)
     {
         // The low-detail map first, with a projection reaching across the continent; depth then starts over for the
         // detailed scene, so the near pass keeps its precision.
-        m_renderer.DrawFar(m_camera.View() * XMMatrixPerspectiveFovRH(XMConvertToRadians(60.0f), size.x / size.y, 100.0f, 40000.0f));
+        m_renderer.DrawFar(m_camera.View() * Projection(size.x / size.y, 100.0f, 40000.0f));
         m_context->ClearDepthStencilView(m_vpDsv.Get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
     }
-    m_drawOptions.eye = m_camera.pos;
+    m_drawOptions.eye = ViewEye();
     m_renderer.Draw(viewProj, m_drawOptions);
-    m_models.Draw(viewProj, m_camera.pos, m_modelSettings);
+    m_models.Draw(viewProj, ViewEye(), m_modelSettings);
     {
         std::vector<LineVertex> solids;
         BuildPathSolids(solids);
@@ -3216,8 +3812,8 @@ void App::DrawViewport(float dt)
     const ImVec2 pad{ origin.x + 12, origin.y + 10 };
     if (!m_terrain.Map().empty())
     {
-        const char* tools[] = { "Select", "Sculpt", "Copy", "Holes", "Objects", "Paint", "Creatures", "Gameobjects", "Zones", "Triggers", "POIs", "Flights", "Shade", "Lights", "Sound", "Roads" };
-        const char* modes[] = { "Raise", "Lower", "Flatten", "Smooth" };
+        const char* tools[] = { "Select", "Sculpt", "Copy", "Holes", "Objects", "Paint", "Creatures", "Gameobjects", "Zones", "Triggers", "POIs", "Flights", "Shade", "Lights", "Sound", "Roads", "Water" };
+        const char* modes[] = { "Raise", "Lower", "Flatten", "Smooth", "Vertices" };
         char caption[400];
         if (m_tool == Tool::Sculpt)
             snprintf(caption, sizeof caption, "%s   World > Sculpt > %s", m_terrain.Map().c_str(), modes[int(m_brush.mode)]);
@@ -3227,6 +3823,16 @@ void App::DrawViewport(float dt)
         else if (m_tool == Tool::Shade)
             snprintf(caption, sizeof caption, "%s   World > Shade   %s   Ctrl: back to neutral   Alt+click: pick   Ctrl+wheel: radius", m_terrain.Map().c_str(),
                      !m_terrain.VertexColors() ? "(this map has no vertex shading)" : io.KeyCtrl ? "ERASING" : "");
+        else if (m_tool == Tool::Water)
+        {
+            const char* modes[] = { "Add", "Remove", "Level" };
+            const LiquidInfo* l = m_terrain.Liquid(m_water.type);
+            snprintf(caption, sizeof caption, "%s   World > Water > %s %s at %.1f   Ctrl: %s   Alt+click: pick level   Ctrl+wheel: radius", m_terrain.Map().c_str(),
+                     modes[int(m_water.mode)], l ? l->name.c_str() : "?", m_water.level, m_water.mode == WaterBrush::Mode::Add ? "remove" : m_water.mode == WaterBrush::Mode::Remove ? "add" : "-");
+        }
+        else if (m_tool == Tool::Holes && m_impassMode)
+            snprintf(caption, sizeof caption, "%s   World > Holes > Impassable: %s   (Ctrl: %s)", m_terrain.Map().c_str(),
+                     m_holeCut != io.KeyCtrl ? "set" : "clear", m_holeCut != io.KeyCtrl ? "clear" : "set");
         else if (m_tool == Tool::Holes)
             snprintf(caption, sizeof caption, "%s   World > Holes > %s   (Ctrl: %s)", m_terrain.Map().c_str(),
                      m_holeCut != io.KeyCtrl ? "Cut" : "Fill", m_holeCut != io.KeyCtrl ? "fill" : "cut");
@@ -3383,6 +3989,7 @@ void App::DrawToolsPanel()
     if (m_tool == Tool::Lights) DrawLightsPanel(w);
     if (m_tool == Tool::Sound) DrawSoundPanel(w);
     if (m_tool == Tool::Roads) DrawRoadsPanel(w);
+    if (m_tool == Tool::Water) DrawWaterPanel(w);
     if (SpawnTool()) DrawSpawnsPanel(w);
     if (m_tool == Tool::Objects && Section("Objects"))
     {
@@ -3453,7 +4060,38 @@ void App::DrawToolsPanel()
             ImGui::TextColored(kQuiet, "Drag: paint   Ctrl+drag: erase\nAlt+click: pick the texture under the cursor\nCtrl+wheel: radius\n"
                                        "A chunk holds 4 textures; a 5th replaces\nthe one it shows least of.");
         }
+        if (Section("Swap"))
+        {
+            ImGui::Checkbox("The brush swaps instead of painting", &m_swapBrush);
+            ImGui::SetItemTooltip("Drag over chunks to swap there; Alt+click picks the texture to swap out.");
+            ImGui::TextUnformatted("Swap out");
+            ImGui::SetNextItemWidth(w);
+            ImGui::InputTextWithHint("##swapfrom", "Alt+click the ground (with the box above on)", &m_swapFrom);
+            ImGui::Checkbox("Remove it (no texture in its place)", &m_swapRemove);
+            if (!m_swapRemove) ImGui::TextColored(kQuiet, "Put in: %s", m_activeTexture.empty() ? "(pick a texture above)" : FileOf(m_activeTexture).c_str());
+            const bool ready = !m_swapFrom.empty() && (m_swapRemove || !m_activeTexture.empty()) && !m_terrain.Tiles().empty();
+            ImGui::BeginDisabled(!ready);
+            auto swapOn = [&](bool cameraTile) {
+                std::vector<ChunkRef> chunks;
+                const int under = TileKey(int(std::floor(m_camera.pos.x / kTileSize)), int(std::floor(m_camera.pos.z / kTileSize)));
+                for (const auto& [key, tile] : m_terrain.Tiles())
+                    if (!cameraTile || key == under)
+                        for (size_t ci = 0; ci < tile.adt.chunks.size(); ++ci) chunks.push_back({ key, int(ci) });
+                if (auto change = m_terrain.SwapTexture(m_swapFrom, m_swapRemove ? std::string() : m_activeTexture, chunks, SwapLabel()))
+                {
+                    Log("%s (%zu chunks)", change->label.c_str(), change->data.at("layers").size());
+                    m_store.Commit(std::move(*change));
+                }
+                else Log("Nothing to swap: no chunk there uses %s.", FileOf(m_swapFrom).c_str());
+            };
+            if (ImGui::Button("Swap on the tile under the camera", { w, 0 })) swapOn(true);
+            if (ImGui::Button("Swap on every loaded tile", { w, 0 })) swapOn(false);
+            ImGui::EndDisabled();
+            ImGui::TextColored(kQuiet, "Where a chunk already has the new texture,\nthe two merge into one layer. Removing gives\n"
+                                       "the share to the chunk's other textures;\na chunk's only texture stays.");
+        }
     }
+
 
     if (m_tool == Tool::Shade)
     {
@@ -3489,21 +4127,71 @@ void App::DrawToolsPanel()
 
     if (m_tool == Tool::Sculpt && Section("Sculpt"))
     {
-        Segmented("mode", m_brush.mode, { { Brush::Mode::Raise, "Raise" }, { Brush::Mode::Lower, "Lower" },
-                                          { Brush::Mode::Flatten, "Flatten" }, { Brush::Mode::Smooth, "Smooth" } }, w);
+        Segmented("mode", m_brush.mode, { { Brush::Mode::Raise, "Raise" }, { Brush::Mode::Lower, "Lower" }, { Brush::Mode::Flatten, "Flatten" },
+                                          { Brush::Mode::Smooth, "Smooth" }, { Brush::Mode::Vertices, "Vertices" } }, w);
         ImGui::SetNextItemWidth(w - 90);
         ImGui::SliderFloat("Radius", &m_brush.radius, 1.0f, 300.0f, "%.0f yd", ImGuiSliderFlags_Logarithmic);
+        if (m_brush.mode != Brush::Mode::Vertices)
+        {
+            ImGui::SetNextItemWidth(w - 90);
+            ImGui::SliderFloat("Strength", &m_brush.strength, 1.0f, 100.0f, "%.0f");
+            ImGui::TextUnformatted("Falloff");
+            Segmented("falloff", m_brush.falloff, { { Brush::Falloff::Smooth, "Smooth" }, { Brush::Falloff::Linear, "Linear" }, { Brush::Falloff::Flat, "Flat" },
+                                                    { Brush::Falloff::Sharp, "Sharp" }, { Brush::Falloff::Gaussian, "Gauss" } }, w);
+            ImGui::SetItemTooltip("How the brush weakens from its centre to its rim.\nFlat: full strength everywhere (hard edge).");
+        }
+        ImGui::TextColored(kQuiet, m_brush.mode == Brush::Mode::Vertices ? "Drag: select   Ctrl+drag: deselect   Esc: clear\nPgUp / PgDn: move (Shift: 5x)\nCtrl+wheel: radius"
+                                                                         : "Left drag: sculpt\nCtrl+wheel: radius\n1-5: switch mode");
+    }
+    if (m_tool == Tool::Sculpt && m_brush.mode == Brush::Mode::Flatten && Section("Flatten"))
+    {
+        Segmented("only", m_brush.only, { { Brush::Only::Both, "Both" }, { Brush::Only::Raise, "Fill only" }, { Brush::Only::Lower, "Cut only" } }, w);
+        ImGui::SetItemTooltip("Fill only raises ground below the target; cut only lowers ground above it.");
+        ImGui::Checkbox("Fixed height", &m_brush.fixedHeight);
+        ImGui::SetItemTooltip("Off: towards the height where each stroke starts.\nAlt+click the ground: take its height (turns this on).");
+        ImGui::BeginDisabled(!m_brush.fixedHeight);
         ImGui::SetNextItemWidth(w - 90);
-        ImGui::SliderFloat("Strength", &m_brush.strength, 1.0f, 100.0f, "%.0f");
-        ImGui::TextColored(kQuiet, "Left drag: sculpt\nCtrl+wheel: radius\n1-4: switch mode");
+        ImGui::InputFloat("Height", &m_brush.height, 0.5f, 5.0f, "%.2f");
+        ImGui::EndDisabled();
+        ImGui::SetNextItemWidth(w - 90);
+        ImGui::SliderFloat("Slope", &m_brush.angle, 0.0f, 60.0f, "%.1f deg");
+        ImGui::SetNextItemWidth(w - 90);
+        ImGui::SliderFloat("Downhill", &m_brush.direction, 0.0f, 360.0f, "%.0f deg");
+        ImGui::SetItemTooltip("Direction the slope falls towards: 0 = +z, 90 = +x.");
+        ImGui::TextColored(kQuiet, "A slope flattens to a tilted plane through\nthe stroke's start (or the fixed height there):\nramps and roads up hills.");
+    }
+    const bool vertexMode = m_tool == Tool::Sculpt && m_brush.mode == Brush::Mode::Vertices;
+    const bool vertexFresh = vertexMode && !std::exchange(m_vertexTabShown, vertexMode);   // switching to Vertices brings its tab forward
+    if (!vertexMode) m_vertexTabShown = false;
+    if (vertexMode && Section("Vertices", vertexFresh))
+    {
+        ImGui::Text("%zu vertices selected", m_terrain.SelectedVertices());
+        ImGui::SetNextItemWidth(w - 90);
+        ImGui::SliderFloat("Step", &m_vertexStep, 0.1f, 20.0f, "%.1f yd", ImGuiSliderFlags_Logarithmic);
+        ImGui::BeginDisabled(!m_terrain.SelectedVertices());
+        if (ImGui::Button("Raise", { (w - 8) / 2, 0 })) EditVertices(TerrainAdapter::VertexOp::Move, m_vertexStep);
+        ImGui::SameLine();
+        if (ImGui::Button("Lower", { (w - 8) / 2, 0 })) EditVertices(TerrainAdapter::VertexOp::Move, -m_vertexStep);
+        ImGui::SetNextItemWidth(w - 90);
+        ImGui::InputFloat("##setheight", &m_vertexHeight, 0.5f, 5.0f, "%.2f");
+        ImGui::SameLine();
+        if (ImGui::Button("Set height", { 82, 0 })) EditVertices(TerrainAdapter::VertexOp::SetHeight, m_vertexHeight);
+        if (ImGui::Button("Even out (to their mean)", { w, 0 })) EditVertices(TerrainAdapter::VertexOp::Even, 0);
+        if (ImGui::Button("Clear selection", { w, 0 })) m_terrain.ClearVertexSelection();
+        ImGui::EndDisabled();
     }
     if (m_tool == Tool::Holes && Section("Holes"))
     {
-        Segmented("holemode", m_holeCut, { { true, "Cut" }, { false, "Fill" } }, w);
+        Segmented("holewhat", m_impassMode, { { false, "Holes" }, { true, "Impassable" } }, w);
+        if (m_impassMode) Segmented("impassmode", m_holeCut, { { true, "Set" }, { false, "Clear" } }, w);
+        else Segmented("holemode", m_holeCut, { { true, "Cut" }, { false, "Fill" } }, w);
         ImGui::SetNextItemWidth(w - 90);
         ImGui::SliderFloat("Radius##holes", &m_holeRadius, 1.0f, 60.0f, "%.0f yd", ImGuiSliderFlags_Logarithmic);
         ImGui::TextColored(kQuiet, "Left drag: cut (or fill)\nCtrl+drag: the opposite\nCtrl+wheel: radius");
-        ImGui::TextColored(kQuiet, "A hole cell is 1/16 of a chunk\n(8.3 x 8.3 yd), the finest size the\n3.3.5 client and AzerothCore support.");
+        if (m_impassMode)
+            ImGui::TextColored(kQuiet, "Whole chunks (33 x 33 yd), outlined red.\nThe client's impassable flag (MCNK 0x2);\nAzerothCore's extractors ignore it.");
+        else
+            ImGui::TextColored(kQuiet, "A hole cell is 1/16 of a chunk\n(8.3 x 8.3 yd), the finest size the\n3.3.5 client and AzerothCore support.");
     }
 
     if (m_tool == Tool::Select || m_tool == Tool::Copy)
@@ -3540,6 +4228,9 @@ void App::DrawToolsPanel()
             ImGui::Separator();
             ImGui::BeginDisabled(m_selection.empty());
             if (ImGui::Button("Rotate selection in place", { w, 0 })) RotateSelectionInPlace();
+            if (ImGui::Button("Revert selection to client", { w, 0 })) RevertSelectionToClient();
+            ImGui::SetItemTooltip("Puts the selected chunks back as the client has them: heights, textures, holes, water and objects.\n"
+                                  "One undo step on top of the edits; tiles the project added are left alone.");
             ImGui::EndDisabled();
         }
         // Placement options come forward when placing starts.
@@ -3639,6 +4330,7 @@ void App::DrawMapsPanel()
         return;
     }
 
+    if (m_mapListVersion != m_mapRows.Version()) RefreshMapList();   // maps created or undone
     ImGui::SetNextItemWidth(-FLT_MIN);
     ImGui::InputTextWithHint("##filter", "Search maps", m_mapFilter, sizeof m_mapFilter);
     const float listHeight = std::max(120.0f, ImGui::GetContentRegionAvail().y * 0.38f);
@@ -3647,18 +4339,64 @@ void App::DrawMapsPanel()
         for (size_t i = 0; i < m_maps.size(); ++i)
         {
             const MapEntry& m = m_maps[i];
-            if (!ContainsNoCase(m.name, m_mapFilter) && !ContainsNoCase(m.directory, m_mapFilter)) continue;
+            static const std::vector<MapVersion> kNone;
+            const auto& versions = i < m_mapVersions.size() ? m_mapVersions[i] : kNone;
+            bool match = ContainsNoCase(m.name, m_mapFilter) || ContainsNoCase(m.directory, m_mapFilter) || ContainsNoCase(m.source, m_mapFilter);
+            for (const MapVersion& v : versions) match = match || ContainsNoCase(v.label, m_mapFilter);
+            if (!match) continue;
             char label[256];
             snprintf(label, sizeof label, "%s##%u", m.name.empty() ? m.directory.c_str() : m.name.c_str(), m.id);
-            if (ImGui::Selectable(label, m_mapIndex == int(i))) SelectMap(i);
+            if (ImGui::Selectable(label, m_mapIndex == int(i) && m_mapVersion == 0)) SelectMap(i);
             ImGui::SameLine();
             ImGui::TextColored(kQuiet, "%u  %s", m.id, m.directory.c_str());
+            if (!m.source.empty())
+            {
+                ImGui::SameLine();
+                ImGui::TextColored({ 0.55f, 0.75f, 1.0f, 1.0f }, "[%s]", m.source.c_str());
+            }
+            // Other versions of the same map: lower base layers and compare sources, one row each.
+            for (size_t vi = 1; vi < versions.size(); ++vi)
+            {
+                const MapVersion& v = versions[vi];
+                snprintf(label, sizeof label, "      %s##%u_%zu", v.label.c_str(), m.id, vi);
+                if (ImGui::Selectable(label, m_mapIndex == int(i) && m_mapVersion == int(vi))) SelectMap(i, int(vi));
+                ImGui::SetItemTooltip(v.source == 0 ? "A lower base layer's copy of this map: the layer above it wins, so this one is shown, not edited."
+                                                    : "This map in a compare source (same map id): shown, not edited.");
+                ImGui::SameLine();
+                ImGui::TextColored(kQuiet, v.source == 0 ? "under" : "compare");
+            }
         }
     }
     ImGui::EndChild();
 
     if (m_mapIndex < 0) { ImGui::TextColored(kQuiet, "Select a map to see its tiles."); ImGui::End(); return; }
     const MapEntry& map = m_maps[size_t(m_mapIndex)];
+    if (const MapVersion* v = SelectedMapVersion(); v && !v->edited)
+    {
+        // Another version: its tiles and far heights, shown; the open map can show it as a ghost.
+        ImGui::TextColored(kAccent, "%s", v->label.c_str());
+        ImGui::SameLine();
+        ImGui::TextColored(kQuiet, "(shown, not edited)");
+        const bool open = m_terrain.Map() == map.directory;
+        Ghosts::Layer* ghost = nullptr;
+        for (Ghosts::Layer& l : m_ghosts.Layers())
+            if (l.source == v->source && l.archive == v->archive && l.layerWide == (v->archive >= 0) && l.map == (v->directory == m_terrain.Map() ? "" : v->directory))
+                ghost = &l;
+        ImGui::BeginDisabled(!open);
+        if (ImGui::Button(ghost ? "Remove the ghost" : "Show as ghost over the open map", { -1, 0 }))
+        {
+            if (ghost) RemoveGhostLayer(ghost->id);
+            else
+            {
+                Ghosts::Layer& l = m_ghosts.AddLayer(v->source, v->archive, v->label, v->directory == m_terrain.Map() ? "" : v->directory);
+                l.layerWide = v->archive >= 0;
+                Log("Ghost layer %s added over %s.", l.label.c_str(), m_terrain.Map().c_str());
+            }
+        }
+        ImGui::EndDisabled();
+        if (!open) ImGui::SetItemTooltip("Open %s first (its first row): the ghost shows over it.", map.directory.c_str());
+        if (v->source == 0) ImGui::TextColored(kQuiet, "To edit this version, move its layer to the top in Sources.");
+    }
     if (m_mapGlobal)
     {
         // A dungeon or other WMO-only map: no tiles, one WMO.
@@ -3675,7 +4413,8 @@ void App::DrawMapsPanel()
     // 64x64 tile grid over the map picture (land green to brown by height, blue shallows, dark deep water):
     // tan lines = tiles, orange = edited, blue outline = loaded, white dot = camera.
     const std::set<int> edited = m_terrain.EditedTiles(map.directory);
-    const bool current = m_terrain.Map() == map.directory;
+    const MapVersion* shownVersion = SelectedMapVersion();
+    const bool current = m_terrain.Map() == map.directory && (!shownVersion || shownVersion->edited);
     const float side = std::min(ImGui::GetContentRegionAvail().x, ImGui::GetContentRegionAvail().y - 30);
     const float cell = std::floor(std::max(side, 128.0f) / 64.0f);
     const ImVec2 o = ImGui::GetCursorScreenPos();
@@ -3707,7 +4446,7 @@ void App::DrawMapsPanel()
             const bool exists = m_mapTiles[size_t(y) * 64 + x];
             dl->AddRect({ o.x + x * cell - 1, o.y + y * cell - 1 }, { o.x + (x + 1) * cell, o.y + (y + 1) * cell }, IM_COL32(255, 255, 255, 200));
             ImGui::SetTooltip("%s %d, %d%s", map.directory.c_str(), x, y, exists ? "\nClick to fly there" : "\nNo tile");
-            if (exists && ImGui::IsItemClicked()) GoToTile(map.directory, x, y);
+            if (exists && ImGui::IsItemClicked() && (!shownVersion || shownVersion->edited)) GoToTile(map.directory, x, y);
         }
     }
     ImGui::TextColored(kQuiet, "Lines: tiles   Orange: edited   Blue: loaded   Dot: camera");
@@ -3893,9 +4632,69 @@ bool App::GoToChange(const Change& c, bool go)
     return false;
 }
 
+std::string App::SwapLabel() const
+{
+    return m_swapRemove ? "Remove " + FileOf(m_swapFrom) : "Swap " + FileOf(m_swapFrom) + " for " + FileOf(m_activeTexture);
+}
+
+void App::DrawWaterPanel(float w)
+{
+    static const char* kKinds[] = { "water", "ocean", "magma", "slime" };
+    if (Section("Water"))
+    {
+        Segmented("watermode", m_water.mode, { { WaterBrush::Mode::Add, "Add" }, { WaterBrush::Mode::Remove, "Remove" }, { WaterBrush::Mode::Level, "Level" } }, w);
+        const LiquidInfo* current = m_terrain.Liquid(m_water.type);
+        char label[96];
+        snprintf(label, sizeof label, "%s (%s, %u)", current ? current->name.c_str() : "unknown", current ? kKinds[int(current->kind)] : "?", m_water.type);
+        ImGui::SetNextItemWidth(w - 90);
+        if (ImGui::BeginCombo("Liquid", label))
+        {
+            for (const LiquidInfo& l : m_terrain.LiquidTypes())
+            {
+                snprintf(label, sizeof label, "%s (%s, %u)", l.name.c_str(), kKinds[int(l.kind)], l.id);
+                if (ImGui::Selectable(label, l.id == m_water.type)) m_water.type = l.id;
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::SetItemTooltip("LiquidType.dbc. Ocean is stored flat (one height per chunk), as in Blizzard's tiles.");
+        ImGui::SetNextItemWidth(w - 90);
+        ImGui::SliderFloat("Radius##water", &m_water.radius, 1.0f, 150.0f, "%.0f yd", ImGuiSliderFlags_Logarithmic);
+        ImGui::SetNextItemWidth(w - 90);
+        ImGui::InputFloat("Level", &m_water.level, 0.5f, 5.0f, "%.2f");
+        ImGui::SetItemTooltip("Height of the surface. Alt+click takes it (and the liquid) from the water or ground under the cursor.");
+        if (m_water.mode == WaterBrush::Mode::Add)
+        {
+            ImGui::Checkbox("Match nearby water", &m_waterFromClick);
+            ImGui::SetItemTooltip("Each stroke takes the liquid and level of the water it starts on, or of the\n"
+                                  "nearest water within %.0f yd, so it joins it without a seam.\nNo water near: the ground there plus the depth below.",
+                                  kWaterMatchRadius);
+            if (m_waterFromClick)
+            {
+                ImGui::SetNextItemWidth(w - 90);
+                ImGui::SliderFloat("Depth", &m_waterDepth, 0.0f, 20.0f, "%.1f yd");
+            }
+            ImGui::Checkbox("Take cells from other liquids", &m_water.replace);
+            ImGui::SetItemTooltip("Off: the new liquid is layered over what is there.");
+        }
+    }
+    if (Section("Slope"))
+    {
+        ImGui::SetNextItemWidth(w - 90);
+        ImGui::SliderFloat("Angle", &m_water.angle, 0.0f, 45.0f, "%.1f deg");
+        ImGui::SetNextItemWidth(w - 90);
+        ImGui::SliderFloat("Downhill", &m_water.direction, 0.0f, 360.0f, "%.0f deg");
+        ImGui::SetItemTooltip("Direction the surface falls towards: 0 = +z, 90 = +x.");
+        ImGui::TextColored(kQuiet, "The surface passes through the level where\nthe stroke starts. Rivers and waterfalls.\nOcean stays flat.");
+    }
+    ImGui::TextColored(kQuiet, "Left drag: %s   Ctrl+drag: %s\nAlt+click: pick level and liquid\nCtrl+wheel: radius\n"
+                               "Water already there keeps its height;\nLevel moves it.",
+                       m_water.mode == WaterBrush::Mode::Add ? "add" : m_water.mode == WaterBrush::Mode::Remove ? "remove" : "level",
+                       m_water.mode == WaterBrush::Mode::Add ? "remove" : m_water.mode == WaterBrush::Mode::Remove ? "add" : "level");
+}
+
 void App::UndoTo(size_t doneCount)
 {
-    if (m_terrain.Stroking() || m_terrain.HoleStroking() || m_terrain.AreaStroking()) return;
+    if (m_terrain.Stroking() || m_terrain.HoleStroking() || m_terrain.AreaStroking() || m_terrain.Watering()) return;
     const size_t steps = m_store.Done().size() - std::min(doneCount, m_store.Done().size());
     if (!steps) return;
     ClearPlacementView();
@@ -3905,7 +4704,7 @@ void App::UndoTo(size_t doneCount)
 
 void App::RedoTo(size_t undoneCount)
 {
-    if (m_terrain.Stroking() || m_terrain.HoleStroking() || m_terrain.AreaStroking()) return;
+    if (m_terrain.Stroking() || m_terrain.HoleStroking() || m_terrain.AreaStroking() || m_terrain.Watering()) return;
     const size_t steps = m_store.Undone().size() - std::min(undoneCount, m_store.Undone().size());
     if (!steps) return;
     ClearPlacementView();
@@ -3962,7 +4761,8 @@ void App::DrawShortcuts()
     sections.push_back({ "Commands", std::move(commands) });
     sections.push_back({ "Camera", { { "Right drag", "look around" }, { "W A S D / Q E", "move / down, up (while looking or with the viewport focused)" },
                                      { "Shift", "move faster" }, { "Wheel while right-dragging", "camera speed" }, { "Wheel", "move forward or back" },
-                                     { "F", "focus the camera on the tile" } } });
+                                     { "F", "focus the camera on the tile" },
+                                     { "Top-down (Ctrl+T)", "right or middle drag pans, Shift+right drag turns, W A S D glide, wheel or Q E zoom (towards the cursor); going to something keeps top-down over it" } } });
     sections.push_back({ "Selecting", { { "Click", "select" }, { "Shift+click", "add to the selection" }, { "Ctrl+click", "remove from the selection" },
                                         { "Drag empty space", "box select" }, { "Esc", "stop placing, cancel, then clear the selection" } } });
     sections.push_back({ "Moving things (objects, spawns, triggers, POIs, path points)",

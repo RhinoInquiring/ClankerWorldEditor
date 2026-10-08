@@ -445,10 +445,10 @@ bool App::UpdateGizmo(const ImVec2& origin, const ImVec2& size)
     }
     ImGuizmo::SetDrawlist(ImGui::GetWindowDrawList());
     ImGuizmo::SetRect(origin.x, origin.y, size.x, size.y);
-    ImGuizmo::SetOrthographic(false);
+    ImGuizmo::SetOrthographic(m_camera.topDown);
     XMFLOAT4X4 view, proj;
     XMStoreFloat4x4(&view, m_camera.View());
-    XMStoreFloat4x4(&proj, XMMatrixPerspectiveFovRH(XMConvertToRadians(60.0f), size.x / size.y, 1.0f, 6000.0f));
+    XMStoreFloat4x4(&proj, Projection(size.x / size.y, 1.0f, 6000.0f));
     if (!m_gizmoActive) m_gizmoMatrix = t->frame;
     const XMFLOAT4X4 before = m_gizmoMatrix;
 

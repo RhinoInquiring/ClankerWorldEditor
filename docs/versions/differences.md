@@ -34,7 +34,8 @@ name; **Rejected** shows the rejected ones; **Only new terrain** shows areas on 
 Right-click a card to reject it or bring a rejected one back. Verdicts are kept in the project, so a rescan
 remembers them; approved areas stop showing as different.
 
-Objects only your map has are noted on a card but are not an edit by themselves (a paste cannot remove them).
+Objects only your map has count as a difference too: approving removes them, as the paste leaves the area's objects as the
+other version has them ([Compare](compare.md#objects)). Creatures are not touched.
 
 ## New terrain
 

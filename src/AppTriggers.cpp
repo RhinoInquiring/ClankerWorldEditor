@@ -226,7 +226,7 @@ void App::TriggersViewport(const ImVec2& origin, const ImVec2& size, FXMMATRIX v
             tp.y = gy;
             tp.z = gz + 0.5f;   // a little above the ground, as Blizzard's arrivals are
             XMFLOAT3 forward;
-            XMStoreFloat3(&forward, m_camera.Forward());
+            XMStoreFloat3(&forward, m_camera.Heading());
             tp.o = Facing(forward);
             CommitTrigger(t->id, t, tp, "Teleport of trigger " + std::to_string(t->id));
         }

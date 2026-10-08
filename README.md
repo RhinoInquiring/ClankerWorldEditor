@@ -35,11 +35,12 @@ build\Release\wow-world-editor.exe
 ### Terrain
 | Feature | What it does |
 | --- | --- |
-| [Sculpt, paint and holes](docs/terrain/sculpt-paint-holes.md) | Raise, lower, flatten and smooth ground; paint up to four textures per chunk; shade vertex colours; cut and fill holes |
+| [Sculpt, paint and holes](docs/terrain/sculpt-paint-holes.md) | Raise, lower, flatten (ramps, fill or cut only) and smooth ground with five falloffs; move picked vertices; paint and swap up to four textures per chunk; shade vertex colours; cut and fill holes |
 | [Roads](docs/terrain/roads.md) | Roads and paths along splines: paint a centre and shoulder texture with ragged edges and grade the ground, live as you move points; bake when done |
-| [Copy and paste](docs/terrain/copy-paste.md) | Move areas of terrain with their textures, water and objects; seams blend into the ground around them |
+| [Copy and paste](docs/terrain/copy-paste.md) | Move areas of terrain with their textures, water and objects; seams blend into the ground around them; revert a selection to the client |
+| [New maps](docs/terrain/new-maps.md) | Make a new world map, dungeon or raid: its Map.dbc row, WDT and flat tiles in one step |
 | [Blueprints](docs/terrain/blueprints.md) | Save an area as a reusable piece and place it anywhere, on any map |
-| [Water](docs/terrain/water.md) | Terrain water travels with copies and pastes; a dry paste removes the water under it |
+| [Water](docs/terrain/water.md) | Paint, level, slope and remove water, magma, slime and ocean; water travels with copies and pastes |
 
 <!-- shot: copy-paste.png - a pinned paste with its blend band -->
 

@@ -50,13 +50,45 @@ struct ChunkRef
 
 struct Brush
 {
-    enum class Mode { Raise, Lower, Flatten, Smooth };
+    enum class Mode { Raise, Lower, Flatten, Smooth, Vertices };   // Vertices: the brush selects, PgUp/PgDn move them
+    enum class Falloff { Smooth, Linear, Flat, Sharp, Gaussian };
+    enum class Only { Both, Raise, Lower };
     Mode mode = Mode::Raise;
     float radius = 20.0f;     // yards
     float strength = 25.0f;   // yards per second at the centre (Raise/Lower), blend rate otherwise
+    Falloff falloff = Falloff::Smooth;
+    /// Flatten: towards the height where the stroke starts, or `height` when `fixedHeight`; `angle` degrees of slope
+    /// falling towards `direction` (0 = +z, 90 = +x) through that point makes ramps; `only` limits it to filling or cutting.
+    bool fixedHeight = false;
+    float height = 0, angle = 0, direction = 0;
+    Only only = Only::Both;
 };
+/// How much of the brush acts at t = 1 - distance / radius (1 at the centre, 0 at the rim).
+float BrushFalloff(Brush::Falloff falloff, float t);
 
 struct TerrainHit { DirectX::XMFLOAT3 pos; ChunkRef chunk; };
+
+/// A liquid the client knows (LiquidType.dbc): kind from its sound bank, MH2O vertex format from its LiquidMaterial.
+struct LiquidInfo
+{
+    enum class Kind { Water, Ocean, Magma, Slime };
+    uint16_t id = 0;
+    std::string name;
+    Kind kind = Kind::Water;
+    uint16_t format = 0;   // 0 heights + depth, 1 heights + uv, 2 depth only (flat), 3 heights + uv + depth
+};
+
+/// The Water tool's brush. The surface is a plane through `level` at the stroke's first point, tilted `angle` degrees
+/// downhill towards `direction` (0 = +z, clockwise from above); depth-only liquids (ocean) stay flat.
+struct WaterBrush
+{
+    enum class Mode { Add, Remove, Level };
+    Mode mode = Mode::Add;
+    float radius = 20.0f;
+    uint16_t type = 5;
+    float level = 0, angle = 0, direction = 0;
+    bool replace = true;   // Add: cells painted are taken from other liquids in the chunk
+};
 
 struct PaintBrush
 {
@@ -92,6 +124,8 @@ struct TerrainClipboard
     // Landmarks of another version (AreaPOI): [{"pos": [x, y, z] like the objects, "ground": no height of its own,
     // "row": the point's AreaPOI fields}]. Filled by the caller; the terrain only moves them with the copy.
     nlohmann::json pois = nlohmann::json::array();
+    // Objects of the map a paste in place takes away (a compare's: the ones the shown version lacks). Not saved.
+    std::vector<ObjectRef> replaces;
     int originX = 0, originZ = 0;   // grid cell the first chunk was copied from (for paste in place)
     bool Empty() const { return chunks.empty(); }
     int Width() const { int w = 0; for (const auto& e : chunks) w = std::max(w, e.dx + 1); return w; }
@@ -132,6 +166,7 @@ struct PastePlan
     std::vector<ChunkRef> footprint;
     std::vector<DoodadPlacement> doodads;   // objects to add, world positions (unique ids assigned on apply)
     std::vector<WmoPlacement> wmos;
+    std::vector<ObjectRef> removeObjects;   // map objects the paste takes away (TerrainClipboard::replaces)
     nlohmann::json pois = nlohmann::json::array();   // landmarks to add (TerrainClipboard::pois), world positions
     float widthYards = 0;           // blend width used (the automatic value when PasteOptions said 0)
 };
@@ -152,6 +187,7 @@ public:
     const std::optional<WmoPlacement>& GlobalWmo() const { return m_globalWmo; }
     void Unload();
     const std::string& Map() const { return m_map; }
+    bool BigAlpha() const { return m_bigAlpha; }
     const std::vector<bool>& Present() const { return m_present; }
 
     /// Loads missing tiles near (x, z) and drops tiles beyond the radius; pinned tiles load first and are never
@@ -187,12 +223,33 @@ public:
     std::optional<Change> EndHoles();
     bool HoleStroking() const { return m_holing; }
 
+    /// Water painting: Add makes cells of the brush's liquid wet (new vertices at the brush's level, water already
+    /// there keeps its height), Remove dries cells of any liquid, Level moves the surface under the brush to the level.
+    /// Depth and flow data follow the liquid's format (depth from the ground, as Blizzard's). One change per stroke.
+    void BeginWater(const DirectX::XMFLOAT3& origin) { m_watering = true; m_waterOrigin = origin; m_waterBefore.clear(); }
+    void WaterStep(const DirectX::XMFLOAT3& center, const WaterBrush& brush);
+    std::optional<Change> EndWater(const WaterBrush& brush);
+    bool Watering() const { return m_watering; }
+    /// The surface and liquid of the wet cell nearest a point within `radius` (water to match a new stroke to).
+    std::optional<std::pair<float, uint16_t>> NearestWater(float x, float z, float radius) const;
+    /// The water surface at a point (topmost liquid) and its type; none where the ground is dry.
+    std::optional<std::pair<float, uint16_t>> WaterAt(float x, float z) const;
+    /// The client's liquids, by id; Liquid(id) is null for one it lacks.
+    const std::vector<LiquidInfo>& LiquidTypes() const;
+    const LiquidInfo* Liquid(uint16_t id) const;
+
     /// Zone painting: sets the area id (AreaTable) of every chunk within `radius` of a point (the chunk under it always).
     /// One change per stroke.
     void BeginAreas() { m_areaing = true; m_areaStroke.clear(); }
     void AreaStep(const DirectX::XMFLOAT3& center, float radius, uint32_t area);
     std::optional<Change> EndAreas(const std::string& label);
     bool AreaStroking() const { return m_areaing; }
+    /// Impassable flag (MCNK 0x2) on every chunk within `radius` of a point (the chunk under it always), or off. The
+    /// client's flag: AzerothCore's extractors do not read it. One change per stroke.
+    void BeginImpass() { m_impassing = true; m_flagStroke.clear(); }
+    void ImpassStep(const DirectX::XMFLOAT3& center, float radius, bool set);
+    std::optional<Change> EndImpass();
+    bool Impassing() const { return m_impassing; }
     /// Chunks within `radius` of a point; the chunk under the point is always included.
     std::vector<ChunkRef> ChunksAt(const DirectX::XMFLOAT3& point, float radius) const;
 
@@ -202,6 +259,11 @@ public:
     void PaintStep(const DirectX::XMFLOAT3& center, const PaintBrush& brush, const std::string& texture, bool erase, float dt);
     std::optional<Change> EndPaint(const std::string& label);
     bool Painting() const { return m_painting; }
+    /// Texture swap: every layer of `from` in the chunks shows `to` instead (merged into `to`'s layer where the chunk
+    /// already has it); with `to` empty the layer is removed, its share going to the chunk's other textures (a chunk's
+    /// only texture stays). SwapStep works inside a BeginPaint / EndPaint stroke; SwapTexture is one change.
+    void SwapStep(const DirectX::XMFLOAT3& center, float radius, const std::string& from, const std::string& to);
+    std::optional<Change> SwapTexture(const std::string& from, const std::string& to, const std::vector<ChunkRef>& chunks, const std::string& label);
     /// The texture with the largest share at a point (the eyedropper).
     std::optional<std::string> TextureAt(float x, float z) const;
 
@@ -225,6 +287,16 @@ public:
     bool Shading() const { return m_shading; }
     /// The vertex colour (R, G, B) nearest a point (the eyedropper); none where the chunk has no MCCV.
     std::optional<std::array<uint8_t, 3>> ShadeAt(float x, float z) const;
+
+    /// Vertex selection (Sculpt > Vertices): heights picked with the brush, then moved together. Every copy of a
+    /// vertex (chunk edges hold one per chunk) is picked by position, so moves never open cracks.
+    void SelectVertices(const DirectX::XMFLOAT3& center, float radius, bool add);
+    void ClearVertexSelection() { m_vertexSel.clear(); }
+    size_t SelectedVertices() const { return m_vertexSel.size(); }
+    /// World positions of the selected vertices on loaded tiles (for drawing).
+    std::vector<DirectX::XMFLOAT3> SelectedVertexPositions() const;
+    enum class VertexOp { Move, SetHeight, Even };   // by `amount` yards, to height `amount`, to the selection's mean
+    std::optional<Change> EditSelectedVertices(VertexOp op, float amount);
 
     void BeginStroke(const TerrainHit& at);
     void StrokeStep(const DirectX::XMFLOAT3& center, const Brush& brush, float dt);
@@ -269,6 +341,8 @@ public:
     void CancelObjectEdit();
     bool ObjectEditing() const { return !m_objectEdit.empty(); }
     std::optional<Change> DeleteObjects(const std::set<ObjectRef>& objects);
+    /// Removes the objects from the loaded tiles; returns their change entries.
+    nlohmann::json RemoveObjects(const std::set<ObjectRef>& objects);
     /// New objects at world positions (unique ids are assigned; WMO bounds are computed). `placed` gets their refs.
     std::optional<Change> PlaceObjects(const std::vector<DoodadPlacement>& doodads, const std::vector<WmoPlacement>& wmos,
                                        const std::string& label, std::vector<ObjectRef>* placed = nullptr);
@@ -321,6 +395,9 @@ public:
     /// and low-detail WDL list them (overlay), and export ships their minimaps. One change adds them all; `error`
     /// collects tiles that could not be added.
     std::optional<Change> AddTiles(const std::vector<NewTile>& tiles, bool otherBigAlpha, std::string& error);
+    /// A new map named `map` (its Map.dbc row is the caller's): an empty WDT (MPHD `flags`) and WDL in the overlay,
+    /// written now; AddTiles on it then gives it ground. Undo removes the files (and closes the map if it is open).
+    Change CreateMap(const std::string& map, uint32_t flags);
     /// Tile (x, y) of `map` as `chain` has it, minimap included (its md5translate.trs entry), for AddTiles.
     static std::optional<NewTile> ReadNewTile(const MpqChain& chain, const std::string& map, int x, int y);
     /// The project's terrain edits per tile of `map`, one hash each: a tile's derived files (scan results, its
@@ -345,13 +422,19 @@ private:
     Change MakeChange(const Edits& edits, const nlohmann::json& layers, const std::string& label,
                       const nlohmann::json& holes = nlohmann::json::array(), const nlohmann::json& objects = nlohmann::json::array(),
                       const nlohmann::json& areas = nlohmann::json::array(), const nlohmann::json& liquids = nlohmann::json::array(),
-                      const nlohmann::json& colors = nlohmann::json::array()) const;
+                      const nlohmann::json& colors = nlohmann::json::array(), const nlohmann::json& flags = nlohmann::json::array()) const;
     /// Adds (after) or removes (before) a change's objects on a loaded tile.
     void SetObjects(LoadedTile& tile, const nlohmann::json& objects, bool after);
     /// A WMO's world bounding box from its root file's bounds and the placement (unchanged if unreadable).
     void FitWmoExtents(WmoPlacement& w) const;
     /// Writes a WMO-only map's WDT with its global WMO as `p` into the overlay (and shows it, when that map is open).
     void SetGlobalWmo(const std::string& map, const WmoPlacement& p);
+    bool SwapChunk(int key, size_t chunk, const std::string& from, const std::string& to, uint32_t effect);
+    /// Ground effect (grass, pebbles) a texture has elsewhere on the loaded tiles, so a new layer keeps its detail
+    /// doodads; only one this client knows (tiles pasted from another client can carry ids that crash it).
+    uint32_t EffectOf(const std::string& texture) const;
+    /// Writes (or removes) a created map's overlay WDT and WDL.
+    void SetCreatedMap(const std::string& map, uint32_t flags, bool present);
     uint32_t NextUniqueId() const;
     /// Adds objects to the loaded tiles under them and returns their "objects" entries (empty when none landed).
     nlohmann::json AddObjects(std::vector<DoodadPlacement> doodads, std::vector<WmoPlacement> wmos, std::vector<ObjectRef>* placed);
@@ -374,11 +457,20 @@ private:
 
     bool m_stroking = false;
     float m_flattenHeight = 0;
+    DirectX::XMFLOAT3 m_flattenOrigin{};
+    std::set<std::tuple<int, int, int>> m_vertexSel;   // (tile key, chunk, MCVT vertex)
     Edits m_stroke;
     std::vector<ChunkRef> m_previewed;   // chunks the renderer currently shows from a plan
     std::set<int> m_previewedWater;      // tiles whose water the renderer currently shows from a plan
+    bool m_watering = false;
+    DirectX::XMFLOAT3 m_waterOrigin{};
+    std::map<std::pair<int, int>, nlohmann::json> m_waterBefore;   // (tile, chunk) -> LiquidState before the stroke
+    mutable std::vector<LiquidInfo> m_liquidTypes;
+    mutable bool m_liquidTypesRead = false;
     bool m_holing = false;
     std::map<std::pair<int, int>, std::pair<uint16_t, uint16_t>> m_holeStroke;   // (tile, chunk) -> holes before, after
+    bool m_impassing = false;
+    std::map<std::pair<int, int>, std::pair<uint32_t, uint32_t>> m_flagStroke;   // (tile, chunk) -> MCNK flags before, after
     bool m_areaing = false;
     std::map<std::pair<int, int>, std::pair<uint32_t, uint32_t>> m_areaStroke;   // (tile, chunk) -> area before, after
     std::set<int> m_objectsChanged;

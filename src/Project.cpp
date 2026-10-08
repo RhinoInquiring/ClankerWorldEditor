@@ -20,6 +20,8 @@ bool Project::Save(std::string& error) const
         {
             layers.push_back({ { "kind", MpqLayer::KindName(l.kind) }, { "path", l.path }, { "enabled", l.enabled }, { "installed", l.installed } });
             if (!l.from.empty()) layers.back()["from"] = l.from;
+            if (!l.label.empty()) layers.back()["label"] = l.label;
+            if (!l.product.empty()) layers.back()["product"] = l.product;
         }
         return nlohmann::json{ { "name", s.name }, { "layers", std::move(layers) } };
     };
@@ -58,7 +60,7 @@ std::optional<Project> Project::Load(const fs::path& dir, std::string& error)
             Source out{ s.value("name", "") };
             for (const auto& l : s.value("layers", nlohmann::json::array()))
                 out.layers.push_back({ MpqLayer::KindFrom(l.value("kind", "mpqfolder")), l.value("path", ""), l.value("enabled", true),
-                                       l.value("installed", true), l.value("from", "") });
+                                       l.value("installed", true), l.value("from", ""), l.value("label", ""), l.value("product", "") });
             return out;
         };
         if (j.contains("base")) p.base = source(j["base"]);

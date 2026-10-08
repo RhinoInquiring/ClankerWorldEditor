@@ -34,7 +34,8 @@ namespace
 // matched back to their layer by id and generation.
 struct Ghosts::Worker
 {
-    struct Job { int layer = 0; int key = 0; uint64_t generation = 0; const MpqChain* chain = nullptr; int archive = -1; std::string path; bool bigAlpha = false; };
+    struct Job { int layer = 0; int key = 0; uint64_t generation = 0; const MpqChain* chain = nullptr; int archive = -1; std::string path; bool bigAlpha = false;
+                 bool layerWide = false; };
     struct Done { Job job; std::vector<uint8_t> bytes; std::optional<Adt> adt; };
 
     std::thread thread;
@@ -77,7 +78,8 @@ struct Ghosts::Worker
                 current = std::pair{ job.layer, job.key };
             }
             Done d{ job };
-            if (auto bytes = job.archive < 0 ? job.chain->Read(job.path) : job.chain->ReadFrom(size_t(job.archive), job.path))
+            if (auto bytes = job.archive < 0 ? job.chain->Read(job.path)
+                           : job.layerWide ? job.chain->ReadFromLayer(size_t(job.archive), job.path) : job.chain->ReadFrom(size_t(job.archive), job.path))
             {
                 d.adt = ParseAdt(*bytes, job.bigAlpha);
                 d.bytes = std::move(*bytes);
@@ -174,10 +176,10 @@ void Ghosts::RemoveSource(size_t index)
     if (worker) StartWorker();
 }
 
-std::optional<std::vector<uint8_t>> Ghosts::ReadVersion(size_t source, int archive, const std::string& path) const
+std::optional<std::vector<uint8_t>> Ghosts::ReadVersion(size_t source, int archive, const std::string& path, bool layerWide) const
 {
     const MpqChain& mpq = Chain(source);
-    return archive < 0 ? mpq.Read(path) : mpq.ReadFrom(size_t(archive), path);
+    return archive < 0 ? mpq.Read(path) : layerWide ? mpq.ReadFromLayer(size_t(archive), path) : mpq.ReadFrom(size_t(archive), path);
 }
 
 std::vector<Ghosts::Version> Ghosts::Versions(const std::string& map, int tx, int ty, const LoadedTile* main) const
@@ -189,14 +191,15 @@ std::vector<Ghosts::Version> Ghosts::Versions(const std::string& map, int tx, in
         const MpqChain& mpq = *m_sources[s].mpq;
         const bool bigAlpha = BigAlpha(mpq, map);
         bool first = true;
+        const auto used = s == 0 ? mpq.LayerOf(path) : std::nullopt;   // the layer the project's files take the tile from
         for (size_t a = 0; a < mpq.Names().size(); ++a)
         {
             if (!mpq.Has(a, path)) continue;
             const auto bytes = mpq.ReadFrom(a, path);
             if (!bytes) continue;
             const size_t hash = std::hash<std::string_view>{}(std::string_view(reinterpret_cast<const char*>(bytes->data()), bytes->size()));
-            const bool inUse = s == 0 && first;   // highest-priority archive of the project's client
-            first = false;
+            const bool inUse = s == 0 && first && used && mpq.ArchiveLayer(a) == *used;   // the archive the project's map reads it from
+            if (inUse) first = false;
             auto same = std::find_if(out.begin(), out.end(), [&](const Version& v) { return v.hash == hash && v.bytes == bytes->size(); });
             if (same != out.end())
             {
@@ -332,7 +335,7 @@ Ghosts::StreamResult Ghosts::Stream(const std::string& map, float x, float z, in
         Layer& l = *wanted.front().layer;
         const int tx = wanted.front().x, ty = wanted.front().y, key = TileKey(tx, ty);
         const std::string& shown = l.map.empty() ? map : l.map;   // the copies share coordinates
-        auto bytes = ReadVersion(l.source, l.archive, AdtPath(shown, tx, ty));
+        auto bytes = ReadVersion(l.source, l.archive, AdtPath(shown, tx, ty), l.layerWide);
         auto adt = bytes ? ParseAdt(*bytes, bigAlpha(l, shown)) : std::nullopt;
         if (!adt) { l.missing.insert(key); return result; }
         l.tiles.emplace(key, LoadedTile::Make(tx, ty, std::move(*bytes), std::move(*adt)));
@@ -350,7 +353,7 @@ Ghosts::StreamResult Ghosts::Stream(const std::string& map, float x, float z, in
             if (m_worker->Busy(w.layer->id, key)) continue;
             const std::string& shown = w.layer->map.empty() ? map : w.layer->map;
             m_worker->wanted.push_back({ w.layer->id, key, m_generation, &Chain(w.layer->source), w.layer->archive, AdtPath(shown, w.x, w.y),
-                                         bigAlpha(*w.layer, shown) });
+                                         bigAlpha(*w.layer, shown), w.layer->layerWide });
         }
         const size_t take = std::min(maxTiles, m_worker->done.size());
         for (size_t i = 0; i < take; ++i) finished.push_back(std::move(m_worker->done[i]));
@@ -399,11 +402,15 @@ namespace
         return w;
     }
 
-    std::string ObjectKey(std::string model, const float pos[3])
+    /// Model, position (nearest yard), turn (nearest degree) and scale: an object differing in any of them is another one.
+    std::string ObjectKey(std::string model, const float pos[3], const float rot[3], float scale = 1.0f)
     {
         for (char& ch : model) ch = ch == '/' ? '\\' : char(std::tolower((unsigned char)ch));
         if (model.size() > 4 && (model.ends_with(".mdx") || model.ends_with(".mdl"))) model.replace(model.size() - 4, 4, ".m2");
-        return model + "|" + std::to_string(std::lround(pos[0])) + "|" + std::to_string(std::lround(pos[1])) + "|" + std::to_string(std::lround(pos[2]));
+        std::string key = model;
+        for (int i = 0; i < 3; ++i) key += "|" + std::to_string(std::lround(pos[i]));
+        for (int i = 0; i < 3; ++i) key += "|" + std::to_string((std::lround(rot[i]) % 360 + 360) % 360);   // -26 and 334 are one turn
+        return key + "|" + std::to_string(std::lround(scale * 100));
     }
 
     std::pair<int, int> CellOf(const float pos[3]) { return { int(std::floor(pos[0] / kChunkSize)), int(std::floor(pos[2] / kChunkSize)) }; }
@@ -435,10 +442,10 @@ namespace
             const auto it = tiles.find(key);
             if (it == tiles.end()) continue;
             for (const DoodadPlacement& p : it->second.adt.doodads)
-                if (cells.count(CellOf(p.pos)) && seenD.insert(p.uniqueId).second) o.doodads.emplace(ObjectKey(p.model, p.pos), p);
+                if (cells.count(CellOf(p.pos)) && seenD.insert(p.uniqueId).second) o.doodads.emplace(ObjectKey(p.model, p.pos, p.rot, p.scale), p);
             for (const WmoPlacement& p : it->second.adt.wmos)
                 if ((cells.count(CellOf(p.pos)) || (wmoBounds && WmoReaches(p, cells))) && seenW.insert(p.uniqueId).second)
-                    o.wmos.emplace(ObjectKey(p.model, p.pos), p);
+                    o.wmos.emplace(ObjectKey(p.model, p.pos, p.rot), p);
         }
         return o;
     }
@@ -491,8 +498,10 @@ AreaDiff CompareArea(const std::map<int, LoadedTile>& map, const std::map<int, L
         if (!mine.doodads.count(k)) d.newDoodads.push_back(p);
     for (const auto& [k, p] : theirs.wmos)
         if (!mine.wmos.count(k)) d.newWmos.push_back(p);
-    for (const auto& [k, p] : mine.doodads) d.goneDoodads += !theirs.doodads.count(k);
-    for (const auto& [k, p] : mine.wmos) d.goneWmos += !theirs.wmos.count(k);
+    for (const auto& [k, p] : mine.doodads)
+        if (!theirs.doodads.count(k)) { ++d.goneDoodads; d.gone.push_back({ false, p.uniqueId }); }
+    for (const auto& [k, p] : mine.wmos)
+        if (!theirs.wmos.count(k)) { ++d.goneWmos; d.gone.push_back({ true, p.uniqueId }); }
     return d;
 }
 
@@ -533,11 +542,54 @@ std::vector<CellDiff> CompareCells(const std::map<int, LoadedTile>& map, const s
     for (const auto& [k, p] : theirs.wmos)
         if (!mine.wmos.count(k)) { CellDiff& c = at(p.pos); ++c.newObjects; c.kinds |= CellDiff::Objects; }
     for (const auto& [k, p] : mine.doodads)
-        if (!theirs.doodads.count(k)) ++at(p.pos).goneObjects;
+        if (!theirs.doodads.count(k)) { CellDiff& c = at(p.pos); ++c.goneObjects; c.kinds |= CellDiff::Objects; }
     for (const auto& [k, p] : mine.wmos)
-        if (!theirs.wmos.count(k)) ++at(p.pos).goneObjects;
+        if (!theirs.wmos.count(k)) { CellDiff& c = at(p.pos); ++c.goneObjects; c.kinds |= CellDiff::Objects; }
     std::vector<CellDiff> list;
     for (const auto& [cell, c] : out)
-        if (c.kinds) list.push_back(c);   // only removed objects: a paste cannot take them away, so not an edit to bring over
+        if (c.kinds) list.push_back(c);
     return list;
+}
+
+void SetAreaObjects(TerrainClipboard& clip, const AreaDiff& d)
+{
+    const float ox = clip.originX * kChunkSize, oz = clip.originZ * kChunkSize;
+    clip.doodads = d.newDoodads;
+    clip.wmos = d.newWmos;
+    for (DoodadPlacement& p : clip.doodads) { p.pos[0] -= ox; p.pos[2] -= oz; }
+    for (WmoPlacement& w : clip.wmos)
+    {
+        w.pos[0] -= ox; w.extMin[0] -= ox; w.extMax[0] -= ox;
+        w.pos[2] -= oz; w.extMin[2] -= oz; w.extMax[2] -= oz;
+    }
+    clip.replaces = d.gone;
+}
+
+std::optional<Change> RevertToClient(TerrainAdapter& terrain, const MpqChain& mpq, const std::set<std::pair<int, int>>& cells, size_t& skipped)
+{
+    skipped = 0;
+    const std::string& map = terrain.Map();
+    std::set<int> keys;
+    for (const auto& [gx, gz] : cells) keys.insert(TileKey(gx / 16, gz / 16));
+    std::map<int, LoadedTile> client;
+    for (int key : keys)
+    {
+        const std::string path = AdtPath(map, key % 64, key / 64);
+        std::error_code ec;
+        if (const auto overlay = mpq.OverlayPath(path); !overlay.empty() && std::filesystem::exists(overlay, ec)) continue;   // added by the project
+        if (const auto bytes = mpq.Read(path))
+            if (auto adt = ParseAdt(*bytes, terrain.BigAlpha())) client.emplace(key, LoadedTile::Make(key % 64, key / 64, {}, std::move(*adt)));
+    }
+    std::set<std::pair<int, int>> kept;
+    for (const auto& cell : cells)
+        if (client.count(TileKey(cell.first / 16, cell.second / 16))) kept.insert(cell);
+        else ++skipped;
+    if (kept.empty()) return std::nullopt;
+    TerrainClipboard clip = TerrainAdapter::CopyFrom(client, kept);
+    if (clip.Empty()) return std::nullopt;
+    SetAreaObjects(clip, CompareArea(terrain.Tiles(), client, kept));
+    PasteOptions o;
+    o.blend = false;   // exactly the client's chunks, nothing around them
+    // ponytail: vertex shading the client lacks stays (a plan reads empty colours as "unchanged"); clear it if anyone paints MCCV on stock tiles
+    return terrain.ApplyPlan(terrain.PlanPaste(clip, clip.originX, clip.originZ, 0.0f, o), "Revert " + std::to_string(kept.size()) + " chunk(s) to the client");
 }

@@ -263,7 +263,7 @@ void App::PoisViewport(const ImVec2& origin, const ImVec2& size, FXMMATRIX viewP
     if (p.kind == PoiKind::Tele)
     {
         XMFLOAT3 forward;
-        XMStoreFloat3(&forward, m_camera.Forward());
+        XMStoreFloat3(&forward, m_camera.Heading());
         p.o = Facing(forward);   // players arrive looking where the camera looks
     }
     CommitPoi(p.kind, p.id, p, std::string(pick == PoiPick::Place ? "Add " : "Move ") + KindName(p.kind) + " " + std::to_string(p.id));

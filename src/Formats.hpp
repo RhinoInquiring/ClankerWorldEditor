@@ -38,6 +38,7 @@ struct AdtChunk
     size_t mcnrOffset = 0;                    // file offset of the MCNR normals (145 x 3 int8), for export
     size_t mccvOffset = 0;                    // file offset of the MCCV colours (145 x BGRA), for export
     size_t mcnkOffset = 0;                    // file offset of the MCNK chunk (its magic), for header patches
+    uint32_t flags = 0;                       // MCNK flags (0x2 = impassable)
     uint16_t holes = 0;                       // 4x4 hole mask, bit (row * 4 + col); one bit = 2x2 cells (8.33 yd)
     uint32_t areaId = 0;
     uint32_t layerCount = 0;
@@ -82,6 +83,19 @@ struct Adt
 };
 std::optional<Adt> ParseAdt(const std::vector<uint8_t>& data, bool bigAlpha);
 
+/// A new flat tile (x, y): 256 chunks at `height`, one ground texture, no objects, no water, all of area `areaId`.
+std::vector<uint8_t> BlankAdt(int x, int y, float height, const std::string& texture, uint32_t areaId);
+/// A new map's WDT with no tiles (MPHD `flags`: 0x4 = 8-bit alpha, 0x2 = vertex colours) and its empty WDL.
+/// One 3.3.5 ADT from a newer client's split tile (Cataclysm and later): `root` (heights, normals, colours, holes,
+/// MH2O), `tex0` (textures, layers, alpha, shadows), `obj0` (doodads, WMOs, chunk references). Names given by
+/// FileDataID (MDID textures, MDDF/MODF entries flagged as such) come from `nameOf` (FILE%08X.dat when it has none);
+/// fine 8 x 8 holes become 4 x 4; an MH2O LiquidObject id becomes the vertex format its data has. Empty when `root`
+/// is not a split root. `notes` gets what could not be carried over as is.
+std::vector<uint8_t> MergeSplitAdt(const std::vector<uint8_t>& root, const std::vector<uint8_t>& tex0, const std::vector<uint8_t>& obj0,
+                                   const std::function<std::string(uint32_t)>& nameOf, std::vector<std::string>* notes = nullptr);
+std::vector<uint8_t> BlankWdt(uint32_t flags);
+std::vector<uint8_t> BlankWdl();
+
 /// A whole MH2O chunk body (header table, attributes, instances, existence bits, vertex data) for adt's liquids,
 /// each assigned to the chunk whose corner it carries. MCLQ-read liquids are written as MH2O too.
 std::vector<uint8_t> WriteMh2o(const Adt& adt);
@@ -113,7 +127,7 @@ bool SetUniqueIds(std::vector<uint8_t>& adt, const std::vector<uint32_t>& doodad
 /// The WDT with tile (x, y) marked present or absent in MAIN (empty when it has no MAIN).
 std::vector<uint8_t> WdtSetTile(std::vector<uint8_t> wdt, int x, int y, bool present);
 
-struct MapEntry { uint32_t id = 0; std::string directory; std::string name; };
+struct MapEntry { uint32_t id = 0; std::string directory; std::string name; std::string source; };   // source: the label of the layer it comes from
 /// Map.dbc rows (3.3.5 layout: ID, Directory, ..., MapName_lang enUS at field 5).
 std::vector<MapEntry> ParseMapDbc(const std::vector<uint8_t>& dbc);
 

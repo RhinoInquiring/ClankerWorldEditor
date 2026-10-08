@@ -128,3 +128,5 @@ std::optional<WmoAreaKeys> ReadWmoAreaKeys(const std::string& rootName, const st
 std::string M2Name(const std::string& placementName);
 std::string M2SkinName(const std::string& m2Name);
 std::string WmoGroupName(const std::string& rootName, uint32_t group);
+/// Group file `group` of a WMO root: by FileDataID (FILE%08X.dat) when the root has GFID, else WmoGroupName.
+std::string WmoGroupFile(const std::string& rootName, const std::vector<uint8_t>& root, uint32_t group);

@@ -33,6 +33,27 @@ Each layer has **Players have it**. On: players' clients already have these file
 patches), so the [patch MPQ](../output/export-and-patch.md) does not carry them. Off: new art the patch must carry;
 files the edits use from such a layer go into the patch. Unpacked folders added to the base start with it off.
 
+## Labels
+
+Each layer has a **Label**: your name for it ("Client", "Epoch zones", ...). The Maps window shows it in brackets
+beside every map whose WDT that layer supplies (the topmost base layer holding the map wins); maps the project made
+with File > New map show **[Project]**. The map search matches labels too. Labels are saved with the sources and change
+nothing else.
+
+## Versions of a map
+
+The project's maps are the client's: its Map.dbc and each map's own files (`World\Maps\<map>\`) come from the lowest
+layer that has them, the plain client, never a pack stacked over it. Every other file still comes from the topmost
+layer, as patches work. Each source's own Map.dbc is read to learn what it offers: maps whose ids the client lacks are
+added to the list, tagged with that source.
+
+When several sources have a map, the Maps window lists each version under it: every source (a base layer, or the
+layers sharing its label) whose Map.dbc lists the map's id and that holds its WDT, marked **under**, and every compare
+source with the same id, marked **compare**. A source's copy may use another folder; the row then names it. A source
+without a Map.dbc counts when it holds the map's WDT. The map's own row is the version you edit, the client's.
+Selecting another version shows its tile grid and far heights as that source has them, and **Show as ghost over the
+open map** lays it over your map (a source's version is read from its own layer alone).
+
 ## Editing
 
 New layers go on top. Arrows reorder, the checkbox disables, **x** removes; each layer shows what it gave (archives,
@@ -44,10 +65,10 @@ clients compare sources.
 
 ```json
 "base": { "name": "Client", "layers": [
-  { "kind": "mpqfolder", "path": "D:/WoW 3.3.5a/Data", "enabled": true, "installed": true },
+  { "kind": "mpqfolder", "path": "D:/WoW 3.3.5a/Data", "enabled": true, "installed": true, "label": "Client" },
   { "kind": "folder", "path": "D:/Mods/MyArt", "enabled": true, "installed": false }
 ] },
 "compare": [ { "name": "Turtle", "layers": [ { "kind": "mpqfolder", "path": "D:/TurtleWoW" } ] } ]
 ```
 
-`kind` is `mpqfolder`, `mpq` or `folder`; `from` (optional) is the folder a scan found the layer in.
+`kind` is `mpqfolder`, `mpq` or `folder`; `from` (optional) is the folder a scan found the layer in; `label` (optional) is its name in the Maps window.

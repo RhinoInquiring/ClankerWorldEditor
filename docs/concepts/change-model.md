@@ -57,9 +57,11 @@ One change may carry, per map:
 | `layers` | `[tileX, tileY, chunk, before, after]` | A chunk's texture layers, flags, ground effects, alpha (base64) |
 | `holes` | `[tileX, tileY, chunk, before, after]` | Hole mask |
 | `areas` | `[tileX, tileY, chunk, before, after]` | Area id |
+| `flags` | `[tileX, tileY, chunk, before, after]` | MCNK flags (the impassable bit) |
 | `liquids` | `[tileX, tileY, chunk, before, after]` | The chunk's whole water state (below); `[]` = none |
 | `objects` | `[tileX, tileY, "m2"/"wmo", before, after]` | A placement added, moved or deleted (null side) |
 | `tiles` | `[tileX, tileY, file, lastUid, minimap]` | A whole tile added from another version |
+| `create` | MPHD flags | A new map: its WDT and WDL written to the overlay (before its tiles; removed after them on undo) |
 
 Export: heights are patched in place and normals recomputed for reshaped chunks and their neighbours (across tile
 borders too); a tile with texture, object or water changes is rebuilt chunk by chunk in the client's own order; every
@@ -97,8 +99,8 @@ The client and worldserver read DBCs at start.
   row per room and name sets stop at 127.
 - WorldMapArea gives a zone picture's world rectangle; WorldMapOverlay the pieces shown once areas are explored.
   Pictures are rendered into `<project>/assets/` (not changes: rendering needs the tiles loaded).
-- Map rows are only ever modified (corpse entrance); the editor knows a few Map.dbc fields and leaves the rest as the
-  client has them.
+- Map rows are added by File > New map, and existing ones only modified (corpse entrance); the editor knows every field
+  but the other locales' strings, which it leaves as the client has them.
 
 ## Sources
 

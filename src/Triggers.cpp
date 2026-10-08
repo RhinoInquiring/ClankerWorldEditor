@@ -148,7 +148,11 @@ std::vector<Trigger> AreaTriggerAdapter::OnMap(uint32_t map) const
 }
 
 MapRowsAdapter::MapRowsAdapter(MpqChain& mpq, ChangeStore& store)
-    : DbcTable(mpq, store, "Map", { { "ID", 0, 'i' }, { "InstanceType", 2, 'i' }, { "CorpseMapID", 59, 'i' }, { "Corpse[0]", 60, 'f' }, { "Corpse[1]", 61, 'f' } }, 66)
+    : DbcTable(mpq, store, "Map", { { "ID", 0, 'i' }, { "Directory", 1, 's' }, { "InstanceType", 2, 'i' }, { "Flags", 3, 'i' }, { "PVP", 4, 'i' },
+                                    { "MapName_lang", 5, 's' }, { "AreaTableID", 22, 'i' }, { "MapDescription0_lang", 23, 's' },
+                                    { "MapDescription1_lang", 40, 's' }, { "LoadingScreenID", 57, 'i' }, { "MinimapIconScale", 58, 'f' },
+                                    { "CorpseMapID", 59, 'i' }, { "Corpse[0]", 60, 'f' }, { "Corpse[1]", 61, 'f' }, { "TimeOfDayOverride", 62, 'i' },
+                                    { "ExpansionID", 63, 'i' }, { "RaidOffset", 64, 'i' }, { "MaxPlayers", 65, 'i' } }, 66)
 {
 }
 

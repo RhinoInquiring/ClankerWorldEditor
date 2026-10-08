@@ -5,6 +5,7 @@
 
 #include "App.hpp"
 #include "Assets.hpp"
+#include "Downport.hpp"
 #include "Blend.hpp"
 #include "Catalog.hpp"
 #include "Formats.hpp"
@@ -707,7 +708,7 @@ namespace
             float b[6] = {};
             if (!root || !WmoRootInfo(*root, groups, b)) { printf("  WMO root failed: %s\n", w.model.c_str()); continue; }
             std::vector<std::vector<uint8_t>> groupFiles;
-            for (uint32_t g = 0; g < groups; ++g) groupFiles.push_back(mpq.Read(WmoGroupName(w.model, g)).value_or(std::vector<uint8_t>{}));
+            for (uint32_t g = 0; g < groups; ++g) groupFiles.push_back(mpq.Read(WmoGroupFile(w.model, *root, g)).value_or(std::vector<uint8_t>{}));
             const auto mesh = ParseWmo(*root, groupFiles);
             if (mesh) ++wmoOk;
 
@@ -1139,7 +1140,12 @@ namespace
         for (int i = 0; i < 9; ++i) terrain.Stream((tx + 0.5f) * kTileSize, (ty + 0.5f) * kTileSize, 1, error);
         Ghosts ghosts;
         std::vector<std::string> errors;
-        ghosts.Reset(&mpq, "base", { { "other", { { MpqLayer::Kind::MpqFolder, arg(3) } } } }, errors);
+        // "<install>*<product>": a CASC storage, as for the base.
+        const std::string other = arg(3);
+        const size_t star = other.find('*');
+        const MpqLayer otherLayer = star == std::string::npos ? MpqLayer{ MpqLayer::Kind::MpqFolder, other }
+                                                              : MpqLayer{ MpqLayer::Kind::Casc, other.substr(0, star), true, false, "", "", other.substr(star + 1) };
+        ghosts.Reset(&mpq, "base", { { "other", { otherLayer } } }, errors);
         if (!errors.empty()) { printf("%s\n", errors[0].c_str()); return 1; }
         mpq.SetFallbacks({ ghosts.Sources()[1].mpq });
         const int id = ghosts.AddLayer(1, -1, "other", __argc > 7 ? arg(7) : std::string()).id;   // optional 7th: another map of that client
@@ -1171,6 +1177,18 @@ namespace
         printf("closure: %zu file(s) copied, %zu missing everywhere, %.0f ms\n", report.copied.size(), report.missing.size(), ms);
         for (size_t i = 0; i < report.copied.size() && i < 12; ++i) printf("  + %s\n", report.copied[i].c_str());
         for (const auto& m : report.missing) printf("  ! %s\n", m.c_str());
+        printf("converted for 3.3.5a: %zu file(s)\n", report.converted.size());
+        for (size_t i = 0; i < report.notes.size() && i < 20; ++i) printf("  ~ %s\n", report.notes[i].c_str());
+        if (report.notes.size() > 20) printf("  ~ ... %zu more\n", report.notes.size() - 20);
+        size_t stillNewer = 0;   // every converted file must now be in 3.3.5a shape
+        for (const std::string& c : report.converted)
+        {
+            std::string rel = c;
+            std::replace(rel.begin(), rel.end(), '\\', '/');
+            std::ifstream f(out / std::filesystem::path(rel), std::ios::binary);
+            const std::vector<uint8_t> b((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+            if (IsNewerFormat(c, b)) { ++stillNewer; printf("  still newer: %s\n", c.c_str()); }
+        }
 
         // Without fallbacks, base client + exported files must resolve every reference reachable from the tiles.
         mpq.SetFallbacks({});
@@ -1199,7 +1217,7 @@ namespace
                 if (!seen.insert(Catalog::Normalize(r)).second) continue;
                 auto b = resolve(r);
                 const std::string lower = Catalog::Normalize(r);
-                const bool optional = lower.ends_with("_s.blp") || lower.ends_with("01.skin") || lower.ends_with("02.skin") || lower.ends_with("03.skin");
+                const bool optional = lower.ends_with("_s.blp") || lower.ends_with("01.skin") || lower.ends_with("02.skin") || lower.ends_with("03.skin") || lower.ends_with(".anim");
                 if (!b) { if (!optional && std::find(report.missing.begin(), report.missing.end(), r) == report.missing.end()) { ++unresolved; printf("  unresolved: %s\n", r.c_str()); } continue; }
                 ++checked;
                 todo.push_back({ r, std::move(*b) });
@@ -1207,7 +1225,7 @@ namespace
         }
         std::filesystem::remove_all(out, ec);
         printf("verification: %zu references resolve from the base client plus the export, %zu unresolved\n", checked, unresolved);
-        return unresolved ? 1 : 0;
+        return unresolved || stillNewer ? 1 : 0;
     }
 
     /// `--compare-check <data dir> <map> <x> <y>`: chunk edges of the map meet the way CompareArea reads them, the map
@@ -1233,6 +1251,7 @@ namespace
         mpq.Open(arg(2));
         ChangeStore store;
         TerrainAdapter terrain(mpq, renderer, store);
+        store.Register(terrain);
         if (!terrain.SetMap(map, error)) { printf("%s\n", error.c_str()); return 1; }
         for (int i = 0; i < 9; ++i) terrain.Stream((tx + 0.5f) * kTileSize, (ty + 0.5f) * kTileSize, 1, error);
         const LoadedTile& tile = terrain.Tiles().at(TileKey(tx, ty));
@@ -1347,6 +1366,39 @@ namespace
                 (void)d;
             }
             break;   // one version is enough to see the costs
+        }
+        // A paste in place leaves the tile's objects as the version has them (the map's others removed); undo puts them back.
+        for (const auto& l : ghosts.Layers())
+        {
+            const AreaDiff before = CompareArea(terrain.Tiles(), l.tiles, whole);
+            if (before.newDoodads.empty() && before.newWmos.empty() && before.gone.empty()) continue;
+            TerrainClipboard clip = TerrainAdapter::CopyFrom(l.tiles, whole);
+            SetAreaObjects(clip, before);
+            auto change = terrain.ApplyPlan(terrain.PlanPaste(clip, clip.originX, clip.originZ, 0.0f, PasteOptions{}), "replace check");
+            if (!change) { printf("  replace %s: nothing pasted\n", l.label.c_str()); ++problems; break; }
+            store.Commit(std::move(*change));
+            const AreaDiff after = CompareArea(terrain.Tiles(), l.tiles, whole);
+            // Revert to the client: the tile is the unedited one again (same difference from the version as before the paste).
+            size_t skipped = 0;
+            auto revert = RevertToClient(terrain, mpq, whole, skipped);
+            if (!revert) { printf("  revert: nothing reverted\n"); ++problems; break; }
+            store.Commit(std::move(*revert));
+            const AreaDiff reverted = CompareArea(terrain.Tiles(), l.tiles, whole);
+            printf("  revert to client: %zu chunk(s) differ (were %zu), objects +%zu -%zu, %zu skipped\n", reverted.changed, before.changed,
+                   reverted.newDoodads.size() + reverted.newWmos.size(), reverted.gone.size(), skipped);
+            if (reverted.changed != before.changed || reverted.newDoodads.size() != before.newDoodads.size() || reverted.gone.size() != before.gone.size() ||
+                std::fabs(reverted.maxHeight - before.maxHeight) > 0.01f)
+                ++problems;
+            store.Undo();
+            store.Undo();
+            const AreaDiff undone = CompareArea(terrain.Tiles(), l.tiles, whole);
+            printf("  replace %s: before +%zu -%zu, after +%zu -%zu, undone +%zu -%zu\n", l.label.c_str(),
+                   before.newDoodads.size() + before.newWmos.size(), before.gone.size(), after.newDoodads.size() + after.newWmos.size(),
+                   after.gone.size(), undone.newDoodads.size() + undone.newWmos.size(), undone.gone.size());
+            // ponytail: a building whose bounds only graze the tile can stay counted (its added copy is clipped to loaded tiles).
+            if (after.gone.size() || after.newDoodads.size()) ++problems;
+            if (undone.gone.size() != before.gone.size() || undone.newDoodads.size() != before.newDoodads.size()) ++problems;
+            break;
         }
         printf("%d problem(s)\n", problems);
         return problems ? 1 : 0;
@@ -2157,6 +2209,536 @@ namespace
         return problems ? 1 : 0;
     }
 
+    /// `--water-tool-check <Data>`: the Water tool on Azeroth 32_48 (Northshire): add, slope, level and remove water,
+    /// magma and ocean, undo and redo, then export and read the tile back.
+    int WaterToolCheck()
+    {
+        if (__argc < 3 || !__wargv) return 2;
+        setvbuf(stdout, nullptr, _IONBF, 0);
+        char dataDir[1024] = {};
+        WideCharToMultiByte(CP_ACP, 0, __wargv[2], -1, dataDir, sizeof dataDir, nullptr, nullptr);
+        ComPtr<ID3D11Device> device;
+        ComPtr<ID3D11DeviceContext> context;
+        if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &device, nullptr, &context))) return 1;
+        Renderer renderer;
+        std::string error;
+        if (!renderer.Init(device.Get(), context.Get(), error)) return 1;
+        MpqChain mpq;
+        mpq.Open(dataDir);
+        ChangeStore store;
+        TerrainAdapter terrain(mpq, renderer, store);
+        store.Register(terrain);
+        const int tx = 32, ty = 48, key = TileKey(tx, ty);
+        if (!terrain.SetMap("Azeroth", error) || !terrain.LoadNow(tx, ty, error)) { printf("%s\n", error.c_str()); return 1; }
+        int problems = 0;
+        auto check = [&](bool ok, const std::string& what) { printf("%s %s\n", ok ? "ok  " : "FAIL", what.c_str()); problems += !ok; };
+        const Adt& adt = terrain.Tiles().at(key).adt;
+        auto state = [&](int ci) { return TerrainAdapter::LiquidState(adt, adt.chunks[size_t(ci)]); };
+
+        // Liquids the client knows.
+        const auto& types = terrain.LiquidTypes();
+        auto first = [&](LiquidInfo::Kind kind) -> const LiquidInfo* {
+            for (const LiquidInfo& l : types)
+                if (l.kind == kind) return &l;
+            return nullptr;
+        };
+        const LiquidInfo* lake = terrain.Liquid(5);
+        const LiquidInfo* magma = first(LiquidInfo::Kind::Magma);
+        const LiquidInfo* ocean = first(LiquidInfo::Kind::Ocean);
+        check(types.size() > 10 && lake && magma && ocean, std::to_string(types.size()) + " liquid types; lake " + (lake ? lake->name : "?") + " format " +
+              std::to_string(lake ? lake->format : 99) + ", magma " + (magma ? magma->name + " format " + std::to_string(magma->format) : "?") +
+              ", ocean " + (ocean ? ocean->name + " format " + std::to_string(ocean->format) : "?"));
+        if (!lake || !magma || !ocean) return 1;
+
+        // A dry chunk with dry neighbours, away from the tile's edge.
+        int dry = -1;
+        for (int ci = 0; ci < 256 && dry < 0; ++ci)
+        {
+            const int cx = ci % 16, cz = ci / 16;
+            if (cx < 2 || cx > 13 || cz < 2 || cz > 13) continue;
+            bool ok = true;
+            for (int dz = -1; dz <= 1; ++dz)
+                for (int dx = -1; dx <= 1; ++dx) ok &= state((cz + dz) * 16 + cx + dx).empty();
+            if (ok) dry = ci;
+        }
+        check(dry >= 0, "found a dry spot (chunk " + std::to_string(dry) + ")");
+        if (dry < 0) return 1;
+        const AdtChunk& dc = adt.chunks[size_t(dry)];
+        const XMFLOAT3 mid{ dc.baseX + kChunkSize / 2, 0, dc.baseZ + kChunkSize / 2 };
+        const float ground = *terrain.HeightAt(mid.x, mid.z);
+        const size_t before = adt.liquids.size();
+
+        auto stroke = [&](const WaterBrush& b, std::initializer_list<XMFLOAT3> points) {
+            terrain.BeginWater(*points.begin());
+            for (const XMFLOAT3& p : points) terrain.WaterStep(p, b);
+            auto change = terrain.EndWater(b);
+            if (change) { printf("     %s\n", change->label.c_str()); store.Commit(std::move(*change)); }
+            return change.has_value();
+        };
+
+        // Add a lake 3 yd above the ground.
+        WaterBrush b;
+        b.type = lake->id;
+        b.radius = 12;
+        b.level = ground + 3;
+        check(stroke(b, { mid }), "add lake water");
+        const auto at = terrain.WaterAt(mid.x, mid.z);
+        check(at && std::fabs(at->first - b.level) < 0.01f && at->second == lake->id, "the surface is at the brush level and of its type");
+        const nlohmann::json added = state(dry);
+        check(added.size() == 1 && added[0]["format"] == lake->format, "one instance, the liquid's format");
+        {
+            const std::string extra = added[0]["extra"];
+            const auto bytes = Base64Decode(extra);
+            const int deepest = bytes.empty() ? 0 : *std::max_element(bytes.begin(), bytes.end());
+            check(deepest >= 20 && deepest <= 60, "depth bytes about 9 per yard (deepest " + std::to_string(deepest) + ")");
+        }
+
+        // A stroke starting on dry ground beside it finds it to match (Match nearby water).
+        const auto nearby = terrain.NearestWater(mid.x + 16 + 12, mid.z, 80);
+        check(nearby && std::fabs(nearby->first - b.level) < 0.01f && nearby->second == lake->id, "dry ground beside it matches its level and liquid");
+        check(!terrain.NearestWater(mid.x + 300, mid.z, 80), "nothing to match far away");
+
+        // Painting beside it at another level keeps the lake where it was.
+        WaterBrush higher = b;
+        higher.level = ground + 10;
+        check(stroke(higher, { { mid.x + 14, 0, mid.z } }), "paint more water beside it, higher");
+        check(std::fabs(terrain.WaterAt(mid.x, mid.z)->first - b.level) < 0.01f, "the first water kept its level");
+
+        // Level: the surface moves; a slope tilts it.
+        WaterBrush level = b;
+        level.mode = WaterBrush::Mode::Level;
+        level.level = ground + 5;
+        check(stroke(level, { mid }), "level the water 2 yd higher");
+        check(std::fabs(terrain.WaterAt(mid.x, mid.z)->first - level.level) < 0.01f, "the surface is at the new level");
+        WaterBrush sloped = level;
+        sloped.angle = 10;
+        sloped.direction = 90;   // downhill towards +x
+        check(stroke(sloped, { mid }), "slope it 10 degrees");
+        const float w0 = terrain.WaterAt(mid.x - 6, mid.z)->first, w1 = terrain.WaterAt(mid.x + 6, mid.z)->first;
+        check(w0 > w1 + 1.0f, "it falls towards +x (" + std::to_string(w0) + " -> " + std::to_string(w1) + ")");
+
+        // Undo all four, redo them.
+        const nlohmann::json last = state(dry);
+        for (int i = 0; i < 4; ++i) store.Undo();
+        check(state(dry).empty() && adt.liquids.size() == before, "undo removes all of it");
+        for (int i = 0; i < 4; ++i) store.Redo();
+        check(state(dry) == last, "redo brings it back exactly");
+
+        // Remove the middle.
+        WaterBrush dryOut = b;
+        dryOut.mode = WaterBrush::Mode::Remove;
+        dryOut.radius = 5;
+        check(stroke(dryOut, { mid }), "remove water in the middle");
+        check(!terrain.WaterAt(mid.x, mid.z) && terrain.WaterAt(mid.x - 10, mid.z), "the middle is dry, around it is wet");
+
+        // Magma over part of the lake takes those cells; ocean in another chunk stays flat.
+        WaterBrush lava = b;
+        lava.type = magma->id;
+        lava.radius = 6;
+        lava.level = ground + 1;
+        check(stroke(lava, { { mid.x - 10, 0, mid.z } }), "paint magma over the lake's edge");
+        check(terrain.WaterAt(mid.x - 10, mid.z)->second == magma->id, "magma there now");
+        size_t types2 = 0;
+        for (const auto& l : state(dry)) types2 += l["type"] == lake->id;
+        check(types2 == 1, "the lake keeps the rest");
+        const AdtChunk& oc = adt.chunks[size_t(dry + 32)];
+        WaterBrush sea = b;
+        sea.type = ocean->id;
+        sea.angle = 20;
+        sea.radius = 8;
+        sea.level = *terrain.HeightAt(oc.baseX + 16, oc.baseZ + 16) + 2;
+        check(stroke(sea, { { oc.baseX + 16, 0, oc.baseZ + 16 } }), "paint ocean, sloped brush");
+        const nlohmann::json seaState = TerrainAdapter::LiquidState(adt, oc);
+        bool flat = !seaState.empty();
+        for (const auto& l : seaState)
+            for (float h : l["heights"].get<std::vector<float>>()) flat &= h == sea.level;
+        check(flat, "ocean (depth only) stays flat");
+
+        // Export and read back.
+        const auto out = std::filesystem::temp_directory_path() / "wow-world-editor-watertoolcheck";
+        std::error_code ec;
+        std::filesystem::remove_all(out, ec);
+        std::vector<std::filesystem::path> files;
+        terrain.Export(out, error, &files);
+        std::ifstream f(out / "World" / "Maps" / "Azeroth" / "Azeroth_32_48.adt", std::ios::binary);
+        const std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        check(!bytes.empty() && ValidateAdt(bytes, false).empty(), "exported tile validates");
+        if (const auto back = ParseAdt(bytes, false))
+        {
+            size_t same = 0;
+            for (int ci = 0; ci < 256; ++ci) same += TerrainAdapter::LiquidState(*back, back->chunks[size_t(ci)]) == state(ci);
+            check(same == 256, "every chunk's water reads back as edited (" + std::to_string(same) + "/256)");
+        }
+        else check(false, "exported tile parses");
+        std::filesystem::remove_all(out, ec);
+        printf("%d problem(s)\n", problems);
+        return problems ? 1 : 0;
+    }
+
+    /// `--sculpt-check <Data>`: Sculpt options on Kalimdor 40_30: falloff shapes, a sloped flatten (ramp) lands on its
+    /// plane, fill only leaves high ground alone, moved vertex selections open no cracks, undo restores.
+    int SculptCheck()
+    {
+        if (__argc < 3 || !__wargv) return 2;
+        setvbuf(stdout, nullptr, _IONBF, 0);
+        char dataDir[1024] = {};
+        WideCharToMultiByte(CP_ACP, 0, __wargv[2], -1, dataDir, sizeof dataDir, nullptr, nullptr);
+        ComPtr<ID3D11Device> device;
+        ComPtr<ID3D11DeviceContext> context;
+        if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &device, nullptr, &context))) return 1;
+        Renderer renderer;
+        std::string error;
+        if (!renderer.Init(device.Get(), context.Get(), error)) return 1;
+        MpqChain mpq;
+        mpq.Open(dataDir);
+        ChangeStore store;
+        TerrainAdapter terrain(mpq, renderer, store);
+        store.Register(terrain);
+        if (!terrain.SetMap("Kalimdor", error) || !terrain.LoadNow(40, 30, error)) { printf("%s\n", error.c_str()); return 1; }
+        int problems = 0;
+        auto check = [&](bool ok, const std::string& what) { printf("%s %s\n", ok ? "ok  " : "FAIL", what.c_str()); problems += !ok; };
+
+        using F = Brush::Falloff;
+        check(BrushFalloff(F::Flat, 0.1f) == 1 && BrushFalloff(F::Linear, 0.5f) == 0.5f && BrushFalloff(F::Sharp, 0.5f) == 0.25f &&
+              BrushFalloff(F::Smooth, 0.5f) == 0.5f && BrushFalloff(F::Gaussian, 1) == 1 && BrushFalloff(F::Gaussian, 0) < 0.02f,
+              "falloff shapes (flat, linear, sharp, smooth, gaussian)");
+
+        const float cx = 40.5f * kTileSize, cz = 30.5f * kTileSize;
+        const float ground = *terrain.HeightAt(cx, cz);
+        int commits = 0;
+        auto stroke = [&](const Brush& b, XMFLOAT3 at, int steps) {
+            at.y = *terrain.HeightAt(at.x, at.z);
+            terrain.BeginStroke({ at, *terrain.ChunkAtGrid(int(at.x / kChunkSize), int(at.z / kChunkSize)) });
+            for (int i = 0; i < steps; ++i) terrain.StrokeStep(at, b, 0.5f);
+            auto change = terrain.EndStroke(b);
+            if (change) { store.Commit(std::move(*change)); ++commits; }
+            return change.has_value();
+        };
+
+        // A ramp: flatten to a plane 20 degrees downhill towards +x through (cx, ground + 4).
+        Brush ramp;
+        ramp.mode = Brush::Mode::Flatten;
+        ramp.radius = 30;
+        ramp.strength = 100;
+        ramp.falloff = F::Flat;
+        ramp.fixedHeight = true;
+        ramp.height = ground + 4;
+        ramp.angle = 20;
+        ramp.direction = 90;
+        check(stroke(ramp, { cx, 0, cz }, 20), "sloped flatten stroke");
+        float worst = 0;
+        for (float dx : { -15.0f, -5.0f, 5.0f, 15.0f })
+        {
+            const float want = ground + 4 - std::tan(XMConvertToRadians(20.0f)) * dx;
+            worst = std::max(worst, std::fabs(*terrain.HeightAt(cx + dx, cz) - want));
+        }
+        check(worst < 0.5f, "the ground lies on the ramp's plane (worst " + std::to_string(worst) + " yd)");
+
+        // Fill only: a flat target 10 yd under the ramp's top changes nothing above it.
+        const float before = *terrain.HeightAt(cx - 15, cz);
+        Brush fill = ramp;
+        fill.angle = 0;
+        fill.height = ground;   // the ramp's high side is ~9.5 yd above this
+        fill.only = Brush::Only::Raise;
+        fill.radius = 8;
+        stroke(fill, { cx - 15, 0, cz }, 20);
+        check(std::fabs(*terrain.HeightAt(cx - 15, cz) - before) < 0.01f, "fill only leaves higher ground alone");
+
+        // Vertices across a chunk corner: every copy moves, no cracks; undo restores.
+        const float vx = 40 * kTileSize + 4 * kChunkSize, vz = 30 * kTileSize + 4 * kChunkSize;   // a chunk corner
+        const float vBefore = *terrain.HeightAt(vx, vz);
+        terrain.SelectVertices({ vx, 0, vz }, 9, true);
+        const size_t picked = terrain.SelectedVertices();
+        terrain.SelectVertices({ vx + 6, 0, vz }, 2, false);
+        check(picked > 20 && terrain.SelectedVertices() < picked, "select " + std::to_string(picked) + " vertices, deselect some");
+        auto move = terrain.EditSelectedVertices(TerrainAdapter::VertexOp::Move, 6);
+        check(move.has_value(), "raise the selection 6 yd");
+        if (move) { store.Commit(std::move(*move)); ++commits; }
+        check(std::fabs(*terrain.HeightAt(vx, vz) - vBefore - 6) < 0.01f, "the corner is 6 yd higher");
+        std::vector<Problem> cracks;
+        terrain.FindCracks(cracks);
+        check(cracks.empty(), "no cracks between chunks (" + std::to_string(cracks.size()) + ")");
+        auto even = terrain.EditSelectedVertices(TerrainAdapter::VertexOp::Even, 0);
+        if (even) { store.Commit(std::move(*even)); ++commits; }
+        const auto positions = terrain.SelectedVertexPositions();
+        float spread = 0;
+        for (const XMFLOAT3& p : positions) spread = std::max(spread, std::fabs(p.y - positions.front().y));
+        check(even.has_value() && spread < 0.01f, "even out sets them all to one height");
+        for (int i = 0; i < commits; ++i) store.Undo();
+        check(std::fabs(*terrain.HeightAt(vx, vz) - vBefore) < 0.01f && std::fabs(*terrain.HeightAt(cx, cz) - ground) < 0.01f, "undo restores the ground");
+        printf("%d problem(s)\n", problems);
+        return problems ? 1 : 0;
+    }
+
+    /// `--newmap-check <Data>`: File > New map without the window: a Map.dbc and MapDifficulty row, the WDT and WDL, 2 x 2
+    /// flat tiles as one undo step; the tiles load, export writes everything, undo removes it all, redo and reopening
+    /// (overlay rebuilt from the changes) bring it back.
+    int NewMapCheck()
+    {
+        if (__argc < 3 || !__wargv) return 2;
+        setvbuf(stdout, nullptr, _IONBF, 0);
+        char dataDir[1024] = {};
+        WideCharToMultiByte(CP_ACP, 0, __wargv[2], -1, dataDir, sizeof dataDir, nullptr, nullptr);
+        ComPtr<ID3D11Device> device;
+        ComPtr<ID3D11DeviceContext> context;
+        if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &device, nullptr, &context))) return 1;
+        Renderer renderer;
+        std::string error;
+        if (!renderer.Init(device.Get(), context.Get(), error)) return 1;
+        const std::filesystem::path dir = std::filesystem::temp_directory_path() / "wow-world-editor-newmapcheck";
+        std::error_code ec;
+        std::filesystem::remove_all(dir, ec);
+        std::filesystem::create_directories(dir / "tiles", ec);
+        MpqChain mpq;
+        mpq.Open(dataDir);
+        mpq.SetOverlay(dir / "overlay");
+        ChangeStore store;
+        TerrainAdapter terrain(mpq, renderer, store);
+        MapRowsAdapter maps(mpq, store);
+        DbcTable difficulty(mpq, store, "MapDifficulty", { { "ID", 0, 'i' }, { "MapID", 1, 'i' }, { "Difficulty", 2, 'i' }, { "Message_lang", 3, 's' },
+                                                           { "RaidDuration", 20, 'i' }, { "MaxPlayers", 21, 'i' }, { "Difficultystring", 22, 's' } }, 23);
+        store.Register(terrain);
+        store.Register(maps);
+        store.Register(difficulty);
+        terrain.SetProjectDir(dir);
+        int problems = 0;
+        auto check = [&](bool ok, const std::string& what) { printf("%s %s\n", ok ? "ok  " : "FAIL", what.c_str()); problems += !ok; };
+
+        const std::string folder = "WweCheckMap";
+        const uint32_t id = maps.FreeId(800, 999), diffId = difficulty.FreeId(1000, 1099);
+        check(id >= 800 && diffId >= 1000 && maps.Row(0)["Directory"] == "Azeroth", "free ids " + std::to_string(id) + " / " + std::to_string(diffId) + ", Azeroth's row reads");
+        nlohmann::json row = maps.Row(36);   // like the Deadmines
+        row["ID"] = id;
+        row["Directory"] = folder;
+        row["MapName_lang"] = "Check Map";
+        row["InstanceType"] = 1u;
+        row["MaxPlayers"] = 5u;
+        std::vector<Change> parts;
+        parts.push_back(maps.MakeChange(id, nullptr, row, "new map"));
+        maps.Apply(parts.back());
+        parts.push_back(difficulty.MakeChange(diffId, nullptr, { { "ID", diffId }, { "MapID", id }, { "MaxPlayers", 5u } }, "new map"));
+        difficulty.Apply(parts.back());
+        parts.push_back(terrain.CreateMap(folder, 0x4));
+        check(terrain.SetMap(folder, error), "the new map opens from the overlay WDT");
+        std::vector<TerrainAdapter::NewTile> tiles;
+        for (int y = 31; y <= 32; ++y)
+            for (int x = 31; x <= 32; ++x) tiles.push_back({ x, y, BlankAdt(x, y, 25.0f, "Tileset\\Elwynn\\ElwynnGrassBase.blp", 0), {} });
+        auto added = terrain.AddTiles(tiles, true, error);
+        check(added.has_value(), "four flat tiles added" + (error.empty() ? "" : ": " + error));
+        if (!added) return 1;
+        parts.push_back(std::move(*added));
+        store.Commit(std::move(parts), "New map");
+        check(terrain.LoadNow(32, 32, error) && terrain.HeightAt(32.5f * kTileSize, 32.5f * kTileSize) == 25.0f, "tile 32_32 loads, flat at 25 yd");
+        const auto wdt = mpq.Read("World\\Maps\\" + folder + "\\" + folder + ".wdt");
+        check(wdt && WdtBigAlpha(*wdt) && WdtHasTile(*wdt, 31, 31) && WdtHasTile(*wdt, 32, 32) && !WdtHasTile(*wdt, 33, 32), "its WDT lists exactly the four tiles");
+
+        // Export: tiles, WDT, WDL, and the DBC rows.
+        const auto out = dir / "out";
+        std::vector<std::filesystem::path> files;
+        terrain.Export(out / "client", error, &files);
+        maps.Export({ out / "client" / "DBFilesClient" }, out / "dbc", error);
+        difficulty.Export({ out / "client" / "DBFilesClient" }, out / "dbc", error);
+        const auto mapDir = out / "client" / "World" / "Maps" / folder;
+        check(std::filesystem::exists(mapDir / (folder + "_31_32.adt")) && std::filesystem::exists(mapDir / (folder + ".wdt")) &&
+              std::filesystem::exists(mapDir / (folder + ".wdl")), "export writes the tiles, WDT and WDL (" + std::to_string(files.size()) + " files)");
+        bool listed = false;
+        if (std::ifstream f(out / "client" / "DBFilesClient" / "Map.dbc", std::ios::binary); f)
+            for (const MapEntry& m : ParseMapDbc(std::vector<uint8_t>((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>())))
+                listed |= m.id == id && m.directory == folder && m.name == "Check Map";
+        check(listed, "exported Map.dbc has the row");
+        check(std::filesystem::exists(out / "client" / "DBFilesClient" / "MapDifficulty.dbc") && std::filesystem::exists(out / "dbc" / "Map.json"),
+              "MapDifficulty.dbc and the mod-dbc-patch JSON written");
+
+        store.Undo();
+        check(!mpq.Read("World\\Maps\\" + folder + "\\" + folder + ".wdt") && maps.Row(id).is_null() && difficulty.Row(diffId).is_null() && terrain.Map().empty(),
+              "undo removes the WDT, both rows, and closes the map");
+        store.Redo();
+        const auto again = mpq.Read("World\\Maps\\" + folder + "\\" + folder + ".wdt");
+        check(again && WdtHasTile(*again, 32, 31) && maps.Row(id)["Directory"] == folder, "redo brings them back");
+        std::filesystem::remove_all(dir / "overlay", ec);
+        terrain.RebuildOverlay();
+        const auto rebuilt = mpq.Read("World\\Maps\\" + folder + "\\" + folder + ".wdt");
+        check(rebuilt && WdtHasTile(*rebuilt, 31, 32) && mpq.Read("World\\Maps\\" + folder + "\\" + folder + "_32_32.adt"), "reopening rebuilds the overlay");
+        std::filesystem::remove_all(dir, ec);
+        printf("%d problem(s)\n", problems);
+        return problems ? 1 : 0;
+    }
+
+    /// `--swap-check <Data>`: Paint > Swap on Azeroth 32_48: a texture swapped for one the tile lacks, one merged into a
+    /// texture its chunks already have (shares add up per texel), one removed; export validates; undo restores.
+    int SwapCheck()
+    {
+        if (__argc < 3 || !__wargv) return 2;
+        setvbuf(stdout, nullptr, _IONBF, 0);
+        char dataDir[1024] = {};
+        WideCharToMultiByte(CP_ACP, 0, __wargv[2], -1, dataDir, sizeof dataDir, nullptr, nullptr);
+        ComPtr<ID3D11Device> device;
+        ComPtr<ID3D11DeviceContext> context;
+        if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &device, nullptr, &context))) return 1;
+        Renderer renderer;
+        std::string error;
+        if (!renderer.Init(device.Get(), context.Get(), error)) return 1;
+        MpqChain mpq;
+        mpq.Open(dataDir);
+        ChangeStore store;
+        TerrainAdapter terrain(mpq, renderer, store);
+        store.Register(terrain);
+        const int key = TileKey(32, 48);
+        if (!terrain.SetMap("Azeroth", error) || !terrain.LoadNow(32, 48, error)) { printf("%s\n", error.c_str()); return 1; }
+        int problems = 0;
+        auto check = [&](bool ok, const std::string& what) { printf("%s %s\n", ok ? "ok  " : "FAIL", what.c_str()); problems += !ok; };
+        const LoadedTile& tile = terrain.Tiles().at(key);
+        auto name = [&](const AdtChunk& c, uint32_t l) { return Catalog::Normalize(tile.adt.textures[c.textureIds[l]]); };
+        auto layerOf = [&](const AdtChunk& c, const std::string& t) {
+            for (uint32_t l = 0; l < c.layerCount; ++l)
+                if (name(c, l) == Catalog::Normalize(t)) return int(l);
+            return -1;
+        };
+        auto weight = [&](const AdtChunk& c, int layer, size_t texel) {
+            const uint32_t n = c.layerCount;
+            return LayerWeights(n > 1 ? c.alpha[texel * 4] / 255.0f : 0, n > 2 ? c.alpha[texel * 4 + 1] / 255.0f : 0, n > 3 ? c.alpha[texel * 4 + 2] / 255.0f : 0)[size_t(layer)];
+        };
+        std::vector<ChunkRef> all;
+        for (size_t ci = 0; ci < tile.adt.chunks.size(); ++ci) all.push_back({ key, int(ci) });
+        std::vector<nlohmann::json> original;
+        for (const AdtChunk& c : tile.adt.chunks) original.push_back(TerrainAdapter::LayerState(tile, c));
+        int commits = 0;
+        auto swap = [&](const std::string& from, const std::string& to) {
+            auto change = terrain.SwapTexture(from, to, all, "swap check");
+            if (change) { store.Commit(std::move(*change)); ++commits; }
+            return change.has_value();
+        };
+
+        // A pair of textures sharing a chunk, for the merge; count uses of each texture.
+        std::map<std::string, int> uses;
+        std::string a, b;
+        size_t pairChunk = 0;
+        for (size_t ci = 0; ci < tile.adt.chunks.size(); ++ci)
+        {
+            const AdtChunk& c = tile.adt.chunks[ci];
+            for (uint32_t l = 0; l < c.layerCount; ++l) ++uses[tile.adt.textures[c.textureIds[l]]];
+            if (a.empty() && c.layerCount >= 3) { a = tile.adt.textures[c.textureIds[2]]; b = tile.adt.textures[c.textureIds[1]]; pairChunk = ci; }
+        }
+        check(!a.empty(), "a chunk with 3+ textures (" + std::to_string(pairChunk) + "): merge " + a + " into " + b);
+        if (a.empty()) return 1;
+
+        // Merge: a's share joins b's, texel by texel; one layer fewer.
+        const AdtChunk& pc = tile.adt.chunks[pairChunk];
+        const uint32_t layersBefore = pc.layerCount;
+        std::vector<float> expected(4096);
+        for (size_t i = 0; i < 4096; ++i) expected[i] = weight(pc, layerOf(pc, a), i) + weight(pc, layerOf(pc, b), i);
+        check(swap(a, b), "merge swap");
+        float worst = 0;
+        for (size_t i = 0; i < 4096; ++i) worst = std::max(worst, std::fabs(weight(pc, layerOf(pc, b), i) - expected[i]));
+        check(pc.layerCount == layersBefore - 1 && layerOf(pc, a) < 0 && worst < 0.03f, "one layer fewer, b's share = a + b (worst " + std::to_string(worst) + ")");
+
+        // Plain swap: b becomes a texture the tile lacks; layer counts unchanged everywhere.
+        const std::string dirt = "Tileset\\Barrens\\BarrensBaseDirt.blp";
+        std::vector<uint32_t> counts;
+        for (const AdtChunk& c : tile.adt.chunks) counts.push_back(c.layerCount);
+        check(swap(b, dirt), "swap " + b + " for a new texture");
+        bool same = true, gone = true;
+        for (size_t ci = 0; ci < tile.adt.chunks.size(); ++ci)
+        {
+            same &= tile.adt.chunks[ci].layerCount == counts[ci];
+            gone &= layerOf(tile.adt.chunks[ci], b) < 0;
+        }
+        check(same && gone && layerOf(pc, dirt) >= 0, "layer counts unchanged, the old texture gone, the new one in");
+
+        // Remove: the most used texture goes wherever another texture can take its place.
+        std::string most;
+        for (const auto& [t, n] : uses)
+            if (t != a && t != b && (most.empty() || n > uses[most])) most = t;
+        check(swap(most, ""), "remove " + most);
+        size_t kept = 0;
+        for (const AdtChunk& c : tile.adt.chunks)
+            if (layerOf(c, most) >= 0) { ++kept; if (c.layerCount != 1) { kept = 9999; break; } }
+        check(kept != 9999, "left only where it was the chunk's only texture (" + std::to_string(kept) + " chunk(s))");
+
+        const auto out = std::filesystem::temp_directory_path() / "wow-world-editor-swapcheck";
+        std::error_code ec;
+        std::filesystem::remove_all(out, ec);
+        terrain.Export(out, error);
+        std::ifstream f(out / "World" / "Maps" / "Azeroth" / "Azeroth_32_48.adt", std::ios::binary);
+        const std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        check(!bytes.empty() && ValidateAdt(bytes, false).empty(), "exported tile validates");
+        std::filesystem::remove_all(out, ec);
+
+        for (int i = 0; i < commits; ++i) store.Undo();
+        bool restored = true;
+        for (size_t ci = 0; ci < tile.adt.chunks.size(); ++ci) restored &= TerrainAdapter::LayerState(tile, tile.adt.chunks[ci]) == original[ci];
+        check(restored, "undo restores every chunk's layers");
+        printf("%d problem(s)\n", problems);
+        return problems ? 1 : 0;
+    }
+
+    /// `--impass-check <Data>`: Holes > Impassable on Azeroth 32_48: the brush sets MCNK flag 0x2, export writes exactly
+    /// those flags (every other header bit and chunk unchanged), clearing and undo restore.
+    int ImpassCheck()
+    {
+        if (__argc < 3 || !__wargv) return 2;
+        setvbuf(stdout, nullptr, _IONBF, 0);
+        char dataDir[1024] = {};
+        WideCharToMultiByte(CP_ACP, 0, __wargv[2], -1, dataDir, sizeof dataDir, nullptr, nullptr);
+        ComPtr<ID3D11Device> device;
+        ComPtr<ID3D11DeviceContext> context;
+        if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &device, nullptr, &context))) return 1;
+        Renderer renderer;
+        std::string error;
+        if (!renderer.Init(device.Get(), context.Get(), error)) return 1;
+        MpqChain mpq;
+        mpq.Open(dataDir);
+        ChangeStore store;
+        TerrainAdapter terrain(mpq, renderer, store);
+        store.Register(terrain);
+        const int key = TileKey(32, 48);
+        if (!terrain.SetMap("Azeroth", error) || !terrain.LoadNow(32, 48, error)) { printf("%s\n", error.c_str()); return 1; }
+        int problems = 0;
+        auto check = [&](bool ok, const std::string& what) { printf("%s %s\n", ok ? "ok  " : "FAIL", what.c_str()); problems += !ok; };
+        const LoadedTile& tile = terrain.Tiles().at(key);
+        std::vector<uint32_t> before;
+        for (const AdtChunk& c : tile.adt.chunks) before.push_back(c.flags);
+        const XMFLOAT3 at{ 32.5f * kTileSize, 0, 48.5f * kTileSize };
+        auto stroke = [&](bool set, float radius) {
+            terrain.BeginImpass();
+            terrain.ImpassStep(at, radius, set);
+            auto change = terrain.EndImpass();
+            if (change) { printf("     %s\n", change->label.c_str()); store.Commit(std::move(*change)); }
+            return change.has_value();
+        };
+        check(stroke(true, 40), "mark chunks impassable");
+        std::set<size_t> marked;
+        for (size_t ci = 0; ci < tile.adt.chunks.size(); ++ci)
+            if ((tile.adt.chunks[ci].flags & 0x2u) && !(before[ci] & 0x2u)) marked.insert(ci);
+        check(marked.size() >= 4 && marked.size() < 30, std::to_string(marked.size()) + " chunks newly flagged");
+
+        const auto out = std::filesystem::temp_directory_path() / "wow-world-editor-impasscheck";
+        std::error_code ec;
+        std::filesystem::remove_all(out, ec);
+        terrain.Export(out, error);
+        std::ifstream f(out / "World" / "Maps" / "Azeroth" / "Azeroth_32_48.adt", std::ios::binary);
+        const std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        const auto back = bytes.empty() ? std::nullopt : ParseAdt(bytes, false);
+        check(back && ValidateAdt(bytes, false).empty(), "exported tile validates");
+        if (back)
+        {
+            size_t right = 0;
+            for (size_t ci = 0; ci < back->chunks.size(); ++ci)
+                right += back->chunks[ci].flags == (marked.count(ci) ? before[ci] | 0x2u : before[ci]);
+            check(right == 256, "exported flags: the marked chunks gain 0x2, nothing else changes (" + std::to_string(right) + "/256)");
+        }
+        std::filesystem::remove_all(out, ec);
+
+        check(stroke(false, 10), "Ctrl-stroke clears some");
+        store.Undo();
+        store.Undo();
+        bool restored = true;
+        for (size_t ci = 0; ci < tile.adt.chunks.size(); ++ci) restored &= tile.adt.chunks[ci].flags == before[ci];
+        check(restored, "undo restores every chunk's flags");
+        printf("%d problem(s)\n", problems);
+        return problems ? 1 : 0;
+    }
+
     int GhostCheck()
     {
         if (__argc < 7 || !__wargv) return 2;
@@ -2282,6 +2864,91 @@ namespace
             }
         printf("ghost check: %d problem(s)\n", problems);
         return problems ? 1 : 0;
+    }
+
+    /// `--stream-check <project dir> <map> <x> <y> [tiles] [nofallback]`: opens the project the way the window does (base
+    /// layers, compare sources attached as fallbacks, CDN in the background), then walks `tiles` tiles east from (x, y)
+    /// loading terrain (radius 2) and models like the viewport: time per step and read counters, to find what is slow.
+    int StreamCheck()
+    {
+        if (__argc < 6 || !__wargv) return 2;
+        setvbuf(stdout, nullptr, _IONBF, 0);
+        auto arg = [](int i) {
+            char buf[1024] = {};
+            WideCharToMultiByte(CP_ACP, 0, __wargv[i], -1, buf, sizeof buf, nullptr, nullptr);
+            return std::string(buf);
+        };
+        std::string error;
+        const auto project = Project::Load(arg(2), error);
+        if (!project) { printf("%s\n", error.c_str()); return 1; }
+        const std::string map = arg(3);
+        const int tx = std::stoi(arg(4)), ty = std::stoi(arg(5)), steps = __argc > 6 ? std::stoi(arg(6)) : 4;
+        const bool fallbacks = !(__argc > 7 && arg(7) == "nofallback");
+        auto now = [] { return std::chrono::steady_clock::now(); };
+        auto ms = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+
+        auto t = now();
+        MpqChain mpq;
+        mpq.Open(project->base.layers);
+        mpq.SetMapsFromLowestLayer(true);
+        mpq.SetOverlay(project->dir / "overlay");
+        printf("base open: %.0f ms\n", ms(t, now()));
+        for (size_t i = 0; i < mpq.Report().size() && i < project->base.layers.size(); ++i)
+            printf("  layer %s: %.0f ms, %zu archive(s), %zu file(s) %s\n", project->base.layers[i].path.c_str(), mpq.Report()[i].ms,
+                   mpq.Report()[i].archives, mpq.Report()[i].files, mpq.Report()[i].note.c_str());
+        Ghosts ghosts;
+        if (fallbacks)
+        {
+            t = now();
+            std::vector<std::pair<std::string, std::vector<MpqLayer>>> compare;
+            for (const Project::Source& s : project->compare) compare.push_back({ s.name, s.layers });
+            std::vector<std::string> errors;
+            ghosts.Reset(&mpq, project->name, compare, errors);
+            std::vector<const MpqChain*> chains;
+            for (size_t i = 1; i < ghosts.Sources().size(); ++i) chains.push_back(ghosts.Sources()[i].mpq);
+            mpq.SetFallbacks(chains);
+            printf("compare sources attached as fallbacks: %zu, %.0f ms\n", chains.size(), ms(t, now()));
+        }
+        SetCdnAsync(true);
+
+        ComPtr<ID3D11Device> device;
+        ComPtr<ID3D11DeviceContext> context;
+        if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &device, nullptr, &context))) return 1;
+        Renderer renderer;
+        ModelRenderer models;
+        if (!renderer.Init(device.Get(), context.Get(), error) || !models.Init(device.Get(), context.Get(), renderer, error)) { printf("%s\n", error.c_str()); return 1; }
+        ChangeStore store;
+        TerrainAdapter terrain(mpq, renderer, store);
+        if (!terrain.SetMap(map, error)) { printf("%s\n", error.c_str()); return 1; }
+        MpqStats last = GetMpqStats();
+        for (int step = 0; step < steps; ++step)
+        {
+            const float x = (tx + step + 0.5f) * kTileSize, z = (ty + 0.5f) * kTileSize;
+            t = now();
+            size_t tiles = 0;
+            for (int i = 0; i < 40; ++i)
+            {
+                const auto loaded = terrain.Stream(x, z, 2, error, 1000.0f);
+                tiles += loaded.size();
+                if (loaded.empty() && i > 2) break;
+            }
+            const double terrainMs = ms(t, now());
+            t = now();
+            size_t added = 0;
+            for (const auto& [key, tile] : terrain.Tiles())
+                if (!models.HasTile(key)) { models.AddTile(key, tile.adt, mpq); ++added; }
+            const double modelMs = ms(t, now());
+            const MpqStats s = GetMpqStats();
+            printf("step %d (tile %d_%d): %zu terrain tile(s) %.0f ms, models of %zu tile(s) %.0f ms | fallback reads %llu (hits %llu, %.0f ms), "
+                   "CASC reads %llu, not on disk %llu, CDN queued %llu\n",
+                   step, tx + step, ty, tiles, terrainMs, added, modelMs, s.fallbackReads - last.fallbackReads, s.fallbackHits - last.fallbackHits,
+                   (s.fallbackMicros - last.fallbackMicros) / 1000.0, s.cascReads - last.cascReads, s.cascLocalMisses - last.cascLocalMisses,
+                   s.cdnQueued - last.cdnQueued);
+            last = s;
+        }
+        printf("first fallback names:\n");
+        for (const auto& n : GetMpqStats().fallbackNames) printf("  %s\n", n.c_str());
+        return 0;
     }
 
     /// `--render <data dir> <map> <x> <y> <out.png> [yaw] [pitch] [height above ground] [fx] [fz]`:
@@ -2559,8 +3226,14 @@ namespace
             roads.Commit(nullptr, &r, "render road");
         }
         const UINT w = 1280, h = 720;
-        const XMMATRIX viewProj = XMMatrixLookToRH(XMLoadFloat3(&eye), fwd, XMVectorSet(0, 1, 0, 0)) *
-                                  XMMatrixPerspectiveFovRH(XMConvertToRadians(60.0f), float(w) / h, 1.0f, 6000.0f);
+        // WWE_TOPDOWN=<height>: the editor's top-down view (flat, straight down from that high over the eye's ground).
+        const float topDown = std::getenv("WWE_TOPDOWN") ? float(std::atof(std::getenv("WWE_TOPDOWN"))) : 0.0f;
+        const float tall = 2.0f * topDown * std::tan(XMConvertToRadians(30.0f));
+        const XMFLOAT3 ground{ eye.x, eye.y - above, eye.z }, high{ eye.x, eye.y - above + topDown, eye.z };
+        const XMMATRIX viewProj = topDown > 0
+            ? XMMatrixLookToRH(XMLoadFloat3(&high), XMVectorSet(0, -1, 0, 0), XMVectorSet(std::sin(XMConvertToRadians(yaw)), 0, std::cos(XMConvertToRadians(yaw)), 0)) *
+                  XMMatrixOrthographicRH(tall * w / h, tall, -3000.0f, std::max(6000.0f, topDown + 3000.0f))
+            : XMMatrixLookToRH(XMLoadFloat3(&eye), fwd, XMVectorSet(0, 1, 0, 0)) * XMMatrixPerspectiveFovRH(XMConvertToRadians(60.0f), float(w) / h, 1.0f, 6000.0f);
 
         D3D11_TEXTURE2D_DESC d{};
         d.Width = w;
@@ -2619,7 +3292,7 @@ namespace
         }
         DrawOptions options;
         options.showObjects = false;
-        options.eye = eye;
+        options.eye = topDown > 0 ? ground : eye;
         const int solo = std::getenv("WWE_SOLO") && __argc > 12 ? 1 : 0;   // show the ghost map alone, as Solo does
         options.solo = solo;
         options.lod = std::getenv("WWE_NO_LOD") == nullptr;   // compare renders with and without
@@ -2640,10 +3313,10 @@ namespace
         }
         ModelRenderer::DrawSettings settings;
         settings.distance = 1200.0f;
-        models.Draw(viewProj, eye, settings);
+        models.Draw(viewProj, options.eye, settings);
         {
             const auto m0 = std::chrono::steady_clock::now();   // CPU side of a model frame (culling, bone posing, uploads)
-            for (int i = 0; i < 5; ++i) models.Draw(viewProj, eye, settings);
+            for (int i = 0; i < 5; ++i) models.Draw(viewProj, options.eye, settings);
             printf("model draw (CPU): %.2f ms\n", std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - m0).count() / 5);
         }
         {
@@ -3103,10 +3776,16 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdLine, int)
     if (cmdLine && wcsstr(cmdLine, L"--model-check")) return ModelCheck();
     if (cmdLine && wcsstr(cmdLine, L"--render")) return RenderCheck();
     if (cmdLine && wcsstr(cmdLine, L"--catalog-check")) return CatalogCheck();
+    if (cmdLine && wcsstr(cmdLine, L"--stream-check")) return StreamCheck();
     if (cmdLine && wcsstr(cmdLine, L"--skin-check")) return SkinCheck();
     if (cmdLine && wcsstr(cmdLine, L"--appearance-check")) return AppearanceCheck();
     if (cmdLine && wcsstr(cmdLine, L"--ghost-check")) return GhostCheck();
     if (cmdLine && wcsstr(cmdLine, L"--compare-check")) return CompareCheck();
+    if (cmdLine && wcsstr(cmdLine, L"--water-tool-check")) return WaterToolCheck();
+    if (cmdLine && wcsstr(cmdLine, L"--sculpt-check")) return SculptCheck();
+    if (cmdLine && wcsstr(cmdLine, L"--newmap-check")) return NewMapCheck();
+    if (cmdLine && wcsstr(cmdLine, L"--swap-check")) return SwapCheck();
+    if (cmdLine && wcsstr(cmdLine, L"--impass-check")) return ImpassCheck();
     if (cmdLine && wcsstr(cmdLine, L"--water-check")) return WaterCheck();
     if (cmdLine && wcsstr(cmdLine, L"--diff-check")) return DiffCheck();
     if (cmdLine && wcsstr(cmdLine, L"--tiles-check")) return TilesCheck();
@@ -3800,6 +4479,28 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdLine, int)
         const auto out = SoapCommand(profile->soapHost, profile->soapPort, narrow(3), narrow(4), "server info", error);
         printf("soap: %s\n", out ?out->c_str() : error.c_str());
         return 0;
+    }
+    if (cmdLine && wcsstr(cmdLine, L"--cdn-check") && __argc >= 4)
+    {
+        // `--cdn-check <install>*<product> <game path>`: in the window's mode a CASC file missing on disk misses at
+        // once and arrives in the background; then it reads.
+        char dir[1024] = {}, name[1024] = {};
+        WideCharToMultiByte(CP_ACP, 0, __wargv[2], -1, dir, sizeof dir, nullptr, nullptr);
+        WideCharToMultiByte(CP_ACP, 0, __wargv[3], -1, name, sizeof name, nullptr, nullptr);
+        MpqChain mpq;
+        mpq.Open(dir);
+        SetCdnAsync(true);
+        const auto t0 = std::chrono::steady_clock::now();
+        auto ms = [&] { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(); };
+        const uint64_t before = CdnArrivals();
+        const bool first = mpq.Read(name).has_value();
+        printf("first read: %s in %.0f ms\n", first ? "on disk" : "missed (queued)", ms());
+        if (first) return 0;
+        while (CdnArrivals() == before && ms() < 300000) Sleep(50);
+        printf("arrived after %.0f ms\n", ms());
+        const auto second = mpq.Read(name);
+        printf("second read: %s, %zu bytes, %.0f ms total\n", second ? "ok" : "FAILED", second ? second->size() : 0, ms());
+        return second ? 0 : 1;
     }
     if (cmdLine && wcsstr(cmdLine, L"--extract") && __argc >= 5)
     {
@@ -4759,7 +5460,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdLine, int)
         return problems ? 1 : 0;
     }
     if (cmdLine && wcsstr(cmdLine, L"--rewrite-check")) return RewriteCheck();
-    if (cmdLine && wcsstr(cmdLine, L"--selftest")) return FormatsSelfTest() && ChangesSelfTest() && TerrainSelfTest() && BlendSelfTest() && CatalogSelfTest() && BlueprintSelfTest() && TriggersSelfTest() && TransformSelfTest() && RoadSelfTest() ? 0 : 1;
+    if (cmdLine && wcsstr(cmdLine, L"--selftest")) return FormatsSelfTest() && ChangesSelfTest() && TerrainSelfTest() && BlendSelfTest() && CatalogSelfTest() && BlueprintSelfTest() && DownportSelfTest() && TriggersSelfTest() && TransformSelfTest() && RoadSelfTest() ? 0 : 1;
     if (cmdLine && wcsstr(cmdLine, L"--check")) return Check();
 
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);

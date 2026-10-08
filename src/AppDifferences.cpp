@@ -190,14 +190,8 @@ void App::ReviewDifference(const Differences::Region& r)
     EndNewTiles();
     m_selection.clear();
     if (m_terrain.Map() != m_diffs.BaseMap()) GoToTile(m_diffs.BaseMap(), r.x0 / 16, r.z0 / 16);
-    // Look at it from the south, high enough to see all of it.
-    const float cx = float(r.x0 + r.x1 + 1) * 0.5f * kChunkSize, cz = float(r.z0 + r.z1 + 1) * 0.5f * kChunkSize;
-    const float span = float(std::max(r.x1 - r.x0 + 1, r.z1 - r.z0 + 1)) * kChunkSize, dist = span * 0.9f + 60.0f;
-    m_camera.pos.x = cx;
-    m_camera.pos.z = cz - dist;
-    m_camera.pos.y = m_terrain.HeightAt(cx, cz).value_or(m_camera.pos.y - dist * 0.68f) + dist * 0.68f;
-    m_camera.yaw = 0;
-    m_camera.pitch = -0.6f;
+    FrameArea(float(r.x0 + r.x1 + 1) * 0.5f * kChunkSize, float(r.z0 + r.z1 + 1) * 0.5f * kChunkSize,
+              float(std::max(r.x1 - r.x0 + 1, r.z1 - r.z0 + 1)) * kChunkSize);
     m_diffPending = r.cells;
     m_diffActive = r.key;
     m_tool = Tool::Copy;
@@ -378,7 +372,7 @@ void App::DrawDifferences()
                             float(r.z1 - r.z0 + 1) * kChunkSize, r.x0 / 16, r.z0 / 16);
                 ImGui::Text("Changes: %s", Kinds(r.kinds).c_str());
                 if (r.kinds & CellDiff::Heights) ImGui::Text("Height change up to %.1f yd", r.maxHeight);
-                if (r.newObjects || r.goneObjects) ImGui::Text("Objects: +%zu new, -%zu only on this map (stay)", r.newObjects, r.goneObjects);
+                if (r.newObjects || r.goneObjects) ImGui::Text("Objects: +%zu new, -%zu only on this map (removed)", r.newObjects, r.goneObjects);
                 ImGui::TextColored(kQuiet, r.status == Differences::Status::Rejected ? "Rejected. Right-click: back to review"
                                                                                      : "Click: fly there and show it in place (Enter approves)");
                 ImGui::EndTooltip();

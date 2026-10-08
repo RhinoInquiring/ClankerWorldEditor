@@ -32,14 +32,16 @@ Per version (the table in the Versions window and the blue line in the viewport)
 | Height | Mean / largest height difference |
 | Edge step | Largest step on the selection's outer edge: what the blend band must absorb (orange above 2 yd) |
 | Water | Chunks whose water differs (fishing and fatigue masks aside: map editors rewrite those) |
-| Objects + / - | Objects only the version has (the paste adds them) / only your map has (left standing) |
+| Objects + / - | Objects only the version has (the paste adds them) / only your map has (the paste removes them) |
 | Assets | Textures and models only another client has (copied on export) or no source has (missing) |
 
 ## Objects
 
 A doodad comes with the chunk its origin stands on. A building comes with every area its bounds reach, so a cave
-whose origin lies off to one side still comes with the area it runs through. A pasted version adds only the objects
-your map lacks, so placements both share are never doubled. The paste waits for the tile holding each carried
+whose origin lies off to one side still comes with the area it runs through. A pasted version leaves the area's objects
+as that version has them: placements both share (same model, position to the yard, turn to the degree, scale) stay
+untouched, your map's others are removed and the version's others added, all in the same undo step. Creatures are
+server spawns and are not touched. The paste waits for the tile holding each carried
 object's origin to load.
 
 ## See also

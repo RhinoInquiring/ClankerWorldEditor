@@ -58,6 +58,68 @@ namespace
         m.boundsMax = { std::max(m.boundsMax.x, p.x), std::max(m.boundsMax.y, p.y), std::max(m.boundsMax.z, p.z) };
     }
 
+    bool Magic(const std::vector<uint8_t>& d, size_t at, const char (&m)[5]) { return d.size() >= at + 4 && std::memcmp(d.data() + at, m, 4) == 0; }
+
+    std::string FileIdName(uint32_t id)
+    {
+        char b[20];
+        snprintf(b, sizeof b, "FILE%08X.dat", id);
+        return b;
+    }
+
+    /// A chunked M2 (Legion and later: MD21 holding the MD20 block, offsets relative to it) and the FileDataIDs that
+    /// stand in for names: skins (SFID, views first), textures (TXID, one per texture entry), .anim files (AFID).
+    /// A plain MD20 file gives itself and no ids.
+    struct M2File
+    {
+        std::vector<uint8_t> chunked;   // the MD20 block of a chunked file (empty: the file is plain MD20)
+        std::vector<uint32_t> skins, textures;
+        struct Anim { uint16_t id, variation; uint32_t file; };
+        std::vector<Anim> anims;
+        /// The MD20 block: of the chunked file, else `file` itself.
+        const std::vector<uint8_t>& Body(const std::vector<uint8_t>& file) const { return chunked.empty() ? file : chunked; }
+        /// The .anim file of animation `id`/`variation` when AFID names it.
+        std::optional<std::string> AnimName(uint16_t id, uint16_t variation) const
+        {
+            for (const Anim& a : anims)
+                if (a.id == id && a.variation == variation && a.file) return FileIdName(a.file);
+            return std::nullopt;
+        }
+    };
+
+    std::optional<M2File> UnwrapM2(const std::vector<uint8_t>& d)
+    {
+        M2File f;
+        if (Magic(d, 0, "MD20")) return f;
+        if (!Magic(d, 0, "MD21")) return std::nullopt;
+        for (size_t pos = 0; pos + 8 <= d.size();)
+        {
+            uint32_t size = 0;
+            ReadAt(d, pos + 4, size);
+            const size_t at = pos + 8;
+            if (size > d.size() - at) break;
+            if (Magic(d, pos, "MD21")) f.chunked.assign(d.begin() + at, d.begin() + at + size);
+            auto ids = [&](std::vector<uint32_t>& out) {
+                out.resize(size / 4);
+                std::memcpy(out.data(), d.data() + at, out.size() * 4);
+            };
+            if (Magic(d, pos, "SFID")) ids(f.skins);
+            if (Magic(d, pos, "TXID")) ids(f.textures);
+            if (Magic(d, pos, "AFID"))
+                for (size_t i = 0; i + 8 <= size; i += 8)
+                {
+                    M2File::Anim a{};
+                    ReadAt(d, at + i, a.id);
+                    ReadAt(d, at + i + 2, a.variation);
+                    ReadAt(d, at + i + 4, a.file);
+                    f.anims.push_back(a);
+                }
+            pos = at + size;
+        }
+        if (!Magic(f.chunked, 0, "MD20")) return std::nullopt;
+        return f;
+    }
+
     // M2 (version 264) layout, offsets into the MD20 header.
     constexpr size_t kM2Vertices = 0x3C, kM2Textures = 0x50, kM2RenderFlags = 0x70, kM2TexLookup = 0x80;
 
@@ -124,7 +186,8 @@ namespace
     float Unpack(int16_t v) { return (v < 0 ? v + 32768 : v - 32767) / 32767.0f; }
 
     /// Bones, an animation (`sequence`, or -1: Stand, else the first) and attachments; null when the model has no bones.
-    std::shared_ptr<const ModelSkeleton> ParseSkeleton(const std::vector<uint8_t>& d, const FileReader& anim, const std::string& name, int sequence = -1)
+    std::shared_ptr<const ModelSkeleton> ParseSkeleton(const std::vector<uint8_t>& d, const FileReader& anim, const std::string& name, int sequence = -1,
+                                                       const M2File* ids = nullptr)
     {
         M2Array bones{}, sequences{};
         if (!ReadAt(d, kM2Bones, bones) || bones.count == 0 || bones.count > 4096 || bones.offset > d.size() ||
@@ -176,8 +239,16 @@ namespace
                 char suffix[32];
                 snprintf(suffix, sizeof suffix, "%04u-%02u.anim", id, variation);
                 const size_t dot = name.find_last_of('.');
-                if (anim && !name.empty())
-                    if (auto file = anim((dot == std::string::npos ? name : name.substr(0, dot)) + suffix)) external = std::move(*file);
+                const auto byId = ids ? ids->AnimName(id, variation) : std::nullopt;
+                if (anim && (byId || !name.empty()))
+                    if (auto file = anim(byId ? *byId : (dot == std::string::npos ? name : name.substr(0, dot)) + suffix)) external = std::move(*file);
+                // A chunked model's .anim: the AFM2 chunk holds the old layout, offsets relative to it.
+                if (Magic(external, 0, "AFM2"))
+                {
+                    uint32_t size = 0;
+                    ReadAt(external, 4, size);
+                    external = std::vector<uint8_t>(external.begin() + 8, external.begin() + 8 + std::min<size_t>(size, external.size() - 8));
+                }
                 data = &external;   // empty when missing: the animation's own tracks read nothing
             }
         }
@@ -333,9 +404,12 @@ std::string WmoGroupName(const std::string& rootName, uint32_t group)
     return (dot == std::string::npos ? rootName : rootName.substr(0, dot)) + suffix;
 }
 
-std::optional<ModelMesh> ParseM2(const std::vector<uint8_t>& d, const std::vector<uint8_t>& skin, const FileReader& anim, const std::string& m2Name)
+std::optional<ModelMesh> ParseM2(const std::vector<uint8_t>& file, const std::vector<uint8_t>& skin, const FileReader& anim, const std::string& m2Name)
 {
-    if (d.size() < 0x130 || std::memcmp(d.data(), "MD20", 4) != 0) return std::nullopt;
+    const auto ids = UnwrapM2(file);
+    if (!ids) return std::nullopt;
+    const std::vector<uint8_t>& d = ids->Body(file);
+    if (d.size() < 0x130) return std::nullopt;
     if (skin.size() < 48 || std::memcmp(skin.data(), "SKIN", 4) != 0) return std::nullopt;
 
     const auto verts = Elements<M2Vertex>(d, kM2Vertices);
@@ -376,10 +450,13 @@ std::optional<ModelMesh> ParseM2(const std::vector<uint8_t>& d, const std::vecto
         out.geoset = s.id;
         if (b.textureCombo < texLookup.size() && texLookup[b.textureCombo] < textures.size())
         {
-            const M2Texture& t = textures[texLookup[b.textureCombo]];
+            const uint16_t ti = texLookup[b.textureCombo];
+            const M2Texture& t = textures[ti];
             out.textureType = t.type;
             if (t.type == 0 && t.name.count > 1 && t.name.offset < d.size() && d.size() - t.name.offset >= t.name.count)
                 out.texture.assign(reinterpret_cast<const char*>(d.data() + t.name.offset), strnlen(reinterpret_cast<const char*>(d.data() + t.name.offset), t.name.count));
+            else if (t.type == 0 && ti < ids->textures.size() && ids->textures[ti])   // chunked: named by FileDataID
+                out.texture = FileIdName(ids->textures[ti]);
         }
         // Texture animation links (0xFFFF in a lookup = none): flowing water, waterfalls, glows.
         out.color = b.color;
@@ -395,7 +472,7 @@ std::optional<ModelMesh> ParseM2(const std::vector<uint8_t>& d, const std::vecto
         mesh.batches.push_back(std::move(out));
     }
     if (mesh.batches.empty()) return std::nullopt;
-    mesh.skeleton = ParseSkeleton(d, anim, m2Name);
+    mesh.skeleton = ParseSkeleton(d, anim, m2Name, -1, &*ids);
     for (const ModelVertex& v : mesh.vertices)   // bone indices past the skeleton: draw unskinned
         for (int k = 0; k < 4; ++k)
             if (v.weights[k] && (!mesh.skeleton || v.bones[k] >= mesh.skeleton->bones.size())) { mesh.skeleton = nullptr; break; }
@@ -407,13 +484,15 @@ std::optional<ModelMesh> ParseM2(const std::vector<uint8_t>& d, const std::vecto
 std::shared_ptr<const ModelSkeleton> LoadSkeleton(const std::string& name, const FileReader& read, int sequence)
 {
     const auto m2 = read(name);
-    return m2 ? ParseSkeleton(*m2, read, name, sequence) : nullptr;
+    const auto ids = m2 ? UnwrapM2(*m2) : std::nullopt;
+    return ids ? ParseSkeleton(ids->Body(*m2), read, name, sequence, &*ids) : nullptr;
 }
 
 std::optional<ModelMesh> LoadM2(const std::string& name, const FileReader& read)
 {
     const auto m2 = read(name);
-    const auto skin = m2 ? read(M2SkinName(name)) : std::nullopt;
+    const auto ids = m2 ? UnwrapM2(*m2) : std::nullopt;
+    const auto skin = ids ? read(ids->skins.empty() ? M2SkinName(name) : FileIdName(ids->skins[0])) : std::nullopt;
     if (!m2 || !skin) return std::nullopt;
     return ParseM2(*m2, *skin, read, name);
 }
@@ -456,6 +535,16 @@ void PoseBones(const ModelSkeleton& s, uint32_t now, std::vector<XMFLOAT4X4>& pa
     for (size_t i = 0; i < count; ++i) XMStoreFloat4x4(&palette[i], cInv * pose(pose, i, 0) * c);
 }
 
+std::string WmoGroupFile(const std::string& rootName, const std::vector<uint8_t>& root, uint32_t group)
+{
+    // Newer roots list their group files by FileDataID (GFID; the first MOHD-count entries are LOD 0).
+    std::string byId;
+    ForEachChunk(root, 0, root.size(), [&](uint32_t magic, size_t off, size_t size) {
+        if (uint32_t id = 0; magic == Tag("GFID") && size_t(group) * 4 + 4 <= size && ReadAt(root, off + size_t(group) * 4, id) && id) byId = FileIdName(id);
+    });
+    return byId.empty() ? WmoGroupName(rootName, group) : byId;
+}
+
 bool WmoRootInfo(const std::vector<uint8_t>& root, uint32_t& groups, float bounds[6])
 {
     bool found = false;
@@ -486,7 +575,7 @@ std::optional<WmoAreaKeys> ReadWmoAreaKeys(const std::string& rootName, const st
     if (!found) return std::nullopt;
     for (uint32_t i = 0; i < groups && i < 512; ++i)
     {
-        const auto g = read(WmoGroupName(rootName, i));
+        const auto g = read(WmoGroupFile(rootName, *root, i));
         if (!g) continue;
         // MVER (4 bytes), then MOGP: name offset into the root's MOGN at +0, the WMOAreaTable group id at +0x38. Only the
         // header is read, so a MOGP that states a size past the end of the file (some shipped groups do) still counts.
@@ -500,10 +589,17 @@ std::optional<WmoAreaKeys> ReadWmoAreaKeys(const std::string& rootName, const st
 std::optional<ModelMesh> ParseWmo(const std::vector<uint8_t>& root, const std::vector<std::vector<uint8_t>>& groups)
 {
     size_t motxOff = 0, motxSize = 0, modnOff = 0, modnSize = 0, modsOff = 0, modsSize = 0, moddOff = 0, moddSize = 0;
+    bool hasMotx = false;   // newer roots have none: MOMT textures are FileDataIDs then
+    std::vector<uint32_t> doodadIds;   // MODI: newer roots name doodads by FileDataID, MODD indexing it
     uint16_t rootFlags = 0;   // MOHD flags; 0x4: groups name their liquid by LiquidType id
     std::vector<MomtEntry> materials;
     ForEachChunk(root, 0, root.size(), [&](uint32_t magic, size_t off, size_t size) {
-        if (magic == Tag("MOTX")) { motxOff = off; motxSize = size; }
+        if (magic == Tag("MOTX")) { motxOff = off; motxSize = size; hasMotx = true; }
+        if (magic == Tag("MODI"))
+        {
+            doodadIds.resize(size / 4);
+            std::memcpy(doodadIds.data(), root.data() + off, doodadIds.size() * 4);
+        }
         if (magic == Tag("MODN")) { modnOff = off; modnSize = size; }
         if (magic == Tag("MODS")) { modsOff = off; modsSize = size; }
         if (magic == Tag("MODD")) { moddOff = off; moddSize = size; }
@@ -534,7 +630,9 @@ std::optional<ModelMesh> ParseWmo(const std::vector<uint8_t>& root, const std::v
         for (int k = 0; k < 3; ++k) ReadAt(root, moddOff + i + 4 + size_t(k) * 4, (&d.pos.x)[k]);
         for (int k = 0; k < 4; ++k) ReadAt(root, moddOff + i + 16 + size_t(k) * 4, (&d.rot.x)[k]);
         ReadAt(root, moddOff + i + 32, d.scale);
-        d.model = CString(root, modnOff, modnSize, nameAndFlags & 0xFFFFFF);
+        const uint32_t ref = nameAndFlags & 0xFFFFFF;
+        d.model = !doodadIds.empty() ? (ref < doodadIds.size() && doodadIds[ref] ? FileIdName(doodadIds[ref]) : std::string())
+                                     : CString(root, modnOff, modnSize, ref);
         mesh.doodads.push_back(std::move(d));
     }
     for (const auto& g : groups)
@@ -588,10 +686,12 @@ std::optional<ModelMesh> ParseWmo(const std::vector<uint8_t>& root, const std::v
                 out.indexStart = uint32_t(mesh.indices.size());
                 out.indexCount = b.count;
                 for (uint32_t k = 0; k < b.count; ++k) mesh.indices.push_back(base + std::min<uint32_t>(idx[b.startIndex + k], uint32_t(count ? count - 1 : 0)));
-                if (b.material < materials.size())
+                // Flag 0x2: the material index is too big for the byte, a uint16 stands in the box's last value.
+                const uint16_t material = (b.flags & 0x2) ? uint16_t(b.box[5]) : b.material;
+                if (material < materials.size())
                 {
-                    const MomtEntry& m = materials[b.material];
-                    out.texture = CString(root, motxOff, motxSize, m.texture1);
+                    const MomtEntry& m = materials[material];
+                    out.texture = hasMotx ? CString(root, motxOff, motxSize, m.texture1) : m.texture1 ? FileIdName(m.texture1) : std::string();
                     out.twoSided = (m.flags & 0x4) != 0;
                     out.blend = m.blend == 0 ? ModelMesh::Blend::Opaque : m.blend == 1 ? ModelMesh::Blend::AlphaTest : ModelMesh::Blend::AlphaBlend;
                 }

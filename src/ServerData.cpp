@@ -224,7 +224,7 @@ bool ServerDataJob::BuildMap(const Options& o, const ServerMap& map, MpqChain& c
         uint32_t groups = 0;
         float bounds[6];
         if (WmoRootInfo(*root, groups, bounds))
-            for (uint32_t g = 0; g < groups && g < 512; ++g) names.push_back(WmoGroupName(wmo, g));
+            for (uint32_t g = 0; g < groups && g < 512; ++g) names.push_back(WmoGroupFile(wmo, *root, g));
         for (const std::string& d : WmoDoodadNames(*root)) models.emplace(Lower(M2Name(d)), M2Name(d));
     }
     for (const auto& [key, m2] : models) names.push_back(m2);

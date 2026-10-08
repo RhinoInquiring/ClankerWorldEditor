@@ -4,6 +4,7 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <cstdio>
 #include <cstring>
 #include <iterator>
 #include <map>
@@ -236,6 +237,7 @@ namespace
         c.mcnkOffset = start;
         c.indexX = h.indexX;
         c.indexY = h.indexY;
+        c.flags = h.flags;
         c.holes = h.holes;
         c.areaId = h.areaId;
 
@@ -704,6 +706,346 @@ size_t LiquidExtraPerVertex(uint16_t format)
     case 3: return 5;   // uv, then depth
     default: return 0;
     }
+}
+
+std::vector<uint8_t> BlankAdt(int tx, int ty, float height, const std::string& texture, uint32_t areaId)
+{
+    std::vector<uint8_t> out;
+    auto begin = [&](uint32_t magic) { PutU32(out, magic); PutU32(out, 0); return out.size(); };   // body offset
+    auto end = [&](size_t body) { SetU32(out, body - 4, uint32_t(out.size() - body)); };
+    PutU32(out, Tag("MVER"));
+    PutU32(out, 4);
+    PutU32(out, 18);
+    const size_t mhdr = begin(Tag("MHDR"));
+    out.resize(out.size() + 64, 0);
+    end(mhdr);
+    auto field = [&](size_t index, size_t chunkStart) { SetU32(out, mhdr + index * 4, uint32_t(chunkStart - mhdr)); };
+    field(1, out.size());
+    const size_t mcin = begin(Tag("MCIN"));
+    out.resize(out.size() + 256 * 16, 0);
+    end(mcin);
+    field(2, out.size());
+    const size_t mtex = begin(Tag("MTEX"));
+    out.insert(out.end(), texture.begin(), texture.end());
+    out.push_back(0);
+    end(mtex);
+    const uint32_t empty[] = { Tag("MMDX"), Tag("MMID"), Tag("MWMO"), Tag("MWID"), Tag("MDDF"), Tag("MODF") };
+    for (size_t i = 0; i < std::size(empty); ++i)
+    {
+        field(3 + i, out.size());
+        end(begin(empty[i]));
+    }
+    // 256 chunks, row by row: header, MCVT (flat), MCNR (straight up, Blizzard's 13 padding bytes after it), one layer,
+    // empty MCRF, MCAL, MCSE, as Blizzard's chunks are laid out.
+    for (uint32_t iy = 0; iy < 16; ++iy)
+        for (uint32_t ix = 0; ix < 16; ++ix)
+        {
+            const size_t start = out.size();
+            const size_t body = begin(Tag("MCNK"));
+            McnkHeader h{};
+            h.indexX = ix;
+            h.indexY = iy;
+            h.nLayers = 1;
+            h.areaId = areaId;
+            h.position[0] = kZeroPoint - (ty * kTileSize + iy * kChunkSize);
+            h.position[1] = kZeroPoint - (tx * kTileSize + ix * kChunkSize);
+            h.position[2] = height;
+            out.resize(out.size() + sizeof h, 0);
+            auto sub = [&](uint32_t magic, size_t bytes, uint32_t declared) {
+                const size_t at = out.size() - start;
+                PutU32(out, magic);
+                PutU32(out, declared);
+                out.resize(out.size() + bytes, 0);
+                return uint32_t(at);
+            };
+            h.ofsHeight = sub(Tag("MCVT"), 145 * 4, 145 * 4);
+            h.ofsNormal = sub(Tag("MCNR"), 145 * 3 + 13, 145 * 3);
+            for (size_t v = 0; v < 145; ++v) out[start + h.ofsNormal + 8 + v * 3 + 2] = 127;
+            h.ofsLayer = sub(Tag("MCLY"), sizeof(MclyEntry), sizeof(MclyEntry));   // texture 0, no alpha
+            h.ofsRefs = sub(Tag("MCRF"), 0, 0);
+            h.ofsAlpha = sub(Tag("MCAL"), 0, 0);
+            h.sizeAlpha = 8;
+            h.ofsSndEmitters = sub(Tag("MCSE"), 0, 0);
+            std::memcpy(out.data() + body, &h, sizeof h);
+            end(body);
+            const size_t entry = mcin + (iy * 16 + ix) * 16;
+            SetU32(out, entry, uint32_t(start));
+            SetU32(out, entry + 4, uint32_t(out.size() - start));
+        }
+    return out;
+}
+
+std::vector<uint8_t> MergeSplitAdt(const std::vector<uint8_t>& root, const std::vector<uint8_t>& tex0, const std::vector<uint8_t>& obj0,
+                                   const std::function<std::string(uint32_t)>& nameOf, std::vector<std::string>* notes)
+{
+    auto note = [&](const std::string& s) { if (notes) notes->push_back(s); };
+    auto fileName = [&](uint32_t id) {
+        std::string n = nameOf ? nameOf(id) : std::string();
+        if (n.empty())
+        {
+            char b[20];
+            snprintf(b, sizeof b, "FILE%08X.dat", id);
+            note(std::string("no name for file ") + std::to_string(id) + ": kept as " + b);
+            return std::string(b);
+        }
+        std::replace(n.begin(), n.end(), '/', '\\');
+        return n;
+    };
+    // Top-level chunks of each file; MCNKs in file order (split files: one per chunk, row by row).
+    struct Top { std::map<uint32_t, std::pair<size_t, size_t>> first; std::vector<std::pair<size_t, size_t>> mcnks; };
+    auto scan = [](const std::vector<uint8_t>& d) {
+        Top t;
+        ForEachChunk(d, 0, d.size(), [&](uint32_t magic, size_t off, size_t size) {
+            if (magic == Tag("MCNK")) t.mcnks.push_back({ off, size });
+            else t.first.try_emplace(magic, off, size);
+        });
+        return t;
+    };
+    const Top r = scan(root), t = scan(tex0), o = scan(obj0);
+    if (r.mcnks.size() != 256) return {};
+    auto body = [](const std::vector<uint8_t>& d, const Top& top, uint32_t magic) {
+        const auto it = top.first.find(magic);
+        return it == top.first.end() ? std::vector<uint8_t>{} : std::vector<uint8_t>(d.begin() + it->second.first, d.begin() + it->second.first + it->second.second);
+    };
+    auto u32s = [](const std::vector<uint8_t>& b) {
+        std::vector<uint32_t> v(b.size() / 4);
+        std::memcpy(v.data(), b.data(), v.size() * 4);
+        return v;
+    };
+    auto strings = [](const std::vector<uint8_t>& b) {   // a string block: offset -> name
+        std::map<uint32_t, std::string> m;
+        for (size_t p = 0; p < b.size();)
+        {
+            const std::string s(reinterpret_cast<const char*>(b.data() + p), strnlen(reinterpret_cast<const char*>(b.data() + p), b.size() - p));
+            if (!s.empty()) m[uint32_t(p)] = s;
+            p += s.size() + 1;
+        }
+        return m;
+    };
+
+    // Textures: MTEX names, or (newer) MDID FileDataIDs.
+    std::vector<std::string> textures;
+    if (const auto mtex = body(tex0, t, Tag("MTEX")); !mtex.empty())
+        for (const auto& [off, s] : strings(mtex)) textures.push_back(s);
+    else
+        for (uint32_t id : u32s(body(tex0, t, Tag("MDID")))) textures.push_back(fileName(id));
+
+    // Objects: names by string block + index (MMDX/MMID, MWMO/MWID) or, flagged per entry, by FileDataID.
+    std::vector<MddfEntry> mddf(body(obj0, o, Tag("MDDF")).size() / sizeof(MddfEntry));
+    std::vector<ModfEntry> modf(body(obj0, o, Tag("MODF")).size() / sizeof(ModfEntry));
+    if (!mddf.empty()) std::memcpy(mddf.data(), body(obj0, o, Tag("MDDF")).data(), mddf.size() * sizeof(MddfEntry));
+    if (!modf.empty()) std::memcpy(modf.data(), body(obj0, o, Tag("MODF")).data(), modf.size() * sizeof(ModfEntry));
+    auto rename = [&](auto& entries, uint16_t idFlag, uint32_t namesTag, uint32_t indexTag, std::vector<uint8_t>& block, std::vector<uint8_t>& index) {
+        const auto names = strings(body(obj0, o, namesTag));
+        const auto offsets = u32s(body(obj0, o, indexTag));
+        std::map<std::string, uint32_t> slot;
+        for (auto& e : entries)
+        {
+            std::string name;
+            if (e.flags & idFlag) name = fileName(e.nameId);
+            else if (e.nameId < offsets.size() && names.count(offsets[e.nameId])) name = names.at(offsets[e.nameId]);
+            e.flags &= uint16_t(~idFlag);
+            auto [it, added] = slot.try_emplace(name, uint32_t(slot.size()));
+            if (added)
+            {
+                PutU32(index, uint32_t(block.size()));
+                block.insert(block.end(), name.begin(), name.end());
+                block.push_back(0);
+            }
+            e.nameId = it->second;
+        }
+    };
+    std::vector<uint8_t> mmdx, mmid, mwmo, mwid;
+    rename(mddf, 0x40, Tag("MMDX"), Tag("MMID"), mmdx, mmid);
+    rename(modf, 0x8, Tag("MWMO"), Tag("MWID"), mwmo, mwid);
+
+    // MH2O: newer tiles put a LiquidObject id (>= 42) where 3.3.5 wants the vertex format; the format is the one whose
+    // vertex data fills the gap to the next block (heights + depth 5 bytes, heights + uv 8, depth 1, all three 9).
+    std::vector<uint8_t> mh2o = body(root, r, Tag("MH2O"));
+    if (mh2o.size() >= 256 * 12)
+    {
+        std::set<uint32_t> marks{ uint32_t(mh2o.size()) };
+        std::vector<size_t> instances;
+        for (size_t c = 0; c < 256; ++c)
+        {
+            uint32_t ofs = 0, count = 0, attr = 0;
+            ReadAt(mh2o, c * 12, ofs);
+            ReadAt(mh2o, c * 12 + 4, count);
+            ReadAt(mh2o, c * 12 + 8, attr);
+            if (attr) marks.insert(attr);
+            for (uint32_t i = 0; i < count && ofs && ofs + (i + 1) * 24 <= mh2o.size(); ++i)
+            {
+                instances.push_back(ofs + i * 24);
+                marks.insert(ofs + i * 24);
+                uint32_t ex = 0, vx = 0;
+                ReadAt(mh2o, ofs + i * 24 + 16, ex);
+                ReadAt(mh2o, ofs + i * 24 + 20, vx);
+                if (ex) marks.insert(ex);
+                if (vx) marks.insert(vx);
+            }
+        }
+        for (size_t at : instances)
+        {
+            uint16_t lvf = 0;
+            uint32_t vx = 0;
+            ReadAt(mh2o, at + 2, lvf);
+            ReadAt(mh2o, at + 20, vx);
+            if (lvf < 42) continue;
+            const size_t verts = size_t(mh2o[at + 14] + 1) * (mh2o[at + 15] + 1);
+            const size_t gap = vx ? *marks.upper_bound(vx) - vx : 0;
+            uint16_t format = 2;
+            for (auto [f, bytes] : { std::pair<uint16_t, size_t>{ 1, 8 }, { 0, 5 }, { 3, 9 } })   // most likely first
+                if (vx && verts * bytes <= gap && gap - verts * bytes < 4) { format = f; break; }
+            std::memcpy(mh2o.data() + at + 2, &format, 2);
+        }
+    }
+
+    // The chunks: root header and geometry, tex0 layers and alpha, obj0 references as one MCRF.
+    std::vector<uint8_t> out;
+    auto begin = [&](uint32_t magic) { PutU32(out, magic); PutU32(out, 0); return out.size(); };
+    auto end = [&](size_t at) { SetU32(out, at - 4, uint32_t(out.size() - at)); };
+    PutU32(out, Tag("MVER"));
+    PutU32(out, 4);
+    PutU32(out, 18);
+    const size_t mhdr = begin(Tag("MHDR"));
+    out.resize(out.size() + 64, 0);
+    end(mhdr);
+    auto field = [&](size_t index) { SetU32(out, mhdr + index * 4, uint32_t(out.size() - mhdr)); };
+    field(1);
+    const size_t mcin = begin(Tag("MCIN"));
+    out.resize(out.size() + 256 * 16, 0);
+    end(mcin);
+    std::vector<uint8_t> mtexBlock;
+    for (const std::string& s : textures) { mtexBlock.insert(mtexBlock.end(), s.begin(), s.end()); mtexBlock.push_back(0); }
+    const std::pair<uint32_t, const std::vector<uint8_t>*> tops[] = { { Tag("MTEX"), &mtexBlock }, { Tag("MMDX"), &mmdx }, { Tag("MMID"), &mmid },
+                                                                       { Tag("MWMO"), &mwmo }, { Tag("MWID"), &mwid } };
+    for (size_t i = 0; i < std::size(tops); ++i) { field(2 + i); PutChunk(out, tops[i].first, *tops[i].second); }
+    field(7);
+    PutChunk(out, Tag("MDDF"), std::vector<uint8_t>(reinterpret_cast<const uint8_t*>(mddf.data()), reinterpret_cast<const uint8_t*>(mddf.data() + mddf.size())));
+    field(8);
+    PutChunk(out, Tag("MODF"), std::vector<uint8_t>(reinterpret_cast<const uint8_t*>(modf.data()), reinterpret_cast<const uint8_t*>(modf.data() + modf.size())));
+    if (!mh2o.empty()) { field(10); PutChunk(out, Tag("MH2O"), mh2o); }
+
+    auto subs = [](const std::vector<uint8_t>& d, size_t off, size_t size) {   // sub-chunk tag -> body
+        std::map<uint32_t, std::vector<uint8_t>> m;
+        ForEachChunk(d, off, off + size, [&](uint32_t magic, size_t so, size_t ss) { m.try_emplace(magic, d.begin() + so, d.begin() + so + ss); });
+        return m;
+    };
+    size_t highHoles = 0;
+    for (size_t ci = 0; ci < 256; ++ci)
+    {
+        const auto [rOff, rSize] = r.mcnks[ci];
+        if (rSize < sizeof(McnkHeader)) return {};
+        McnkHeader h{};
+        ReadAt(root, rOff, h);
+        // Root sub-chunks walked the client's way (MCNR is followed by 13 padding bytes); tex0/obj0 chunks have no header.
+        std::map<uint32_t, std::vector<uint8_t>> rs;
+        for (const SubSpan& s : WalkSubChunks(root, rOff - 8, rOff + rSize, 0, 0))
+        {
+            uint32_t size = 0;
+            ReadAt(root, s.start + 4, size);
+            rs.try_emplace(s.tag, root.begin() + s.start + 8, root.begin() + s.start + 8 + std::min<size_t>(size, s.end - s.start - 8));
+        }
+        const auto ts = ci < t.mcnks.size() ? subs(tex0, t.mcnks[ci].first, t.mcnks[ci].second) : std::map<uint32_t, std::vector<uint8_t>>{};
+        const auto os = ci < o.mcnks.size() ? subs(obj0, o.mcnks[ci].first, o.mcnks[ci].second) : std::map<uint32_t, std::vector<uint8_t>>{};
+        auto get = [](const auto& m, uint32_t tag) { const auto it = m.find(tag); return it == m.end() ? std::vector<uint8_t>{} : it->second; };
+
+        // High-res holes (flag 0x10000: 8 x 8 bits where MCVT/MCNR offsets were) -> 3.3.5's 4 x 4, a cell cut when all four are.
+        if (h.flags & 0x10000)
+        {
+            uint64_t hi = 0;
+            std::memcpy(&hi, reinterpret_cast<const uint8_t*>(&h) + 0x14, 8);
+            h.holes = 0;
+            for (int row = 0; row < 4; ++row)
+                for (int col = 0; col < 4; ++col)
+                {
+                    auto bit = [&](int r8, int c8) { return (hi >> (r8 * 8 + c8)) & 1; };
+                    if (bit(row * 2, col * 2) && bit(row * 2, col * 2 + 1) && bit(row * 2 + 1, col * 2) && bit(row * 2 + 1, col * 2 + 1))
+                        h.holes |= uint16_t(1u << (row * 4 + col));
+                }
+            h.flags &= ~0x10000u;
+            highHoles += hi != 0;
+        }
+        h.flags &= ~0x3Cu;   // no MCLQ: liquid lives in MH2O
+        const std::vector<uint8_t> mcvt = get(rs, Tag("MCVT")), mccv = get(rs, Tag("MCCV")), mcnr = get(rs, Tag("MCNR"));
+        const std::vector<uint8_t> mcly = get(ts, Tag("MCLY")), mcsh = get(ts, Tag("MCSH")), mcal = get(ts, Tag("MCAL"));
+        const std::vector<uint8_t> mcrd = get(os, Tag("MCRD")), mcrw = get(os, Tag("MCRW"));
+        if (mcvt.size() < 145 * 4) return {};
+
+        const size_t start = out.size();
+        const size_t mcnk = begin(Tag("MCNK"));
+        out.resize(out.size() + sizeof h, 0);
+        auto sub = [&](uint32_t magic, const std::vector<uint8_t>& b, uint32_t declared, size_t pad = 0) {
+            const uint32_t at = uint32_t(out.size() - start);
+            PutU32(out, magic);
+            PutU32(out, declared);
+            out.insert(out.end(), b.begin(), b.end());
+            out.resize(out.size() + pad, 0);
+            return at;
+        };
+        h.ofsHeight = sub(Tag("MCVT"), std::vector<uint8_t>(mcvt.begin(), mcvt.begin() + 145 * 4), 145 * 4);
+        h.ofsMccv = mccv.size() >= 145 * 4 ? sub(Tag("MCCV"), std::vector<uint8_t>(mccv.begin(), mccv.begin() + 145 * 4), 145 * 4) : 0;
+        std::vector<uint8_t> normals(145 * 3, 0);
+        if (mcnr.size() >= 145 * 3) std::copy(mcnr.begin(), mcnr.begin() + 145 * 3, normals.begin());
+        else for (size_t v = 0; v < 145; ++v) normals[v * 3 + 2] = 127;
+        h.ofsNormal = sub(Tag("MCNR"), normals, 145 * 3, 13);
+        const uint32_t layers = uint32_t(std::min<size_t>(mcly.size() / sizeof(MclyEntry), 4));
+        h.nLayers = layers;
+        h.ofsLayer = sub(Tag("MCLY"), std::vector<uint8_t>(mcly.begin(), mcly.begin() + layers * sizeof(MclyEntry)), layers * uint32_t(sizeof(MclyEntry)));
+        std::vector<uint8_t> refs = mcrd;
+        refs.insert(refs.end(), mcrw.begin(), mcrw.end());
+        h.nDoodadRefs = uint32_t(mcrd.size() / 4);
+        h.nMapObjRefs = uint32_t(mcrw.size() / 4);
+        h.ofsRefs = sub(Tag("MCRF"), refs, uint32_t(refs.size()));
+        h.ofsShadow = mcsh.empty() ? 0 : sub(Tag("MCSH"), mcsh, uint32_t(mcsh.size()));
+        h.sizeShadow = uint32_t(mcsh.size());
+        if (mcsh.empty()) h.flags &= ~0x1u;
+        h.ofsAlpha = sub(Tag("MCAL"), mcal, uint32_t(mcal.size()));
+        h.sizeAlpha = uint32_t(mcal.size() + 8);
+        h.ofsSndEmitters = sub(Tag("MCSE"), {}, 0);
+        h.nSndEmitters = 0;
+        h.ofsLiquid = h.sizeLiquid = 0;
+        h.ofsMclv = 0;
+        std::memcpy(out.data() + mcnk, &h, sizeof h);
+        end(mcnk);
+        SetU32(out, mcin + ci * 16, uint32_t(start));
+        SetU32(out, mcin + ci * 16 + 4, uint32_t(out.size() - start));
+    }
+    if (const auto mfbo = body(root, r, Tag("MFBO")); !mfbo.empty())
+    {
+        field(9);
+        PutChunk(out, Tag("MFBO"), mfbo);
+        SetU32(out, mhdr, 1);   // MHDR flags: has MFBO
+    }
+    if (const auto mtxf = body(tex0, t, Tag("MTXF")); !mtxf.empty()) { field(11); PutChunk(out, Tag("MTXF"), mtxf); }
+    if (highHoles) note(std::to_string(highHoles) + " chunk(s) had fine holes: kept where a whole 3.3.5 hole cell was cut");
+    return out;
+}
+
+std::vector<uint8_t> BlankWdt(uint32_t flags)
+{
+    std::vector<uint8_t> out;
+    auto chunk = [&](uint32_t magic, size_t size) { PutU32(out, magic); PutU32(out, uint32_t(size)); out.resize(out.size() + size, 0); };
+    chunk(Tag("MVER"), 4);
+    SetU32(out, 8, 18);
+    chunk(Tag("MPHD"), 32);
+    SetU32(out, 20, flags);
+    chunk(Tag("MAIN"), 64 * 64 * 8);
+    chunk(Tag("MWMO"), 0);
+    return out;
+}
+
+std::vector<uint8_t> BlankWdl()
+{
+    std::vector<uint8_t> out;
+    auto chunk = [&](uint32_t magic, size_t size) { PutU32(out, magic); PutU32(out, uint32_t(size)); out.resize(out.size() + size, 0); };
+    chunk(Tag("MVER"), 4);
+    SetU32(out, 8, 18);
+    chunk(Tag("MWMO"), 0);
+    chunk(Tag("MWID"), 0);
+    chunk(Tag("MODF"), 0);
+    chunk(Tag("MAOF"), 64 * 64 * 4);
+    return out;
 }
 
 std::vector<uint8_t> WriteMh2o(const Adt& adt)
@@ -1653,7 +1995,22 @@ bool FormatsSelfTest()
     ReadAt(rewritten, mhdrData + 36, mfboRel);
     uint32_t mfboMagic = 0;
     ReadAt(rewritten, mhdrData + mfboRel, mfboMagic);
-    return magic == Tag("MCNK") && mfboMagic == Tag("MFBO") && Base64Decode(Base64Encode((const uint8_t*)"hello", 5)).size() == 5;
+    if (magic != Tag("MCNK") || mfboMagic != Tag("MFBO") || Base64Decode(Base64Encode((const uint8_t*)"hello", 5)).size() != 5) return false;
+
+    // A blank tile of a new map: valid as the client reads it, in place, flat, one texture; its WDT and WDL take tiles.
+    const std::string grass = "Tileset\\Test\\Grass.blp";
+    const auto blank = BlankAdt(30, 41, 12.5f, grass, 7);
+    const auto blankBack = ParseAdt(blank, false);
+    if (!ValidateAdt(blank, false).empty() || !blankBack || blankBack->chunks.size() != 256 || blankBack->textures != std::vector<std::string>{ grass })
+        return false;
+    const AdtChunk& corner = blankBack->chunks[17];   // indexX 1, indexY 1
+    if (corner.indexX != 1 || corner.indexY != 1 || std::fabs(corner.baseX - (30 * kTileSize + kChunkSize)) > 0.01f ||
+        std::fabs(corner.baseZ - (41 * kTileSize + kChunkSize)) > 0.01f || corner.baseY != 12.5f || corner.areaId != 7 || corner.layerCount != 1)
+        return false;
+    const auto wdt = WdtSetTile(BlankWdt(0x4), 30, 41, true);
+    if (!WdtBigAlpha(wdt) || !WdtHasTile(wdt, 30, 41) || WdtHasTile(wdt, 31, 41)) return false;
+    const auto wdl = WdlSetTile(BlankWdl(), 30, 41, &*blankBack);
+    return !wdl.empty() && !ParseWdl(wdl)[41 * 64 + 30].empty();
 }
 
 std::vector<uint8_t> WriteBlp(uint32_t width, uint32_t height, const uint8_t* rgba)

@@ -11,12 +11,15 @@ struct AssetReport
 {
     std::vector<std::string> copied;    // files written (found in a fallback source)
     std::vector<std::string> missing;   // referenced but found nowhere
+    std::vector<std::string> converted; // newer-client files rewritten for 3.3.5a (Downport)
+    std::vector<std::string> notes;     // what those conversions lost or changed
 };
 
 /// Follows every reference of the given ADT files (textures and their _s variants, M2s with their skins and
 /// textures, WMOs with their groups, textures and doodad models) and writes each file players lack (no installed
 /// layer has it: MpqLayer::installed), read from any layer or fallback, under outDir at its game path. Files players
-/// have are not copied, nor followed further.
+/// have are not copied, nor followed further. Files from newer clients are converted to 3.3.5a first (Downport) and
+/// their references followed from the converted file.
 AssetReport CopyMissingAssets(const MpqChain& mpq, const std::vector<std::filesystem::path>& adtFiles, const std::filesystem::path& outDir);
 
 /// Files one game file refers to directly (by extension: .adt, .m2, .wmo; anything else refers to nothing).

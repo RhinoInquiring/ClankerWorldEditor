@@ -48,7 +48,8 @@ public:
     std::vector<Trigger> OnMap(uint32_t map) const;
 };
 
-/// Map.dbc, only the fields the editor reads (InstanceType) and changes: CorpseMapID and Corpse (x, y), where a dead
+/// Map.dbc: every field but the other locales' strings. New maps (File > New map) add rows; existing rows only ever get
+/// CorpseMapID and Corpse (x, y), where a dead
 /// player's spirit is sent to run back into an instance. AzerothCore (MapEntry::entrance_map) finds no exit trigger
 /// for a map without one, and for maps that are not dungeons the exit is the trigger leading to CorpseMapID.
 class MapRowsAdapter final : public DbcTable

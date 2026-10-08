@@ -1,9 +1,18 @@
 #include "Mpq.hpp"
 
+#include "Formats.hpp"
+#include "Server.hpp"
+
 #include <StormLib.h>
+#include <CascLib.h>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cctype>
+#include <condition_variable>
+#include <deque>
+#include <thread>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -54,11 +63,193 @@ namespace
         const int order = std::isdigit(static_cast<unsigned char>(c)) ? c - '0' : 10 + (c - 'a');
         return { 4, order * 2 + (locale ? 1 : 0) };
     }
+
+    std::filesystem::path EditorDir()
+    {
+        wchar_t exe[MAX_PATH]{};
+        GetModuleFileNameW(nullptr, exe, MAX_PATH);
+        return std::filesystem::path(exe).parent_path();
+    }
+
+    /// The community listfile CASC layers name their files from: listfile.csv beside the editor.
+    std::filesystem::path ListfilePath() { return EditorDir() / "listfile.csv"; }
+
+    /// The FileDataID a CASC name stands for: a listfile name, or CascLib's FILE%08X.dat for unnamed files.
+    std::optional<uint32_t> CascId(const std::unordered_map<std::string, uint32_t>& ids, const std::string& lower)
+    {
+        if (const auto it = ids.find(lower); it != ids.end()) return it->second;
+        unsigned id = 0;
+        char tail = 0;
+        if (lower.size() == 16 && std::sscanf(lower.c_str(), "file%8x.da%c", &id, &tail) == 2 && tail == 't') return id;
+        return std::nullopt;
+    }
 }
+
+namespace
+{
+    std::atomic<bool> g_cdnAsync{ false };
+    std::atomic<uint64_t> g_cdnArrivals{ 0 };
+
+    /// One file of a CASC storage by FileDataID; none when not on disk (local) or encrypted with a key we lack.
+    std::optional<std::vector<uint8_t>> CascReadId(HANDLE storage, uint32_t id)
+    {
+        HANDLE file = nullptr;
+        if (!CascOpenFile(storage, CASC_FILE_DATA_ID(id), 0, CASC_OPEN_BY_FILEID, &file)) return std::nullopt;
+        ULONGLONG size = 0;
+        std::optional<std::vector<uint8_t>> out;
+        if (CascGetFileSize64(file, &size) && size < (1ull << 31))
+        {
+            std::vector<uint8_t> bytes(static_cast<size_t>(size));
+            DWORD got = 0;
+            if (bytes.empty() || (CascReadFile(file, bytes.data(), DWORD(bytes.size()), &got) && got == bytes.size())) out = std::move(bytes);
+        }
+        CascCloseFile(file);
+        return out;
+    }
+}
+
+namespace
+{
+    std::atomic<uint64_t> g_fallbackReads{ 0 }, g_fallbackHits{ 0 }, g_cascReads{ 0 }, g_cascLocalMisses{ 0 }, g_cdnQueued{ 0 }, g_fallbackMicros{ 0 };
+    std::mutex g_namesLock;
+    std::vector<std::string> g_fallbackNames;
+}
+
+MpqStats GetMpqStats()
+{
+    MpqStats s{ g_fallbackReads, g_fallbackHits, g_cascReads, g_cascLocalMisses, g_cdnQueued, g_fallbackMicros };
+    std::lock_guard l(g_namesLock);
+    s.fallbackNames = g_fallbackNames;
+    return s;
+}
+
+void SetCdnAsync(bool on) { g_cdnAsync = on; }
+uint64_t CdnArrivals() { return g_cdnArrivals; }
+
+/// The CDN side of a CASC layer: the same build opened online (on first use: slow once, it fetches the build's
+/// indexes), downloads kept in the cache folder, and a worker thread that fetches queued files in the background.
+struct CdnFetcher
+{
+    std::string product, buildKey;
+    std::mutex lock;   // queue and sets
+    std::condition_variable wake;
+    std::deque<uint32_t> queue;
+    std::unordered_set<uint32_t> queued, fetched, failed;
+    std::thread worker;
+    bool stop = false;
+    std::mutex storageLock;   // the online storage, one reader at a time
+    HANDLE online = nullptr;
+    bool tried = false;
+
+    ~CdnFetcher()
+    {
+        {
+            std::lock_guard l(lock);
+            stop = true;
+        }
+        wake.notify_all();
+        if (worker.joinable()) worker.join();
+        if (online) CascCloseStorage(online);
+    }
+
+    std::optional<std::vector<uint8_t>> Read(uint32_t id)
+    {
+        std::lock_guard l(storageLock);
+        // The cache folder is not safe for two processes at once (one reads an archive the other is still writing):
+        // every editor process (window, command-line checks) takes this system-wide lock around its CDN use.
+        static const HANDLE processes = CreateMutexW(nullptr, FALSE, L"Local\\wow-world-editor-casc-cdn");
+        if (processes) WaitForSingleObject(processes, INFINITE);
+        struct Release { ~Release() { if (processes) ReleaseMutex(processes); } } release;
+        if (!tried)
+        {
+            tried = true;
+            // Where: the folder named in <settings>\casc-cache.txt (first line), else casc-cache beside the editor.
+            std::filesystem::path cache = EditorDir() / "casc-cache";
+            if (std::ifstream f(SettingsDir() / "casc-cache.txt"); f)
+                if (std::string line; std::getline(f, line) && !line.empty()) cache = line;
+            std::error_code ec;
+            std::filesystem::create_directories(cache, ec);
+            const std::string cacheDir = cache.string();
+            CASC_OPEN_STORAGE_ARGS args{};
+            args.Size = sizeof(args);
+            args.szLocalPath = cacheDir.c_str();
+            args.szCodeName = product.c_str();
+            args.szRegion = "us";
+            args.szBuildKey = buildKey.empty() ? nullptr : buildKey.c_str();
+            args.dwLocaleMask = CASC_LOCALE_ENUS | CASC_LOCALE_ENGB;
+            if (!CascOpenStorageEx(nullptr, &args, true, &online)) online = nullptr;
+        }
+        auto out = online ? CascReadId(online, id) : std::nullopt;
+        std::lock_guard l2(lock);
+        (out ? fetched : failed).insert(id);
+        return out;
+    }
+
+    void Run()
+    {
+        for (;;)
+        {
+            uint32_t id = 0;
+            {
+                std::unique_lock l(lock);
+                wake.wait(l, [&] { return stop || !queue.empty(); });
+                if (stop) return;
+                id = queue.front();
+                queue.pop_front();
+            }
+            Read(id);
+            ++g_cdnArrivals;
+        }
+    }
+};
 
 MpqChain::~MpqChain() { Close(); }
 
 bool LoadsAfter(const std::string& a, const std::string& b) { return Rank(a) > Rank(b); }
+
+namespace
+{
+    /// .build.info as rows of column name -> cell: a '|' separated table whose first line names the columns
+    /// ("Product!STRING:0"; the part before '!' is the name).
+    std::vector<std::unordered_map<std::string, std::string>> BuildInfoRows(const std::filesystem::path& install)
+    {
+        std::ifstream f(install / ".build.info");
+        auto split = [](const std::string& s) {
+            std::vector<std::string> cells(1);
+            for (char c : s)
+                if (c == '|') cells.emplace_back();
+                else if (c != '\r') cells.back() += c;
+            return cells;
+        };
+        std::string line;
+        std::vector<std::unordered_map<std::string, std::string>> rows;
+        if (!std::getline(f, line)) return rows;
+        std::vector<std::string> head = split(line);
+        for (std::string& h : head) h = h.substr(0, h.find('!'));
+        while (std::getline(f, line))
+        {
+            const auto cells = split(line);
+            auto& row = rows.emplace_back();
+            for (size_t i = 0; i < head.size() && i < cells.size(); ++i) row[head[i]] = cells[i];
+        }
+        return rows;
+    }
+}
+
+std::vector<std::string> CascProducts(const std::filesystem::path& install)
+{
+    std::vector<std::string> out;
+    for (auto& row : BuildInfoRows(install))
+        if (const std::string& p = row["Product"]; !p.empty() && std::find(out.begin(), out.end(), p) == out.end()) out.push_back(p);
+    return out;
+}
+
+std::string CascBuildInfo(const std::filesystem::path& install, const std::string& product, const std::string& column)
+{
+    for (auto& row : BuildInfoRows(install))
+        if (row["Product"] == product) return row[column];
+    return {};
+}
 
 bool WriteMpq(const std::filesystem::path& archive, const std::filesystem::path& root, std::string& error, size_t* files)
 {
@@ -143,11 +334,16 @@ bool WriteMpqFrom(const std::filesystem::path& archive, const std::vector<std::s
 void MpqChain::Close()
 {
     for (const Archive& a : m_archives)
+    {
         if (a.handle) SFileCloseArchive(a.handle);
+        if (a.casc) CascCloseStorage(a.casc);
+    }
     m_archives.clear();
     m_names.clear();
     m_report.clear();
     m_fallbacks.clear();
+    std::lock_guard lock(m_homeLock);
+    m_mapHomes.clear();
 }
 
 namespace
@@ -226,17 +422,74 @@ size_t MpqChain::Open(const std::vector<MpqLayer>& layers)
     namespace fs = std::filesystem;
     Close();
     m_report.resize(layers.size());
-    // Highest priority first: the last layer's archives lead.
+    // Highest priority first: the last layer's archives lead. CASC layers open in a second pass: opened before the
+    // MPQs, their million-name index made StormLib's opening 3x slower (4 s -> 14 s for a stock client).
+    for (int pass = 0; pass < 2; ++pass)
     for (size_t li = layers.size(); li-- > 0;)
     {
         const MpqLayer& layer = layers[li];
+        if ((layer.kind == MpqLayer::Kind::Casc) != (pass == 1)) continue;
         LayerReport& report = m_report[li];
+        struct Timer   // how long the layer took to open, however this iteration ends
+        {
+            LayerReport& r;
+            std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+            ~Timer() { r.ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(); }
+        } timer{ report };
         if (!layer.enabled) { report.note = "disabled"; continue; }
         std::error_code ec;
+        if (layer.kind == MpqLayer::Kind::Casc)
+        {
+            CASC_OPEN_STORAGE_ARGS args{};
+            args.Size = sizeof(args);
+            args.szLocalPath = layer.path.c_str();
+            args.szCodeName = layer.product.empty() ? nullptr : layer.product.c_str();
+            args.dwLocaleMask = CASC_LOCALE_ENUS | CASC_LOCALE_ENGB;
+            HANDLE h = nullptr;
+            if (!CascOpenStorageEx(nullptr, &args, false, &h))
+            {
+                report.note = "could not open the CASC storage (error " + std::to_string(GetCascError()) + ")";
+                continue;
+            }
+            Archive a;
+            a.casc = h;
+            a.installed = layer.installed;
+            a.layer = li;
+            a.cdn = std::make_shared<CdnFetcher>();
+            a.cdn->product = layer.product;
+            a.cdn->buildKey = CascBuildInfo(layer.path, layer.product, "Build Key");
+            // Every file of this build (the listfile names files of every product): those not on disk come from the CDN.
+            const fs::path listfile = ListfilePath();
+            const bool named = fs::is_regular_file(listfile, ec);
+            CASC_FIND_DATA fd{};
+            HANDLE find = CascFindFirstFile(h, "*", &fd, named ? listfile.string().c_str() : nullptr);
+            if (find)
+            {
+                do
+                {
+                    if (fd.dwFileDataId == CASC_INVALID_ID) continue;
+                    const std::string name = Backslashes(fd.szFileName);
+                    if (a.ids.emplace(Lower(name), fd.dwFileDataId).second)
+                    {
+                        a.byId.try_emplace(fd.dwFileDataId, a.listed.size());
+                        a.listed.push_back(name);
+                    }
+                    a.present.insert(fd.dwFileDataId);
+                } while (CascFindNextFile(find, &fd));
+                CascFindClose(find);
+            }
+            report.files = a.ids.size();
+            if (!named) report.note = "no listfile.csv beside the editor: files are named FILExxxxxxxx.dat";
+            m_names.push_back(fs::path(layer.path).filename().string() + ":" + layer.product);
+            m_archives.push_back(std::move(a));
+            report.archives = 1;
+            continue;
+        }
         if (layer.kind == MpqLayer::Kind::Folder)
         {
             Archive a;
             a.installed = layer.installed;
+            a.layer = li;
             const fs::path root = layer.path;
             for (const auto& e : fs::recursive_directory_iterator(root, fs::directory_options::skip_permission_denied, ec))
                 if (e.is_regular_file(ec) && Lower(e.path().extension().string()) != ".mpq")
@@ -285,6 +538,8 @@ size_t MpqChain::Open(const std::vector<MpqLayer>& layers)
                 Archive a;
                 a.handle = h;
                 a.installed = layer.installed;
+                a.layer = li;
+            a.layer = li;
                 m_archives.push_back(std::move(a));
                 m_names.push_back(path.filename().string());
                 ++report.archives;
@@ -293,6 +548,20 @@ size_t MpqChain::Open(const std::vector<MpqLayer>& layers)
                 report.note = "could not open " + path.filename().string();
         }
     }
+    // A CASC storage (a newer client) only fills in what the 3.3.5a layers lack, wherever it sits in the list: its
+    // copies of shared names are newer formats, and half its files may need fetching from the CDN.
+    std::vector<size_t> order(m_archives.size());
+    for (size_t i = 0; i < order.size(); ++i) order[i] = i;
+    std::stable_partition(order.begin(), order.end(), [&](size_t i) { return !m_archives[i].casc; });
+    std::vector<Archive> archives;
+    std::vector<std::string> names;
+    for (size_t i : order)
+    {
+        archives.push_back(std::move(m_archives[i]));
+        names.push_back(std::move(m_names[i]));
+    }
+    m_archives = std::move(archives);
+    m_names = std::move(names);
     return m_archives.size();
 }
 
@@ -330,16 +599,60 @@ std::filesystem::path MpqChain::OverlayPath(const std::string& name) const
     return m_overlay / std::filesystem::path(rel);
 }
 
+std::optional<size_t> MpqChain::MapHome(const std::string& name) const
+{
+    if (!m_mapsFromLowest) return std::nullopt;
+    const std::string lower = Lower(Backslashes(name));
+    static const std::string prefix = "world\\maps\\", mapDbc = "dbfilesclient\\map.dbc";
+    // Map.dbc too: the list of maps is the client's; packs' Map.dbc only say which maps they add (App::RefreshMapList).
+    std::string dir, wdt;
+    if (lower == mapDbc) dir = wdt = mapDbc;
+    else
+    {
+        if (lower.compare(0, prefix.size(), prefix) != 0) return std::nullopt;
+        const size_t slash = lower.find('\\', prefix.size());
+        if (slash == std::string::npos) return std::nullopt;
+        dir = lower.substr(prefix.size(), slash - prefix.size());
+        wdt = prefix + dir + "\\" + dir + ".wdt";
+    }
+    {
+        std::lock_guard lock(m_homeLock);
+        if (const auto it = m_mapHomes.find(dir); it != m_mapHomes.end()) return it->second;
+    }
+    // The lowest layer holding the map's WDT; its first (highest-priority) archive starts the layer's own lookup.
+    // A CASC storage is the map's home only when no 3.3.5a layer has it (CASC archives sort last: see Open).
+    std::optional<size_t> home;
+    for (size_t a = 0; a < m_archives.size(); ++a)
+        if (Has(a, wdt) && (!home || (!m_archives[a].casc && (m_archives[*home].casc || m_archives[a].layer < m_archives[*home].layer)))) home = a;
+    if (home)
+        while (*home > 0 && m_archives[*home - 1].layer == m_archives[*home].layer) --*home;
+    std::lock_guard lock(m_homeLock);
+    m_mapHomes[dir] = home;
+    return home;
+}
+
 std::optional<std::vector<uint8_t>> MpqChain::Read(const std::string& name) const
 {
     if (const auto path = OverlayPath(name); !path.empty())
         if (std::ifstream f(path, std::ios::binary); f)
             return std::vector<uint8_t>((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    if (const auto home = MapHome(name))   // a map's own files: from the layer the map comes from
+        if (auto bytes = ReadFromLayer(*home, name)) return bytes;
     for (size_t a = 0; a < m_archives.size(); ++a)
         if (auto bytes = ReadFrom(a, name)) return bytes;
+    if (m_fallbacks.empty()) return std::nullopt;
+    ++g_fallbackReads;
+    {
+        std::lock_guard l(g_namesLock);
+        if (g_fallbackNames.size() < 40) g_fallbackNames.push_back(name);
+    }
+    const auto t0 = std::chrono::steady_clock::now();
+    std::optional<std::vector<uint8_t>> out;
     for (const MpqChain* f : m_fallbacks)
-        if (auto bytes = f->Read(name)) return bytes;
-    return std::nullopt;
+        if ((out = f->Read(name))) break;
+    g_fallbackMicros += uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count());
+    if (out) ++g_fallbackHits;
+    return out;
 }
 
 bool MpqChain::HasOwn(const std::string& name) const
@@ -354,6 +667,23 @@ bool MpqChain::HasOwn(const std::string& name) const
     return false;
 }
 
+std::optional<std::vector<uint8_t>> MpqChain::ReadFromLayer(size_t archive, const std::string& name) const
+{
+    for (size_t a = archive; a < m_archives.size() && m_archives[a].layer == ArchiveLayer(archive); ++a)
+        if (auto bytes = ReadFrom(a, name)) return bytes;
+    return std::nullopt;
+}
+
+std::optional<size_t> MpqChain::LayerOf(const std::string& name) const
+{
+    if (const auto home = MapHome(name))
+        for (size_t a = *home; a < m_archives.size() && m_archives[a].layer == m_archives[*home].layer; ++a)
+            if (Has(a, name)) return m_archives[a].layer;
+    for (size_t a = 0; a < m_archives.size(); ++a)
+        if (Has(a, name)) return m_archives[a].layer;
+    return std::nullopt;
+}
+
 bool MpqChain::HasInstalled(const std::string& name) const
 {
     for (size_t a = 0; a < m_archives.size(); ++a)
@@ -361,10 +691,70 @@ bool MpqChain::HasInstalled(const std::string& name) const
     return false;
 }
 
+std::string MpqChain::NameOf(uint32_t fileDataId) const
+{
+    for (const Archive& a : m_archives)
+        if (const auto it = a.byId.find(fileDataId); a.casc && it != a.byId.end()) return a.listed[it->second];
+    for (const MpqChain* f : m_fallbacks)
+        if (std::string n = f->NameOf(fileDataId); !n.empty()) return n;
+    return {};
+}
+
+std::optional<std::vector<uint8_t>> MpqChain::ReadCasc(const Archive& a, uint32_t id) const
+{
+    auto read = [&](HANDLE storage) { return CascReadId(storage, id); };
+    ++g_cascReads;
+    {
+        std::lock_guard lock(m_lock);
+        if (auto bytes = read(a.casc)) return bytes;
+    }
+    ++g_cascLocalMisses;
+    // Not on disk: Blizzard's CDN. Waiting mode downloads here; otherwise the file is queued for the background
+    // fetcher and this read misses (CdnArrivals() counts what lands, so the editor asks again).
+    CdnFetcher& cdn = *a.cdn;
+    {
+        std::lock_guard lock(cdn.lock);
+        if (cdn.failed.count(id)) return std::nullopt;
+        if (g_cdnAsync && !cdn.fetched.count(id))
+        {
+            if (cdn.queued.insert(id).second) { cdn.queue.push_back(id); ++g_cdnQueued; }
+            if (!cdn.worker.joinable()) cdn.worker = std::thread([&cdn] { cdn.Run(); });
+            cdn.wake.notify_one();
+            return std::nullopt;
+        }
+    }
+    return cdn.Read(id);   // already downloaded (from the cache, quick) or waiting mode
+}
+
 std::optional<std::vector<uint8_t>> MpqChain::ReadFrom(size_t archive, const std::string& name) const
 {
     if (archive >= m_archives.size()) return std::nullopt;
     const Archive& a = m_archives[archive];
+    if (a.casc)
+    {
+        const std::string lower = Lower(Backslashes(name));
+        const auto id = CascId(a.ids, lower);
+        if (!id || !a.present.count(*id)) return std::nullopt;
+        auto bytes = ReadCasc(a, *id);   // locks what it uses
+        // A split tile (root + _tex0 + _obj0) is served as the one 3.3.5 ADT under the root's name.
+        if (bytes && lower.ends_with(".adt") && lower.find("_obj") == std::string::npos && lower.find("_tex") == std::string::npos &&
+            lower.find("_lod") == std::string::npos)
+        {
+            const std::string stem = lower.substr(0, lower.size() - 4);
+            const auto tex = a.ids.find(stem + "_tex0.adt"), obj = a.ids.find(stem + "_obj0.adt");
+            if (tex != a.ids.end() && obj != a.ids.end())
+            {
+                const auto t = ReadCasc(a, tex->second), o = ReadCasc(a, obj->second);
+                auto merged = t && o ? MergeSplitAdt(*bytes, *t, *o, [&](uint32_t fdid) {
+                    const auto it = a.byId.find(fdid);
+                    return it == a.byId.end() ? std::string() : a.listed[it->second];
+                }) : std::vector<uint8_t>{};
+                if (merged.empty()) return std::nullopt;
+                return merged;
+            }
+        }
+        return bytes;
+    }
     if (!a.handle)
     {
         const auto it = a.files.find(Lower(Backslashes(name)));
@@ -388,6 +778,11 @@ bool MpqChain::Has(size_t archive, const std::string& name) const
 {
     if (archive >= m_archives.size()) return false;
     const Archive& a = m_archives[archive];
+    if (a.casc)
+    {
+        const auto id = CascId(a.ids, Lower(Backslashes(name)));
+        return id && a.present.count(*id);
+    }
     if (!a.handle) return a.files.count(Lower(Backslashes(name))) != 0;
     std::lock_guard lock(m_lock);
     return SFileHasFile(a.handle, Backslashes(name).c_str());

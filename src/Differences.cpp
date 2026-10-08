@@ -9,6 +9,10 @@
 
 namespace
 {
+    // What a saved scan was compared by; results saved under other rules are scanned again (verdicts are kept).
+    // 2: objects keyed by turn and scale too; objects only the map has count as a difference.
+    constexpr int kRules = 2;
+
     double Now() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 
     std::string AdtPath(const std::string& map, int key)
@@ -48,7 +52,7 @@ void Differences::Start(const MpqChain& baseChain, const std::string& baseMap, c
         try
         {
             const nlohmann::json j = nlohmann::json::parse(f);
-            for (const auto& t : ChangeStore::List(j, "tiles"))
+            for (const auto& t : j.value("rules", 1) == kRules ? ChangeStore::List(j, "tiles") : nlohmann::json::array())
             {
                 TileResult r{ t.at("key"), t.at("base"), t.at("other"), t.at("edits") };
                 for (const auto& c : t.at("cells"))
@@ -298,7 +302,7 @@ void Differences::Save() const
         tiles.push_back({ { "key", key }, { "base", r.baseHash }, { "other", r.otherHash }, { "edits", r.editHash }, { "cells", std::move(cells) } });
     }
     for (const auto& [cell, s] : m_status) (s == Status::Pasted ? pasted : rejected).push_back({ cell.first, cell.second });
-    const nlohmann::json j = { { "base", m_baseMap }, { "other", m_otherMap }, { "label", m_otherLabel }, { "tiles", std::move(tiles) },
+    const nlohmann::json j = { { "rules", kRules }, { "base", m_baseMap }, { "other", m_otherMap }, { "label", m_otherLabel }, { "tiles", std::move(tiles) },
                                { "pasted", std::move(pasted) }, { "rejected", std::move(rejected) } };
     std::error_code ec;
     std::filesystem::create_directories(m_file.parent_path(), ec);

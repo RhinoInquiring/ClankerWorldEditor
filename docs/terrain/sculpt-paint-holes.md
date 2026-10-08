@@ -4,9 +4,24 @@
 
 ## Sculpt (B)
 
-Left drag shapes the ground under the brush. Modes (keys **1 to 4**): **Raise**, **Lower**, **Flatten** (to the
-height where the stroke started) and **Smooth**. **Ctrl+wheel** sets the radius; strength is in the Tools panel. One
-stroke, mouse down to mouse up, is one undo step.
+Left drag shapes the ground under the brush. Modes (keys **1 to 5**): **Raise**, **Lower**, **Flatten**, **Smooth** and
+**Vertices**. **Ctrl+wheel** sets the radius; strength is in the Tools panel. One stroke, mouse down to mouse up, is one
+undo step.
+
+**Falloff** sets how the brush weakens towards its rim: **Smooth** (default), **Linear**, **Flat** (full strength to the
+edge), **Sharp** (strong only near the centre) and **Gauss**.
+
+**Flatten** pulls the ground towards the height where the stroke starts, or towards **Fixed height** (Alt+click the
+ground to take its height). Its tab also has:
+
+- **Fill only** / **Cut only**: only raise ground below the target, or only lower ground above it.
+- **Slope** and **Downhill**: flatten to a tilted plane through the stroke's start, falling that many degrees towards
+  the direction (0 = +z, 90 = +x). Ramps, roads up hills, terraces.
+
+**Vertices** picks ground vertices with the brush (drag selects, Ctrl+drag deselects, Esc clears; yellow crosses show
+them), then moves them together: **PgUp** / **PgDn** by the step (Shift: five steps), or the panel's **Raise**, **Lower**,
+**Set height** and **Even out** (all to their mean height). Vertices on chunk edges exist once per chunk; every copy is
+picked by position, so moves never open cracks.
 
 On export the edited chunks get new normals, and so do their neighbours, across tile borders too, so the client
 lights the new shape correctly with no seam lines.
@@ -20,6 +35,14 @@ Clicking a ground texture in the [Catalog](../objects/catalog.md) picks it and s
 A 3.3.5 chunk holds at most four textures. Painting a fifth replaces the chunk's weakest one; erasing hands the
 share to the remaining textures. A painted texture takes the ground effect (grass, pebbles) it has elsewhere on the
 tile. Ground effects the client has no record of are dropped on export, because they crash the client.
+
+### Swap
+
+The Paint tool's **Swap** tab replaces one ground texture with another: **Swap out** is the texture to replace
+(Alt+click the ground with **The brush swaps instead of painting** on), the active texture goes in. Drag the brush over
+chunks, or swap on **the tile under the camera** or **every loaded tile** at once. Where a chunk already has the new
+texture, the two merge into one layer (their shares add up), freeing a layer. **Remove it** takes the texture out
+instead, handing its share to the chunk's other textures; a chunk's only texture stays. Each swap is one undo step.
 
 ## Shade (U)
 
@@ -37,6 +60,11 @@ in over the same edge as the textures. Export writes the colours into the tile i
 Left drag cuts holes; **Ctrl+drag** fills them (or the other way round, set in the tab). **Ctrl+wheel** sets the
 radius. A hole cell is 1/16 of a chunk (8.3 x 8.3 yd), the finest size the 3.3.5 client and AzerothCore support.
 Holes are how caves and cellars open into the ground.
+
+**Impassable** (the tool's second mode) sets or clears the chunks' impassable flag (MCNK flag 0x2) with the same brush,
+whole chunks at a time: **Set** / **Clear**, Ctrl for the opposite. Flagged chunks near the cursor are outlined red.
+It is the client's flag, as Blizzard's tools set it; AzerothCore's map extractors do not read it, so it does not change
+where the server lets creatures walk.
 
 ## Select (V)
 

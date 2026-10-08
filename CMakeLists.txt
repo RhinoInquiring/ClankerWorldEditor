@@ -27,7 +27,13 @@ FetchContent_Declare(imguizmo
     GIT_REPOSITORY https://github.com/CedricGuillemet/ImGuizmo.git
     GIT_TAG 18cef5e031d8c6973d80284c67f60549fafd78c1
     SOURCE_SUBDIR no-cmake)   # sources only: its own CMakeLists builds extras we do not need
-FetchContent_MakeAvailable(imgui stormlib json imguizmo)
+set(CMAKE_POLICY_VERSION_MINIMUM 3.5)   # CascLib asks for cmake 3.2, which cmake 4 no longer accepts
+set(CASC_BUILD_SHARED_LIB OFF CACHE BOOL "" FORCE)
+set(CASC_BUILD_STATIC_LIB ON CACHE BOOL "" FORCE)
+FetchContent_Declare(casclib   # CASC storages (modern clients' Data\data); master: newest root formats
+    GIT_REPOSITORY https://github.com/ladislav-zezula/CascLib.git
+    GIT_TAG 38a34665624b8775bb875274b36191b21c38d97b)
+FetchContent_MakeAvailable(imgui stormlib json imguizmo casclib)
 
 add_library(imgui STATIC
     ${imgui_SOURCE_DIR}/imgui.cpp
@@ -68,6 +74,7 @@ add_executable(wow-world-editor WIN32
     src/Roads.cpp
     src/ServerData.cpp
     src/Assets.cpp
+    src/Downport.cpp
     src/Blend.cpp
     src/Blueprint.cpp
     src/Catalog.cpp
@@ -90,8 +97,8 @@ add_executable(wow-world-editor WIN32
     src/Pois.cpp
     src/Terrain.cpp
     src/Triggers.cpp)
-target_compile_definitions(wow-world-editor PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
-target_link_libraries(wow-world-editor PRIVATE imgui StormLib::storm nlohmann_json::nlohmann_json
+target_compile_definitions(wow-world-editor PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN CASCLIB_NO_AUTO_LINK_LIBRARY)
+target_link_libraries(wow-world-editor PRIVATE imgui StormLib::storm casc_static nlohmann_json::nlohmann_json
     d3d11 d3dcompiler dxgi ole32 shell32 uuid windowscodecs advapi32 winhttp winmm)
 
 # AzerothCore DB link: the MySQL 8.x client library of a local MySQL install. Delay-loaded, so the editor starts

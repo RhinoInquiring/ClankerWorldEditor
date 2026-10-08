@@ -230,22 +230,8 @@ void App::UpdateCompare()
     }
     // Landmarks: the paste skips the ones the map has already (AddPastedPois).
     clip.pois = VersionPois(m_ghosts.Chain(l->source), l->map.empty() ? m_terrain.Map() : l->map, cells, clip.originX, clip.originZ);
-    // Objects: only the ones the map lacks. The rest already stand there, and pasting them would double them.
-    clip.doodads.clear();
-    clip.wmos.clear();
-    const float ox = clip.originX * kChunkSize, oz = clip.originZ * kChunkSize;
-    for (DoodadPlacement d : e.diff.newDoodads)
-    {
-        d.pos[0] -= ox;
-        d.pos[2] -= oz;
-        clip.doodads.push_back(std::move(d));
-    }
-    for (WmoPlacement w : e.diff.newWmos)
-    {
-        w.pos[0] -= ox; w.extMin[0] -= ox; w.extMax[0] -= ox;
-        w.pos[2] -= oz; w.extMin[2] -= oz; w.extMax[2] -= oz;
-        clip.wmos.push_back(std::move(w));
-    }
+    // Objects: the paste leaves the area's objects as the version has them.
+    SetAreaObjects(clip, e.diff);
     if (m_compareClips.size() >= 32) m_compareClips.clear();   // ponytail: whole-cache reset; an LRU if huge selections thrash it
     ShowCompareClip(showKey, m_compareClips[showKey] = std::move(clip));
 }
@@ -328,7 +314,7 @@ void App::DrawCompare()
         ImGui::SetItemTooltip("Chunks whose terrain water differs: the paste replaces their water with this version's (removes it where it has none)");
         ImGui::TableNextColumn();
         if (d.cells) ImGui::Text("+%zu / -%zu", d.newDoodads.size() + d.newWmos.size(), d.goneDoodads + d.goneWmos);
-        ImGui::SetItemTooltip("+ objects only this version has (a paste adds them)\n- objects only the map has (a paste leaves them; delete by hand)");
+        ImGui::SetItemTooltip("+ objects only this version has (a paste adds them)\n- objects only the map has (a paste removes them)");
         ImGui::TableNextColumn();
         if (e.assetsMissing) ImGui::TextColored({ 1, 0.4f, 0.35f, 1 }, "%zu missing", e.assetsMissing);
         else if (e.assetsOther) ImGui::Text("%zu copied", e.assetsOther);

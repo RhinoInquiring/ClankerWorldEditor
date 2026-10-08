@@ -148,6 +148,15 @@ bool ModelRenderer::Init(ID3D11Device* device, ID3D11DeviceContext* context, Ren
     return m_vs && m_ps && m_layout;
 }
 
+void ModelRenderer::RefreshTextures(const MpqChain& mpq)
+{
+    ID3D11ShaderResourceView* const white = m_textures->TextureFor({}, mpq);
+    for (auto& [key, mesh] : m_meshes)
+        if (mesh)
+            for (auto& b : mesh->batches)
+                if (b.texture == white && !b.textureName.empty()) b.texture = m_textures->TextureFor(b.textureName, mpq);
+}
+
 ModelRenderer::GpuMesh* ModelRenderer::Mesh(const std::string& name, bool wmo, const MpqChain& mpq)
 {
     const std::string key = Lower(name);
@@ -165,7 +174,7 @@ ModelRenderer::GpuMesh* ModelRenderer::Mesh(const std::string& name, bool wmo, c
         if (auto root = mpq.Read(name); root && WmoRootInfo(*root, groups, bounds))
         {
             std::vector<std::vector<uint8_t>> files;
-            for (uint32_t g = 0; g < groups; ++g) files.push_back(mpq.Read(WmoGroupName(name, g)).value_or(std::vector<uint8_t>{}));
+            for (uint32_t g = 0; g < groups; ++g) files.push_back(mpq.Read(WmoGroupFile(name, *root, g)).value_or(std::vector<uint8_t>{}));
             mesh = ParseWmo(*root, files);
         }
     }
@@ -188,6 +197,7 @@ ModelRenderer::GpuMesh* ModelRenderer::Mesh(const std::string& name, bool wmo, c
         gpu->batches.back().uvAnim = b.uvAnim;
         gpu->batches.back().weight = b.weight;
         gpu->batches.back().color = b.color;
+        gpu->batches.back().textureName = b.texture;
         if (!b.texture.empty() && std::find(gpu->textureNames.begin(), gpu->textureNames.end(), b.texture) == gpu->textureNames.end())
             gpu->textureNames.push_back(b.texture);
         if (b.liquid)

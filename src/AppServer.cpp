@@ -317,7 +317,10 @@ void App::RunChecks()
     m_terrain.FindCracks(m_problems);
     if (!error.empty()) m_problems.push_back({ Problem::Severity::Error, "Terrain", error });
     m_terrain.TakeDroppedEffects();   // counted per tile in the problems instead
-    for (const auto& missing : CopyMissingAssets(m_mpq, tiles, out).missing)
+    SetCdnAsync(false);   // complete: wait for CDN files
+    const AssetReport assets = CopyMissingAssets(m_mpq, tiles, out);
+    SetCdnAsync(true);
+    for (const auto& missing : assets.missing)
         m_problems.push_back({ Problem::Severity::Error, "Assets", "Referenced by an edited tile, found in no client: " + missing });
     fs::remove_all(out, ec);
 
@@ -357,7 +360,8 @@ void App::RunChecks()
         m_problems.push_back({ Problem::Severity::Error, "IDs", "No area.id range set (File > Project settings)." });
     for (const auto& [kind, table] : std::initializer_list<std::pair<const char*, const DbcTable*>>{
              { "wmoarea.id", &m_wmoAreas }, { "worldmaparea.id", &m_worldMaps }, { "worldmapoverlay.id", &m_mapOverlays },
-             { "creaturedisplayinfo.id", &m_displayRows }, { "creaturedisplayinfoextra.id", &m_extraRows } })
+             { "creaturedisplayinfo.id", &m_displayRows }, { "creaturedisplayinfoextra.id", &m_extraRows },
+             { "map.id", &m_mapRows }, { "mapdifficulty.id", &m_mapDifficulty } })
         if (const Project::IdRange r = m_project->Range(kind); r.first && r.last >= r.first)
             table->CheckIds(r.first, r.last, table == &m_displayRows || table == &m_extraRows ? "NPCs" : "Zones", m_problems);
         else

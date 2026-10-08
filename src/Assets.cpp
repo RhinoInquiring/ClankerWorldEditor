@@ -1,11 +1,13 @@
 #include "Assets.hpp"
 
 #include "Catalog.hpp"
+#include "Downport.hpp"
 #include "Formats.hpp"
 #include "Models.hpp"
 #include "Mpq.hpp"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <deque>
 #include <fstream>
@@ -80,6 +82,22 @@ std::vector<std::string> AssetReferences(const MpqChain& mpq, const std::string&
             if (type == 0 && nameLen > 1 && size_t(nameOfs) + nameLen <= bytes.size())
                 refs.emplace_back(reinterpret_cast<const char*>(bytes.data() + nameOfs), strnlen(reinterpret_cast<const char*>(bytes.data() + nameOfs), nameLen));
         }
+        // Animations kept outside the model (sequence flag 0x20 off, not an alias 0x40): Name<id>-<variation>.anim.
+        uint32_t seqCount = 0, seqOffset = 0;
+        ReadAt(bytes, 0x1C, seqCount);
+        ReadAt(bytes, 0x20, seqOffset);
+        for (uint32_t i = 0; i < seqCount && i < 4096 && size_t(seqOffset) + (i + 1) * 64 <= bytes.size(); ++i)
+        {
+            uint16_t id = 0, variation = 0;
+            uint32_t flags = 0;
+            ReadAt(bytes, size_t(seqOffset) + i * 64, id);
+            ReadAt(bytes, size_t(seqOffset) + i * 64 + 2, variation);
+            ReadAt(bytes, size_t(seqOffset) + i * 64 + 12, flags);
+            if (flags & 0x60) continue;
+            char suffix[24];
+            snprintf(suffix, sizeof suffix, "%04u-%02u.anim", id, variation);
+            refs.push_back(path.substr(0, path.size() - 3) + suffix);
+        }
     }
     else if (ext == ".wmo")
     {
@@ -87,7 +105,7 @@ std::vector<std::string> AssetReferences(const MpqChain& mpq, const std::string&
         float bounds[6];
         if (WmoRootInfo(bytes, groups, bounds))   // a root: its groups, textures, doodads and skybox
         {
-            for (uint32_t g = 0; g < groups; ++g) refs.push_back(WmoGroupName(path, g));
+            for (uint32_t g = 0; g < groups; ++g) refs.push_back(WmoGroupFile(path, bytes, g));
             std::vector<std::string> names;
             for (size_t pos = 12; pos + 8 <= bytes.size();)   // after MVER
             {
@@ -116,11 +134,20 @@ AssetReport CopyMissingAssets(const MpqChain& mpq, const std::vector<fs::path>& 
         if (name.empty() || !seen.insert(Catalog::Normalize(name)).second) return;
         if (mpq.HasInstalled(name)) return;   // players have it (and everything it refers to)
         auto bytes = mpq.Read(name);    // from another client
+        if (bytes && (IsNewerFormat(name, *bytes) || Catalog::Normalize(name).ends_with(".skin")))
+        {
+            const size_t notesBefore = report.notes.size();
+            auto converted = Downport(name, *bytes, [&](uint32_t id) { return mpq.NameOf(id); },
+                                      [&](const std::string& n) { return mpq.Read(n); }, report.notes);
+            if (converted != *bytes) report.converted.push_back(name);
+            if (converted.empty()) { report.missing.push_back(name + " (cannot convert: " + (report.notes.size() > notesBefore ? report.notes.back() : "unknown") + ")"); return; }
+            bytes = std::move(converted);
+        }
         const bool optional = name.size() > 6 && Catalog::Normalize(name).ends_with("_s.blp");
         if (!bytes)
         {
             const std::string lower = Catalog::Normalize(name);
-            const bool optionalSkin = lower.ends_with("01.skin") || lower.ends_with("02.skin") || lower.ends_with("03.skin");
+            const bool optionalSkin = lower.ends_with("01.skin") || lower.ends_with("02.skin") || lower.ends_with("03.skin") || lower.ends_with(".anim");
             if (!optional && !optionalSkin) report.missing.push_back(name);
             return;
         }

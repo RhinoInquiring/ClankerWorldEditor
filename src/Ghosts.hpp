@@ -48,6 +48,7 @@ public:
         int id = 0;                          // renderer layer number (1, 2, ...)
         size_t source = 0;
         int archive = -1;                    // -1: the whole source as the client resolves it
+        bool layerWide = false;              // with an archive: that archive's whole layer resolved alone (one version of a base layer)
         std::string map;                     // another map's folder shown over the open one; empty = the open map
         std::string label;
         DirectX::XMFLOAT4 tint{ 1, 0.6f, 0.2f, 0.5f };
@@ -99,7 +100,7 @@ public:
     static int Key(int layer, int tileKey) { return -(16 + layer * 4096 + tileKey); }
 
 private:
-    std::optional<std::vector<uint8_t>> ReadVersion(size_t source, int archive, const std::string& path) const;
+    std::optional<std::vector<uint8_t>> ReadVersion(size_t source, int archive, const std::string& path, bool layerWide = false) const;
 
     std::vector<Source> m_sources;
     std::vector<Layer> m_layers;
@@ -120,7 +121,8 @@ struct AreaDiff
     float meanEdge = 0, maxEdge = 0;       // the same on the area's outer edge only: the step a paste has to blend away
     std::vector<DoodadPlacement> newDoodads;   // objects standing on the area that the map lacks (world positions)
     std::vector<WmoPlacement> newWmos;
-    size_t goneDoodads = 0, goneWmos = 0;      // objects of the map the version lacks (a paste leaves them standing)
+    size_t goneDoodads = 0, goneWmos = 0;      // objects of the map the version lacks (a paste removes them)
+    std::vector<ObjectRef> gone;
     bool Same() const { return cells && !changed && newDoodads.empty() && newWmos.empty() && !goneDoodads && !goneWmos; }
 };
 
@@ -136,12 +138,20 @@ struct CellDiff
 };
 
 /// Every chunk among `cells` where `version` has something a paste would bring over: heights (> 0.5 yd), textures,
-/// holes, water (fishing/fatigue masks aside), objects the map lacks, or terrain the map lacks altogether. Objects
-/// count on the chunk they stand on; objects only the map has are noted (goneObjects) but alone are no difference.
+/// holes, water (fishing/fatigue masks aside), objects either side lacks, or terrain the map lacks altogether. Objects
+/// count on the chunk they stand on.
 std::vector<CellDiff> CompareCells(const std::map<int, LoadedTile>& map, const std::map<int, LoadedTile>& version,
                                    const std::set<std::pair<int, int>>& cells);
 
-/// Compares the chunks at global grid cells `cells` of `version` against `map` (both by tile key). Objects match by model
-/// and position (1 yd), so a re-saved copy of the same placement is not counted as new. Buildings count wherever their
+/// Compares the chunks at global grid cells `cells` of `version` against `map` (both by tile key). Objects match by model,
+/// position (1 yd), turn (1 degree) and scale, so a re-saved copy of the same placement is not counted as new. Buildings count wherever their
 /// bounds reach the cells (a cave's origin can lie outside the area it runs through); other objects where they stand.
 AreaDiff CompareArea(const std::map<int, LoadedTile>& map, const std::map<int, LoadedTile>& version, const std::set<std::pair<int, int>>& cells);
+
+/// Makes a paste in place of `clip` leave the area's objects as `d`'s version has them: the version's others added,
+/// the map's others removed, the ones both have untouched.
+void SetAreaObjects(TerrainClipboard& clip, const AreaDiff& d);
+
+/// The chunks at `cells` as the project's files have them before any edit (the client's tiles), pasted back in place
+/// without a blend band, objects included, as one change. Cells on tiles the project added are left out (`skipped`).
+std::optional<Change> RevertToClient(TerrainAdapter& terrain, const MpqChain& mpq, const std::set<std::pair<int, int>>& cells, size_t& skipped);
