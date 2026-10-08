@@ -1113,6 +1113,125 @@ namespace
         return saved && clip.chunks.size() == 16 ? 0 : 1;
     }
 
+    /// `--casc-to-mpq <install*product> <out dir> [map ...]`: a CASC client's maps (every one, or the named folders) as
+    /// 3.3.5a files: merged ADTs, WDTs without FileDataIDs, WDLs as they are, and every model and texture they use
+    /// (newer formats converted, as export does). Written under <out dir>\staging (a rerun skips what is there), then
+    /// packed into <out dir>\<out dir name>.MPQ (format 4: the editor reads it, the 3.3.5a client does not).
+    int CascToMpq()
+    {
+        if (__argc < 4 || !__wargv) return 2;
+        setvbuf(stdout, nullptr, _IONBF, 0);
+        namespace fs = std::filesystem;
+        auto arg = [](int i) {
+            char buf[1024] = {};
+            WideCharToMultiByte(CP_ACP, 0, __wargv[i], -1, buf, sizeof buf, nullptr, nullptr);
+            return std::string(buf);
+        };
+        auto lower = [](std::string s) { for (char& c : s) c = char(std::tolower((unsigned char)c)); return s; };
+        using Clock = std::chrono::steady_clock;
+        const auto start = Clock::now();
+        auto seconds = [&] { return std::chrono::duration<double>(Clock::now() - start).count(); };
+
+        MpqChain mpq;
+        if (!mpq.Open(arg(2))) { printf("Cannot open %s\n", arg(2).c_str()); return 1; }
+        const fs::path out = fs::path(__wargv[3]), stage = out / "staging";
+        std::set<std::string> only;
+        for (int i = 4; i < __argc; ++i) only.insert(lower(arg(i)));
+
+        // Maps: every World\Maps\<dir>\<dir>.wdt the build has.
+        std::vector<std::string> maps;
+        for (const MpqChain::Entry& e : mpq.List())
+        {
+            const std::string name = lower(e.name);
+            if (name.rfind("world\\maps\\", 0) != 0 || !name.ends_with(".wdt")) continue;
+            const std::string rest = e.name.substr(11, e.name.size() - 15);   // <dir>\<dir>
+            const size_t slash = rest.find('\\');
+            if (slash == std::string::npos || lower(rest.substr(0, slash)) != lower(rest.substr(slash + 1))) continue;
+            if (only.empty() || only.count(lower(rest.substr(0, slash)))) maps.push_back(rest.substr(0, slash));
+        }
+        std::sort(maps.begin(), maps.end());
+        printf("%zu map(s) (%.0f s to open)\n", maps.size(), seconds());
+
+        auto write = [&](const std::string& game, const std::vector<uint8_t>& bytes) {
+            std::string rel = game;
+            std::replace(rel.begin(), rel.end(), '\\', '/');
+            const fs::path p = stage / fs::path(rel);
+            std::error_code ec;
+            fs::create_directories(p.parent_path(), ec);
+            std::ofstream(p, std::ios::binary).write(reinterpret_cast<const char*>(bytes.data()), std::streamsize(bytes.size()));
+            return p;
+        };
+        auto staged = [&](const std::string& game) {
+            std::string rel = game;
+            std::replace(rel.begin(), rel.end(), '\\', '/');
+            return stage / fs::path(rel);
+        };
+        const FileIdName nameOf = [&](uint32_t id) { return mpq.NameOf(id); };
+
+        std::vector<fs::path> files;   // tiles and WDTs: where the asset walk starts
+        std::vector<std::string> notes;
+        size_t tilesTotal = 0, tilesMissing = 0;
+        for (size_t m = 0; m < maps.size(); ++m)
+        {
+            const std::string& dir = maps[m];
+            const std::string base = "World\\Maps\\" + dir + "\\" + dir;
+            const auto wdt = mpq.Read(base + ".wdt");
+            if (!wdt) { notes.push_back(dir + ": WDT unreadable"); continue; }
+            const std::vector<bool> listed = WdtTiles(*wdt);
+            std::set<int> have;
+            size_t missing = 0;
+            for (int k = 0; k < int(listed.size()); ++k)
+            {
+                if (!listed[size_t(k)]) continue;
+                const std::string adt = base + "_" + std::to_string(k % 64) + "_" + std::to_string(k / 64) + ".adt";
+                std::error_code ec;
+                fs::path p = staged(adt);
+                if (!fs::is_regular_file(p, ec))
+                {
+                    const auto bytes = mpq.Read(adt);   // split tiles come back merged
+                    if (!bytes) { ++missing; continue; }
+                    p = write(adt, *bytes);
+                }
+                have.insert(k);
+                files.push_back(p);
+            }
+            std::vector<std::string> wdtNotes;
+            const auto converted = DowngradeWdt(*wdt, nameOf, [&](int x, int y) { return have.count(y * 64 + x) != 0; }, &wdtNotes);
+            if (converted.empty()) { notes.push_back(dir + ": WDT has no MAIN"); continue; }
+            files.push_back(write(base + ".wdt", converted));
+            for (const auto& n : wdtNotes) notes.push_back(dir + ": " + n);
+            if (const auto wdl = mpq.Read(base + ".wdl")) write(base + ".wdl", *wdl);
+            tilesTotal += have.size();
+            tilesMissing += missing;
+            if (missing) notes.push_back(dir + ": " + std::to_string(missing) + " listed tile(s) unreadable");
+            printf("[%zu/%zu] %-32s %4zu tile(s)%s  (%.0f s)\n", m + 1, maps.size(), dir.c_str(), have.size(),
+                   missing ? (", " + std::to_string(missing) + " unreadable").c_str() : "", seconds());
+        }
+
+        printf("Models and textures...\n");
+        const AssetReport report = CopyMissingAssets(mpq, files, stage, true);
+        printf("%zu file(s) written, %zu converted, %zu missing  (%.0f s)\n", report.copied.size(), report.converted.size(),
+               report.missing.size(), seconds());
+        {
+            std::ofstream r(out / "report.txt");
+            r << "Maps " << maps.size() << ", tiles " << tilesTotal << " (" << tilesMissing << " unreadable)\n";
+            for (const auto& n : notes) r << n << "\n";
+            r << "\nMissing (" << report.missing.size() << "):\n";
+            for (const auto& n : report.missing) r << n << "\n";
+            r << "\nConversion notes (" << report.notes.size() << "):\n";
+            for (const auto& n : report.notes) r << n << "\n";
+        }
+
+        const fs::path archive = out / (out.filename().string() + ".MPQ");
+        printf("Packing %s...\n", archive.string().c_str());
+        std::string error;
+        size_t packed = 0;
+        if (!WriteMpq(archive, stage, error, &packed, true)) { printf("%s\n", error.c_str()); return 1; }
+        printf("Done: %zu map(s), %zu tile(s), %zu file(s) in %s  (%.0f s). Report: %s\n", maps.size(), tilesTotal, packed,
+               archive.string().c_str(), seconds(), (out / "report.txt").string().c_str());
+        return 0;
+    }
+
     /// `--asset-check <base data dir> <other client dir> <map> <x> <y>`: paste a whole tile from the other client into
     /// the base one, export, and copy what the base client lacks; every reference of the result must then resolve.
     int AssetCheck()
@@ -2158,6 +2277,36 @@ namespace
             if (change) store.Commit(std::move(*change));
             return change.has_value();
         };
+        // Map's water: another liquid, raised 5 yd, pasted on a dry chunk near the map's water takes the map's liquid and level.
+        {
+            std::optional<std::pair<float, uint16_t>> match;
+            int spot = -1;
+            for (int ci = 0; ci < int(tile().adt.chunks.size()) && spot < 0; ++ci)
+            {
+                const AdtChunk& d = tile().adt.chunks[size_t(ci)];
+                if (water(ci).empty() && (match = terrain.NearestWater(d.baseX + kChunkSize / 2, d.baseZ + kChunkSize / 2, 80.0f))) spot = ci;
+            }
+            TerrainClipboard odd = wetClip;
+            for (auto& l : odd.chunks[0].liquids)
+            {
+                l["type"] = l["type"].get<int>() == 3 ? 1 : 3;   // magma, or water when it was magma
+                for (auto& h : l["heights"]) h = h.get<float>() + 5.0f;
+            }
+            o.mapWater = true;
+            const bool pasted = spot >= 0 && paste(odd, spot);
+            o.mapWater = false;
+            expect(pasted, "other liquid pasted with Map's water beside the map's water");
+            bool same = pasted && !water(spot).empty();
+            if (pasted)
+                for (const auto& l : water(spot))
+                {
+                    same = same && l["type"].get<int>() == match->second;
+                    for (const auto& h : l["heights"]) same = same && std::fabs(h.get<float>() - match->first) < 0.01f;
+                }
+            expect(same, "  it has the map's liquid and level");
+            if (pasted) store.Undo();
+        }
+
         expect(paste(dryClip, wet), "dry chunk pasted over the wet one");
         expect(water(wet).empty(), "  its water is gone");
         store.Undo();
@@ -2167,6 +2316,7 @@ namespace
         expect(paste(wetClip, dry), "wet chunk pasted over the dry one");
         expect(water(dry) == wetBefore, "  the dry chunk now has exactly that water");
         expect(tile().adt.liquids.size() == total, "  instance count unchanged (moved, not lost)");
+
 
         // Export and read back: the client's view of the tile.
         const auto out = std::filesystem::temp_directory_path() / "wow-world-editor-watercheck";
@@ -3800,6 +3950,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdLine, int)
     if (cmdLine && wcsstr(cmdLine, L"--diff-objects")) return DiffObjects();
     if (cmdLine && wcsstr(cmdLine, L"--blueprint-check")) return BlueprintCheck();
     if (cmdLine && wcsstr(cmdLine, L"--asset-check")) return AssetCheck();
+    if (cmdLine && wcsstr(cmdLine, L"--casc-to-mpq")) return CascToMpq();
     if (cmdLine && wcsstr(cmdLine, L"--export") && __argc >= 3)
     {
         // `--export <project dir>`: what Ctrl+E does, without the window: tiles plus files from other clients into out/client.

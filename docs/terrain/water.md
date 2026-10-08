@@ -36,7 +36,10 @@ Each stroke is one undo step.
 Copies carry each chunk's water. A paste replaces the water of every pasted chunk with the copy's, so a dry cave
 pasted into a lake removes the lake's water there, and a wet area pasted onto dry ground brings its water. The blend
 band around a paste keeps its own water. Untick **Water** in the Copy tool's Placement tab to leave the target's water
-as it is. Undo, rotation, [blueprints](blueprints.md) and export all include water.
+as it is. Tick **Map's water** to keep the copy's water where it is wet but give it this map's liquid and level: the
+liquid (and so its colour) and surface of the map's water on that chunk, or the nearest within 80 yd, with its depth
+worked out from the ground as pasted. Chunks pasted from another version beside a lake then join it without a change
+of colour or a step in the surface. With no water within 80 yd the copy's water comes as it is. Undo, rotation, [blueprints](blueprints.md) and export all include water.
 
 Water that belongs to a building or cave model (its WMO liquid) comes with the model, not with the terrain.
 

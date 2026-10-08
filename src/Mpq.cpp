@@ -251,7 +251,7 @@ std::string CascBuildInfo(const std::filesystem::path& install, const std::strin
     return {};
 }
 
-bool WriteMpq(const std::filesystem::path& archive, const std::filesystem::path& root, std::string& error, size_t* files)
+bool WriteMpq(const std::filesystem::path& archive, const std::filesystem::path& root, std::string& error, size_t* files, bool large)
 {
     namespace fs = std::filesystem;
     std::error_code ec;
@@ -268,7 +268,8 @@ bool WriteMpq(const std::filesystem::path& archive, const std::filesystem::path&
     fs::create_directories(archive.parent_path(), ec);
     fs::remove(temp, ec);
     HANDLE h = nullptr;
-    if (!SFileCreateArchive(temp.string().c_str(), MPQ_CREATE_LISTFILE | MPQ_CREATE_ATTRIBUTES | MPQ_CREATE_ARCHIVE_V1, slots, &h))
+    if (!SFileCreateArchive(temp.string().c_str(), MPQ_CREATE_LISTFILE | MPQ_CREATE_ATTRIBUTES | (large ? MPQ_CREATE_ARCHIVE_V4 : MPQ_CREATE_ARCHIVE_V1),
+                            slots, &h))
     {
         error = "Cannot create " + temp.string() + " (error " + std::to_string(GetLastError()) + ")";
         return false;

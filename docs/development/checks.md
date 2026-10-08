@@ -24,7 +24,7 @@ Direct3D device. Checks that write files use a temporary folder and remove it.
 | Command | Checks |
 | --- | --- |
 | `--plan-check <Data>` | Copy, rotate, blended paste, objects, furniture carrying, area paint, export |
-| `--water-check <Data> <map> <x> <y>` | Dry over wet and back, undo/redo, rotation, export of water |
+| `--water-check <Data> <map> <x> <y>` | Dry over wet and back, undo/redo, rotation, Map's water paste, export of water |
 | `--water-tool-check <Data>` | Water tool on Azeroth 32_48: add, keep level beside, level, slope, remove, magma takes lake cells, flat ocean, undo/redo, export read-back |
 | `--sculpt-check <Data>` | Falloff shapes, sloped flatten lands on its plane, fill only, vertex selection moves with no cracks, even out, undo |
 | `--newmap-check <Data>` | New map: Map.dbc + MapDifficulty rows, WDT/WDL, 2 x 2 flat tiles as one step; loads, exports, undo, redo, overlay rebuilt on reopen |
@@ -39,6 +39,7 @@ Direct3D device. Checks that write files use a temporary folder and remove it.
 | `--anim-check <Data> <model.m2> [...]` | Skeletons animate without flying apart; every animation (incl. `.anim` files) loads and Walk differs from Stand |
 | `--catalog-check <Data> <out.png>` | Catalog build time, search, thumbnails |
 | `--asset-check <Data> <other client> <map> <x> <y>` | Paste from another client, cracks, the asset closure |
+| `--casc-to-mpq <install*product> <out dir> [map ...]` | Not a check: converts a CASC client's maps (all, or the named folders) and everything they use to 3.3.5a under `<out dir>\staging`, then packs `<out dir>\<name>.MPQ`; a rerun skips what is staged; `report.txt` lists what was lost |
 | `--render <Data> <map> <x> <y> <out.png> [yaw pitch above fx fz]` | Draws a view to a PNG. WMO-only maps (any x y): fx fz are fractions of the WMO box, above is yards over its middle; with WWE_SERVER=<AC dir> it also checks every creature stands on a WMO floor |
 | `--map-preview <Data> <map> <out.png>` | The Maps panel picture |
 

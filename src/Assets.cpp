@@ -62,6 +62,10 @@ std::vector<std::string> AssetReferences(const MpqChain& mpq, const std::string&
             for (const auto& w : adt->wmos) refs.push_back(w.model);
         }
     }
+    else if (ext == ".wdt")   // a WMO-only map's building
+    {
+        if (const auto w = WdtGlobalWmo(bytes)) refs.push_back(w->model);
+    }
     else if (ext == ".m2")
     {
         for (int i = 0; i < 4; ++i)
@@ -125,7 +129,7 @@ std::vector<std::string> AssetReferences(const MpqChain& mpq, const std::string&
     return refs;
 }
 
-AssetReport CopyMissingAssets(const MpqChain& mpq, const std::vector<fs::path>& adtFiles, const fs::path& outDir)
+AssetReport CopyMissingAssets(const MpqChain& mpq, const std::vector<fs::path>& adtFiles, const fs::path& outDir, bool resume)
 {
     AssetReport report;
     std::set<std::string> seen;
@@ -133,6 +137,18 @@ AssetReport CopyMissingAssets(const MpqChain& mpq, const std::vector<fs::path>& 
     auto visit = [&](const std::string& name) {
         if (name.empty() || !seen.insert(Catalog::Normalize(name)).second) return;
         if (mpq.HasInstalled(name)) return;   // players have it (and everything it refers to)
+        if (resume)
+        {
+            std::string rel = name;
+            std::replace(rel.begin(), rel.end(), '\\', '/');
+            std::error_code ec;
+            if (const fs::path done = outDir / fs::path(rel); fs::is_regular_file(done, ec))
+            {
+                std::ifstream f(done, std::ios::binary);
+                queue.push_back({ name, std::vector<uint8_t>((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>()) });
+                return;
+            }
+        }
         auto bytes = mpq.Read(name);    // from another client
         if (bytes && (IsNewerFormat(name, *bytes) || Catalog::Normalize(name).ends_with(".skin")))
         {

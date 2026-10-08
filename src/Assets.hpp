@@ -20,7 +20,9 @@ struct AssetReport
 /// layer has it: MpqLayer::installed), read from any layer or fallback, under outDir at its game path. Files players
 /// have are not copied, nor followed further. Files from newer clients are converted to 3.3.5a first (Downport) and
 /// their references followed from the converted file.
-AssetReport CopyMissingAssets(const MpqChain& mpq, const std::vector<std::filesystem::path>& adtFiles, const std::filesystem::path& outDir);
+/// With `resume`, a file already under outDir is taken as written (read back from there for its references).
+AssetReport CopyMissingAssets(const MpqChain& mpq, const std::vector<std::filesystem::path>& adtFiles, const std::filesystem::path& outDir,
+                              bool resume = false);
 
-/// Files one game file refers to directly (by extension: .adt, .m2, .wmo; anything else refers to nothing).
+/// Files one game file refers to directly (by extension: .adt, .wdt, .m2, .wmo; anything else refers to nothing).
 std::vector<std::string> AssetReferences(const MpqChain& mpq, const std::string& path, const std::vector<uint8_t>& bytes);

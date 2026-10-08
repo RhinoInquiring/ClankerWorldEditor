@@ -2167,6 +2167,7 @@ void App::UpdatePlacement()
     options.textures = m_pasteTextures;
     options.holes = m_pasteHoles;
     options.water = m_pasteWater;
+    options.mapWater = m_pasteMapWater;
     options.objects = m_pasteObjects;
     options.blend = m_pin && m_blend;   // the floating ghost stays cheap; pinning shows the full blend
     if (m_comparing && ImGui::GetTime() - m_compareCycledAt < kCompareSettle) options.blend = false;   // flicking through versions
@@ -2178,7 +2179,7 @@ void App::UpdatePlacement()
 
     char key[240];
     snprintf(key, sizeof key, "%d %d %.2f %.4f %.4f %zu %d %d %d %d %.1f %d %zu", gx, gz, offset, options.slopeX, options.slopeZ, clipId,
-             int(m_pasteHeights), int(m_pasteTextures) | int(m_pasteHoles) << 1 | int(m_pasteObjects) << 2 | int(m_pasteWater) << 3, int(m_pin.has_value()), int(options.blend), options.widthYards,
+             int(m_pasteHeights), int(m_pasteTextures) | int(m_pasteHoles) << 1 | int(m_pasteObjects) << 2 | int(m_pasteWater) << 3 | int(m_pasteMapWater) << 4, int(m_pin.has_value()), int(options.blend), options.widthYards,
              int(m_ghostPreview), m_terrain.MissingTiles(PasteTiles()));   // replan as the footprint's tiles arrive
     if (m_planKey == key) return;
     m_planKey = key;
@@ -4249,6 +4250,12 @@ void App::DrawToolsPanel()
             ImGui::SameLine();
             ImGui::Checkbox("Objects", &m_pasteObjects);
             ImGui::SetItemTooltip("Doodads and WMOs standing on the copied chunks (%zu + %zu)", m_clipboard.doodads.size(), m_clipboard.wmos.size());
+            ImGui::SameLine();
+            ImGui::BeginDisabled(!m_pasteWater);
+            ImGui::Checkbox("Map's water", &m_pasteMapWater);
+            ImGui::EndDisabled();
+            ImGui::SetItemTooltip("The pasted water keeps its shape but takes the liquid (colour) and level of this map's water\n"
+                                  "there, or the nearest within 80 yd, so it joins the lake or river around the paste");
             ImGui::SameLine();
             ImGui::Checkbox("Ghost", &m_ghostPreview);
             ImGui::SetItemTooltip("See-through ghost while the copy follows the cursor");

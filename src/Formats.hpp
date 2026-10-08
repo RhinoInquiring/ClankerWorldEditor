@@ -94,6 +94,10 @@ std::vector<uint8_t> BlankAdt(int x, int y, float height, const std::string& tex
 std::vector<uint8_t> MergeSplitAdt(const std::vector<uint8_t>& root, const std::vector<uint8_t>& tex0, const std::vector<uint8_t>& obj0,
                                    const std::function<std::string(uint32_t)>& nameOf, std::vector<std::string>* notes = nullptr);
 std::vector<uint8_t> BlankWdt(uint32_t flags);
+/// A newer client's WDT in 3.3.5a shape: MPHD flags it knows (0x80 big alpha as 0x4), MAIN without MAID (tiles kept only
+/// where `hasTile(x, y)`), a global WMO named in MWMO (a FileDataID through `nameOf`). Empty when it has no MAIN.
+std::vector<uint8_t> DowngradeWdt(const std::vector<uint8_t>& wdt, const std::function<std::string(uint32_t)>& nameOf,
+                                  const std::function<bool(int, int)>& hasTile, std::vector<std::string>* notes = nullptr);
 std::vector<uint8_t> BlankWdl();
 
 /// A whole MH2O chunk body (header table, attributes, instances, existence bits, vertex data) for adt's liquids,

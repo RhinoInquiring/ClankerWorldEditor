@@ -144,6 +144,7 @@ struct TerrainClipboard
 struct PasteOptions
 {
     bool heights = true, textures = true, holes = true, objects = true, water = true;
+    bool mapWater = false;      // pasted water takes the liquid and level of the map's water there (or within 80 yd)
     float slopeX = 0, slopeZ = 0;   // tilt added to the copy, yards per vertex step from its first chunk's corner
     bool blend = true;          // blend the seam into the ground around the paste
     float widthYards = 0;       // blend band per side; 0 = automatic from the height mismatch

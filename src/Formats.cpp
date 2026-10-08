@@ -1035,6 +1035,54 @@ std::vector<uint8_t> BlankWdt(uint32_t flags)
     return out;
 }
 
+std::vector<uint8_t> DowngradeWdt(const std::vector<uint8_t>& wdt, const std::function<std::string(uint32_t)>& nameOf,
+                                  const std::function<bool(int, int)>& hasTile, std::vector<std::string>* notes)
+{
+    uint32_t flags = 0;
+    size_t mainOff = 0, mainSize = 0;
+    std::string wmo;
+    std::optional<ModfEntry> modf;
+    ForEachChunk(wdt, 0, wdt.size(), [&](uint32_t magic, size_t off, size_t size) {
+        if (magic == Tag("MPHD") && size >= 4) ReadAt(wdt, off, flags);
+        else if (magic == Tag("MAIN")) { mainOff = off; mainSize = size; }
+        else if (magic == Tag("MWMO") && size) wmo = CString(wdt, off, size, 0);
+        else if (magic == Tag("MODF") && size >= sizeof(ModfEntry))
+        {
+            modf.emplace();
+            std::memcpy(&*modf, wdt.data() + off, sizeof(ModfEntry));
+        }
+    });
+    if (mainSize < 64 * 64 * 8) return {};
+    // 3.3.5a knows global WMO, vertex colours, big alpha and sorted doodads; later clients' 0x80 also means big alpha.
+    std::vector<uint8_t> out = BlankWdt((flags & 0xF) | (flags & 0x80 ? 0x4u : 0u));
+    const size_t mainData = 12 + 8 + 32 + 8;   // after MVER, MPHD and MAIN's header
+    for (int i = 0; i < 64 * 64; ++i)
+    {
+        uint32_t f = 0;
+        ReadAt(wdt, mainOff + size_t(i) * 8, f);
+        f &= 0x3;   // has ADT, all water
+        if ((f & 1) && !hasTile(i % 64, i / 64)) f &= ~1u;
+        SetU32(out, mainData + size_t(i) * 8, f);
+    }
+    if (modf)
+    {
+        // A FileDataID-flagged placement (0x8) names its WMO by id; 3.3.5a wants MWMO's name, index 0.
+        const std::string name = modf->flags & 0x8 ? nameOf(modf->nameId) : wmo;
+        if (name.empty()) { if (notes) notes->push_back("global WMO " + std::to_string(modf->nameId) + " has no name: left out"); return out; }
+        out.resize(out.size() - 8);   // BlankWdt's empty MWMO
+        PutU32(out, Tag("MWMO"));
+        PutU32(out, uint32_t(name.size() + 1));
+        out.insert(out.end(), name.begin(), name.end());
+        out.push_back(0);
+        modf->nameId = 0;
+        modf->flags &= ~uint16_t(0x8);
+        PutU32(out, Tag("MODF"));
+        PutU32(out, uint32_t(sizeof(ModfEntry)));
+        out.insert(out.end(), reinterpret_cast<const uint8_t*>(&*modf), reinterpret_cast<const uint8_t*>(&*modf) + sizeof(ModfEntry));
+    }
+    return out;
+}
+
 std::vector<uint8_t> BlankWdl()
 {
     std::vector<uint8_t> out;

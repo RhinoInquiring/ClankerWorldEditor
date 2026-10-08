@@ -2250,6 +2250,31 @@ PastePlan TerrainAdapter::PlanPaste(const TerrainClipboard& clip, int gx, int gz
             for (auto& h : l.at("heights")) h = h.get<float>() + lift;
         return w;
     };
+    // Map's water: the pasted water keeps its shape but takes the liquid and level of the map's own water there (or the
+    // nearest within 80 yd), so it joins the lake or river around the paste instead of bringing the other version's.
+    auto mapWater = [&](nlohmann::json w, const PastePlan::Chunk& pc) {
+        if (!o.mapWater || !w.is_array() || w.empty()) return w;
+        AdtChunk ground = *Chunk(pc.ref);
+        if (pc.setHeights) ground.heights = pc.heights;
+        const auto match = NearestWater(ground.baseX + kChunkSize / 2, ground.baseZ + kChunkSize / 2, 80.0f);
+        if (!match) return w;
+        const LiquidInfo* info = Liquid(match->second);
+        Adt scratch;
+        SetLiquidState(scratch, ground, w);
+        for (AdtLiquid& l : scratch.liquids)
+        {
+            l.type = match->second;
+            if (info) l.format = info->format;
+            l.extra.assign(l.heights.size() * LiquidExtraPerVertex(l.format), 0);
+            for (int r = 0; r <= l.h; ++r)
+                for (int c = 0; c <= l.w; ++c)
+                {
+                    l.heights[size_t(r) * (l.w + 1) + c] = match->first;
+                    SetLiquidExtra(l, ground, r, c);   // depth from the ground as pasted
+                }
+        }
+        return LiquidState(scratch, ground);
+    };
     std::map<std::pair<int, int>, const TerrainClipboard::Entry*> pasted;   // grid cell -> clipboard chunk
     for (const auto& e : clip.chunks)
         if (auto ref = ChunkAtGrid(gx + e.dx, gz + e.dz))
@@ -2311,7 +2336,7 @@ PastePlan TerrainAdapter::PlanPaste(const TerrainClipboard& clip, int gx, int gz
             if (o.textures && !e->layers.is_null()) pc.layers = e->layers;
             if (o.textures && m_vertexColors) pc.colors = e->colors;
             if (o.holes) pc.holes = e->holes;
-            pc.liquids = pastedWater(*e);
+            pc.liquids = mapWater(pastedWater(*e), pc);
             plan.chunks.push_back(std::move(pc));
         }
         if (!o.heights) return plan;
@@ -2479,7 +2504,7 @@ PastePlan TerrainAdapter::PlanPaste(const TerrainClipboard& clip, int gx, int gz
                 }
             }
             if (o.holes && inside) pc.holes = it->second->holes;
-            if (inside) pc.liquids = pastedWater(*it->second);
+            if (inside) pc.liquids = mapWater(pastedWater(*it->second), pc);
             if (pc.setHeights || !pc.layers.is_null() || pc.holes || !pc.liquids.is_null() || !pc.colors.empty()) plan.chunks.push_back(std::move(pc));
         }
     return plan;

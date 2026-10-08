@@ -19,6 +19,23 @@ them (a mod shipping an archive and loose files gives both); a client folder (ho
 than taken as one tree. Files outside any game tree are listed as left out. **Rescan** (one per scanned folder) keeps
 the layers still there in place with their settings, drops the ones gone, and puts new ones on top.
 
+## Newer clients (CASC)
+
+**+ CASC** adds a newer client's storage (an install folder and its product, e.g. `wow_classic_beta`). Its files are
+read as 3.3.5a ones: split tiles merged, newer models and WMOs converted. Files missing from the install come from
+Blizzard's CDN in the background, so a first look is slow and areas fill in as files arrive. For comparing a whole
+client, convert it once instead and add the MPQ as an MPQ file layer:
+
+```
+wow-world-editor.exe --casc-to-mpq "D:\World of Warcraft*wow_classic_beta" "D:\MPQs\Forever Beta"
+```
+
+It writes every map (or the map folders named after the out dir) with every model and texture they use, already in
+3.3.5a form, packs them into `Forever Beta.MPQ` (MPQ format 4: the editor reads it, the 3.3.5a client does not), and
+lists in `report.txt` what was converted with a loss (particles, newer shaders). Close the editor while it runs: both
+use the same CDN cache. A rerun after an interruption skips what is already written; a new client build needs the
+`staging` folder deleted first.
+
 ## Roles
 
 - **Project base**: what you edit, export against and see. It starts as your client folder and can stack more on top

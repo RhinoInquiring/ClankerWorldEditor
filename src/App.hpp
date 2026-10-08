@@ -871,6 +871,7 @@ private:
     PasteHeight m_pasteHeightMode = PasteHeight::FollowGround;
     float m_pasteOffset = 0;
     bool m_pasteHeights = true, m_pasteTextures = true, m_pasteHoles = true, m_pasteObjects = true, m_pasteWater = true;
+    bool m_pasteMapWater = false;   // pasted water takes the map's liquid and level (PasteOptions::mapWater)
     bool m_holeCut = true;          // Holes tool: cut (true) or fill; Ctrl inverts while dragging
     bool m_impassMode = false;      // Holes tool: paints the chunks' impassable flag instead (cut = set)
     // Paint > Swap: the texture swapped out (for the active texture, or removed)
