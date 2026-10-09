@@ -39,7 +39,12 @@ struct Project
                                                 { "lightparams.id", { 11000, 11999 } },                  // LightParams (client max 10025); bands follow at 18P-17, 6P-5
                                                 { "soundemitter.id", { 20000, 20999 } },                 // SoundEmitters.dbc (client max 2549)
                                                 { "map.id", { 800, 999 } },                              // Map.dbc (client max 724)
-                                                { "mapdifficulty.id", { 1000, 1099 } } };                // MapDifficulty.dbc
+                                                { "mapdifficulty.id", { 1000, 1099 } },                  // MapDifficulty.dbc
+                                                { "race.id", { 22, 31 } },                  // ChrRaces: stock uses 1-21; 32-bit race masks end at 32
+                                                { "charsections.id", { 600000, 699999 } },  // CharSections (client max ~9000)
+                                                { "charhairgeosets.id", { 9000, 9999 } },   // CharHairGeosets (client max ~340)
+                                                { "charstartoutfit.id", { 9000, 9999 } },   // CharStartOutfit (client max ~126 rows)
+                                                { "creaturemodeldata.id", { 9000, 9999 } } };   // CreatureModelData (client max ~2900)
     IdRange Range(const std::string& kind) const { auto it = idRanges.find(kind); return it == idRanges.end() ? IdRange{} : it->second; }
     bool Owns(const std::string& kind, uint32_t id) const { const IdRange r = Range(kind); return id >= r.first && id <= r.last && r.first; }
     std::string serverProfile;   // name of the user's ServerProfile (Server.hpp); credentials never live here

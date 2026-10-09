@@ -4,15 +4,40 @@
 
 The races of every source: the project's client and each compare source (View > Sources). Each client's tables are
 read in its own layout, 1.12 or 3.3.5. The window shows what each race is and what its characters can look like,
-with a preview. Importing a race into the project comes later; for now the window only shows.
+with a preview, and a race of another client can be imported into the project.
 
 | Part | What it shows |
 | --- | --- |
 | Source (top left) | The client whose races are listed. A source made of patch MPQs without race tables says so. |
 | List | Every row of the client's `ChrRaces`: id, name, team, skin colours male / female. **new** marks a race whose name the project's client does not have. |
-| Details | File string, prefix, female and male names, faction template, base language, displays, the character model per sex, the classes it can be (`CharBaseInfo`), and how many skins, faces, hair styles, hair colours and facial hair it has per sex |
+| Details | File string, prefix, female and male names, faction template (with its faction's name), base language, displays, the character model per sex, the classes it can be (`CharBaseInfo`), and how many skins, faces, hair styles, hair colours and facial hair it has per sex |
 | Warnings | A file string another race of the project's client uses, or an id that is another race there: an import of the race will need its own |
-| Preview | The character as the character creator shows it, naked, standing. The arrows step through skin, face, facial hair, hair style and hair colour. Left drag turns, right drag pans, the wheel zooms. |
+| Preview | The character as the character creator shows it, naked, standing. The arrows step through skin, face, facial hair, hair style and hair colour. Left drag turns, right drag pans, the wheel zooms. A project race imported from a source shows with that source's files. |
+| Import into the project (another source's race) | **Race id** (the first free one in the project's `race.id` range, 22-31 by default), **Alliance / Horde**, **Faction template**, **Classes**, **Starting outfits of added classes from**, and **Import as race N** |
+| In the project (an imported race) | Where it came from, and **Remove from the project** |
+
+## Importing a race
+
+**Import as race N** copies the race into the project as one change: undo takes all of it back. Its choices start
+as the source race has them:
+
+| Choice | What it sets |
+| --- | --- |
+| Alliance / Horde | `ChrRaces.Alliance`: the side whose character creator lists the race, and who it groups and talks with. A 1.12 race (no such column) starts with the team of a project race with the same faction template, else Horde. |
+| Faction template | `ChrRaces.FactionID`: the faction a new character belongs to (reputations, which NPCs are friendly). The list shows each playable race's template as `id: faction name (races using it)`, plus the source's own. One the project's client lacks is flagged. |
+| Classes | `CharBaseInfo`: the classes it can be. A class left out loses its starting outfits too. |
+| Starting outfits of added classes from | For a class the source race has no outfits of: whose `CharStartOutfit` rows it copies (new ids), or none. A race's own outfits of a class always win. |
+
+| What | Becomes |
+| --- | --- |
+| `ChrRaces` row | race N, its displays the new ones below; a 1.12 race gets the team of a race of the project with the same faction template, else Horde |
+| `CharSections`, `CharHairGeosets`, `CharStartOutfit` rows | race N, each with a new id from the project's `charsections.id`, `charhairgeosets.id` and `charstartoutfit.id` ranges |
+| `CharacterFacialHairStyles`, `CharBaseInfo` rows | race N (these tables have no id of their own) |
+| Male and female `CreatureDisplayInfo` rows | new ids in `creaturedisplayinfo.id` |
+| Their `CreatureModelData` rows | the project's client's row for the same model file when it has one, else a new id in `creaturemodeldata.id` |
+
+The ranges are in project settings. A race id past 32 needs the client's 64-race extension and a server that takes
+it. The race's models and textures, and its tables in the patch, come with export (not done yet).
 
 Notes:
 

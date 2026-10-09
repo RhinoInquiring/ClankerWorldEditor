@@ -830,6 +830,13 @@ private:
         uint32_t skin = 0, face = 0, hairStyle = 0, hairColor = 0, facial = 0;
         std::string filter;
         size_t missingTextures = 0;                      // of the selected race, in its own client
+        RaceCatalog project;                             // the project's races: its client's with the project's packages over them
+        uint64_t projectKey[3] = { ~0ull, ~0ull, ~0ull };   // race, display and model table versions `project` was built at
+        size_t previewSource = 0;                        // the source whose files show the selected race, and its id there
+        uint32_t previewRace = 0;
+        uint32_t importTarget = 0;                       // the race id an import gets (0: the first free one)
+        std::pair<size_t, uint32_t> importFor{ ~size_t(0), 0 };   // the source race the import choices below were set for
+        RaceImportOptions import;                        // team, faction template, classes and outfit donor of the next import
         // The preview has renderers of its own: a source's files never mix with another's of the same name.
         const MpqChain* previewMpq = nullptr;
         std::unique_ptr<Renderer> renderer;
@@ -1073,14 +1080,11 @@ private:
     TaxiNodesAdapter m_taxiNodes{ m_mpq, m_store };      // TaxiNodes.dbc: flight points
     TaxiPathAdapter m_taxiPaths{ m_mpq, m_store };       // TaxiPath.dbc: one way between two of them
     TaxiPathNodeAdapter m_taxiPoints{ m_mpq, m_store };  // TaxiPathNode.dbc: the points a path flies through
-    // NPC appearances (AppNpc.cpp): character-model displays the project adds.
-    DbcTable m_displayRows{ m_mpq, m_store, "CreatureDisplayInfo",
-                            { { "ID", 0, 'i' }, { "ModelID", 1, 'i' }, { "SoundID", 2, 'i' }, { "ExtendedDisplayInfoID", 3, 'i' },
-                              { "CreatureModelScale", 4, 'f' }, { "CreatureModelAlpha", 5, 'i' }, { "TextureVariation[0]", 6, 's' },
-                              { "TextureVariation[1]", 7, 's' }, { "TextureVariation[2]", 8, 's' }, { "PortraitTextureName", 9, 's' },
-                              { "SizeClass", 10, 'i' }, { "BloodID", 11, 'i' }, { "NPCSoundID", 12, 'i' }, { "ParticleColorID", 13, 'i' },
-                              { "CreatureGeosetData", 14, 'i' }, { "ObjectEffectPackageID", 15, 'i' } },
-                            16 };
+    // NPC appearances (AppNpc.cpp) and imported races' characters (AppRaces.cpp): displays and models the project adds.
+    DbcTable m_displayRows{ m_mpq, m_store, "CreatureDisplayInfo", CreatureDisplayInfoFields(), 16 };
+    DbcTable m_modelRows{ m_mpq, m_store, "CreatureModelData", CreatureModelDataFields(), 28 };
+    // Races (AppRaces.cpp): the races the project imports or changes, one package each.
+    RaceAdapter m_raceRows;
     DbcTable m_extraRows{ m_mpq, m_store, "CreatureDisplayInfoExtra",
                           { { "ID", 0, 'i' }, { "DisplayRaceID", 1, 'i' }, { "DisplaySexID", 2, 'i' }, { "SkinID", 3, 'i' }, { "FaceID", 4, 'i' },
                             { "HairStyleID", 5, 'i' }, { "HairColorID", 6, 'i' }, { "FacialHairID", 7, 'i' }, { "NPCItemDisplay[0]", 8, 'i' },
@@ -1093,7 +1097,7 @@ private:
     std::vector<DbcTable*> DbcTables()
     {
         return { &m_areas, &m_wmoAreas, &m_worldMaps, &m_mapOverlays, &m_triggers, &m_mapRows, &m_mapDifficulty, &m_areaPois, &m_taxiNodes, &m_taxiPaths, &m_taxiPoints,
-                 &m_displayRows, &m_extraRows, &m_lights.light, &m_lights.params, &m_lights.intBands, &m_lights.floatBands, &m_lights.skyboxes,
+                 &m_displayRows, &m_extraRows, &m_modelRows, &m_lights.light, &m_lights.params, &m_lights.intBands, &m_lights.floatBands, &m_lights.skyboxes,
                  &m_sounds.entries, &m_sounds.ambience, &m_sounds.music, &m_sounds.intro, &m_sounds.emitters };
     }
     uint32_t m_flightNode = 0, m_flightPath = 0;         // selected node, or selected path (one at a time)

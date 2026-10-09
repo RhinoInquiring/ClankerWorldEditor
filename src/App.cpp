@@ -319,6 +319,7 @@ bool App::Init(HWND hwnd, ID3D11Device* device, ID3D11DeviceContext* context, bo
     m_terrain.SetRoads(&m_roads);
     m_roads.onChanged = [this](const std::string& map, const RoadStore::Cells& cells) { m_terrain.RefreshCells(map, cells); };
     m_store.Register(m_creatures);
+    m_store.Register(m_raceRows);
     m_store.Register(m_gameobjects);
     for (DbcTable* table : DbcTables()) m_store.Register(*table);
     for (TableRowsAdapter* table : TableAdapters())
@@ -550,6 +551,7 @@ void App::CloseProject()
     m_models.Clear();
     m_objSel.clear();
     m_races = RacesView{};   // its sources' chains are about to close
+    m_raceRows.Clear();
     m_catalog.Clear();
     m_catalogKey.clear();
     m_catalogItems.clear();

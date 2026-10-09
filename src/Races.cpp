@@ -2,30 +2,115 @@
 
 #include "Models.hpp"
 #include "Mpq.hpp"
+#include "Project.hpp"
 
 #include <algorithm>
 #include <cctype>
 #include <cstring>
-#include <set>
 
 namespace
 {
-    /// Column positions of the tables that differ between the two layouts (WoWDBDefs, builds 5875 and 12340).
-    struct Columns
+    std::string Lower(std::string s)
     {
-        uint32_t chrRacesFields;
-        // ChrRaces
-        uint32_t flags, faction, male, female, prefix, baseLanguage, creatureType, fileString, cinematic, alliance, name, nameFemale, nameMale;
-        // CharSections
-        uint32_t sectionVariation, sectionColor, sectionTexture, sectionFlags;
-        uint32_t facialStart, facialGeosets;   // CharacterFacialHairStyles: first geoset column, how many
-        uint32_t outfitSlots;      // CharStartOutfit item slots
+        for (char& c : s) c = char(std::tolower((unsigned char)c));
+        return s;
+    }
+
+    // ---------------------------------------------------------------------------------------------- layouts
+    // From WoWDBDefs (builds 5875 and 12340), named as mod-dbc-patch's 3.3.5 schemas name them, so a 1.12 row reads as a
+    // 3.3.5 one: columns 1.12 has and 3.3.5 does not are left out, columns 3.3.5 has and 1.12 does not read as 0.
+
+    /// Builds a layout from (name, column, type, count) entries; columns are 4 bytes unless a byte offset is given.
+    struct LayoutBuilder
+    {
+        DbcLayout l;
+        LayoutBuilder& Col(const std::string& name, uint32_t column, char type = 'i', uint32_t count = 1)
+        {
+            for (uint32_t i = 0; i < count; ++i)
+                l.columns.push_back({ count == 1 ? name : name + "[" + std::to_string(i) + "]", (column + i) * 4, type });
+            return *this;
+        }
+        LayoutBuilder& Byte(const std::string& name, uint32_t offset) { l.columns.push_back({ name, offset, 'b' }); return *this; }
+        /// A localized string of `locales` slots and its flags: Name_lang (slot 0, enUS), Name_lang[i], Name_lang_flags.
+        LayoutBuilder& Loc(const std::string& name, uint32_t column, uint32_t locales)
+        {
+            l.columns.push_back({ name, column * 4, 's' });
+            for (uint32_t i = 1; i < locales; ++i) l.columns.push_back({ name + "[" + std::to_string(i) + "]", (column + i) * 4, 's' });
+            l.columns.push_back({ name + "_flags", (column + locales) * 4, 'i' });
+            return *this;
+        }
+        DbcLayout Done(uint32_t recordSize, uint32_t fields) { l.recordSize = recordSize; l.fields = fields; return l; }
     };
-    constexpr uint32_t kNone = ~0u;
-    // 1.12 CharacterFacialHairStyles: WoWDBDefs lists Geoset[6], but the first three are unused (0xCCCCCCCC in Turtle's
-    // table); the client's geosets are the last three, in the order 3.3.5 keeps first.
-    constexpr Columns kClassic{ 29, 1, 2, 4, 5, 6, 8, 9, 15, 16, kNone, 17, kNone, kNone, 4, 5, 6, 9, 6, 3, 12 };
-    constexpr Columns kWrath{ 69, 1, 2, 4, 5, 6, 7, 8, 11, 12, 13, 14, 31, 48, 8, 9, 4, 7, 3, 5, 24 };
+
+    struct Layouts { DbcLayout races, sections, hair, facial, baseInfo, outfits, displays, models; };
+
+    const Layouts& Wrath()
+    {
+        static const Layouts k = [] {
+            Layouts w;
+            w.races = LayoutBuilder{}.Col("ID", 0).Col("Flags", 1).Col("FactionID", 2).Col("ExplorationSoundID", 3).Col("MaleDisplayID", 4)
+                          .Col("FemaleDisplayID", 5).Col("ClientPrefix", 6, 's').Col("BaseLanguage", 7).Col("CreatureType", 8)
+                          .Col("ResSicknessSpellID", 9).Col("SplashSoundID", 10).Col("ClientFileString", 11, 's').Col("CinematicSequenceID", 12)
+                          .Col("Alliance", 13).Loc("Name_lang", 14, 16).Loc("Name_female_lang", 31, 16).Loc("Name_male_lang", 48, 16)
+                          .Col("FacialHairCustomization", 65, 's', 2).Col("HairCustomization", 67, 's').Col("Required_expansion", 68)
+                          .Done(69 * 4, 69);
+            w.sections = LayoutBuilder{}.Col("ID", 0).Col("RaceID", 1).Col("SexID", 2).Col("BaseSection", 3).Col("TextureName", 4, 's', 3)
+                             .Col("Flags", 7).Col("VariationIndex", 8).Col("ColorIndex", 9).Done(40, 10);
+            w.hair = LayoutBuilder{}.Col("ID", 0).Col("RaceID", 1).Col("SexID", 2).Col("VariationID", 3).Col("GeosetID", 4).Col("Showscalp", 5)
+                         .Done(24, 6);
+            w.facial = LayoutBuilder{}.Col("RaceID", 0).Col("SexID", 1).Col("VariationID", 2).Col("Geoset", 3, 'i', 5).Done(32, 8);
+            w.baseInfo = LayoutBuilder{}.Byte("RaceID", 0).Byte("ClassID", 1).Done(2, 2);
+            w.outfits = LayoutBuilder{}.Col("ID", 0).Byte("RaceID", 4).Byte("ClassID", 5).Byte("SexID", 6).Byte("OutfitID", 7)
+                            .Col("ItemID", 2, 'i', 24).Col("DisplayItemID", 26, 'i', 24).Col("InventoryType", 50, 'i', 24).Done(296, 77);
+            w.displays = LayoutBuilder{}.Col("ID", 0).Col("ModelID", 1).Col("SoundID", 2).Col("ExtendedDisplayInfoID", 3).Col("CreatureModelScale", 4, 'f')
+                             .Col("CreatureModelAlpha", 5).Col("TextureVariation", 6, 's', 3).Col("PortraitTextureName", 9, 's').Col("SizeClass", 10)
+                             .Col("BloodID", 11).Col("NPCSoundID", 12).Col("ParticleColorID", 13).Col("CreatureGeosetData", 14)
+                             .Col("ObjectEffectPackageID", 15).Done(64, 16);
+            w.models = LayoutBuilder{}.Col("ID", 0).Col("Flags", 1).Col("ModelName", 2, 's').Col("SizeClass", 3).Col("ModelScale", 4, 'f')
+                           .Col("BloodID", 5).Col("FootprintTextureID", 6).Col("FootprintTextureLength", 7, 'f').Col("FootprintTextureWidth", 8, 'f')
+                           .Col("FootprintParticleScale", 9, 'f').Col("FoleyMaterialID", 10).Col("FootstepShakeSize", 11).Col("DeathThudShakeSize", 12)
+                           .Col("SoundID", 13).Col("CollisionWidth", 14, 'f').Col("CollisionHeight", 15, 'f').Col("MountHeight", 16, 'f')
+                           .Col("GeoBoxMinX", 17, 'f').Col("GeoBoxMinY", 18, 'f').Col("GeoBoxMinZ", 19, 'f').Col("GeoBoxMaxX", 20, 'f')
+                           .Col("GeoBoxMaxY", 21, 'f').Col("GeoBoxMaxZ", 22, 'f').Col("WorldEffectScale", 23, 'f').Col("AttachedEffectScale", 24, 'f')
+                           .Col("MissileCollisionRadius", 25, 'f').Col("MissileCollisionPush", 26, 'f').Col("MissileCollisionRaise", 27, 'f')
+                           .Done(112, 28);
+            return w;
+        }();
+        return k;
+    }
+
+    const Layouts& Classic()
+    {
+        static const Layouts k = [] {
+            Layouts c;
+            // ChrRaces 1.12: MountScale (7), LoginEffectSpellID (10), CombatStunSpellID (11) and StartingTaxiNodes (14) have no
+            // 3.3.5 column; 1.12 has no Alliance, female / male names or Required_expansion. Locales: 8 slots, the first 8 of 3.3.5's.
+            c.races = LayoutBuilder{}.Col("ID", 0).Col("Flags", 1).Col("FactionID", 2).Col("ExplorationSoundID", 3).Col("MaleDisplayID", 4)
+                          .Col("FemaleDisplayID", 5).Col("ClientPrefix", 6, 's').Col("BaseLanguage", 8).Col("CreatureType", 9)
+                          .Col("ResSicknessSpellID", 12).Col("SplashSoundID", 13).Col("ClientFileString", 15, 's').Col("CinematicSequenceID", 16)
+                          .Loc("Name_lang", 17, 8).Col("FacialHairCustomization", 26, 's', 2).Col("HairCustomization", 28, 's')
+                          .Done(29 * 4, 29);
+            c.sections = LayoutBuilder{}.Col("ID", 0).Col("RaceID", 1).Col("SexID", 2).Col("BaseSection", 3).Col("VariationIndex", 4)
+                             .Col("ColorIndex", 5).Col("TextureName", 6, 's', 3).Col("Flags", 9).Done(40, 10);
+            c.hair = Wrath().hair;
+            // WoWDBDefs lists Geoset[6]; the first three are unused (0xCCCCCCCC in Turtle's table), the client's are the last
+            // three, in the order 3.3.5 keeps first.
+            c.facial = LayoutBuilder{}.Col("RaceID", 0).Col("SexID", 1).Col("VariationID", 2).Col("Geoset", 6, 'i', 3).Done(36, 9);
+            c.baseInfo = Wrath().baseInfo;
+            c.outfits = LayoutBuilder{}.Col("ID", 0).Byte("RaceID", 4).Byte("ClassID", 5).Byte("SexID", 6).Byte("OutfitID", 7)
+                            .Col("ItemID", 2, 'i', 12).Col("DisplayItemID", 14, 'i', 12).Col("InventoryType", 26, 'i', 12).Done(152, 41);
+            c.displays = LayoutBuilder{}.Col("ID", 0).Col("ModelID", 1).Col("SoundID", 2).Col("ExtendedDisplayInfoID", 3).Col("CreatureModelScale", 4, 'f')
+                             .Col("CreatureModelAlpha", 5).Col("TextureVariation", 6, 's', 3).Col("SizeClass", 9).Col("BloodID", 10).Col("NPCSoundID", 11)
+                             .Done(48, 12);
+            DbcLayout models = Wrath().models;
+            models.columns.resize(16);   // 1.12 ends at CollisionHeight
+            models.recordSize = 64;
+            models.fields = 16;
+            c.models = models;
+            return c;
+        }();
+        return k;
+    }
 
     Dbc ReadDbc(const MpqChain& mpq, const char* name)
     {
@@ -34,81 +119,216 @@ namespace
         return d;
     }
 
-    /// The tables of one layout, read from loaded files (shared by Load and the self-test).
-    struct Tables { Dbc races, sections, hair, facial, baseInfo, outfits; };
-
-    void Fill(const Tables& t, const Columns& c, std::vector<RaceCatalog::Race>& races, std::vector<RaceCatalog::Section>& sections,
-              std::vector<RaceCatalog::HairGeoset>& hair, std::vector<RaceCatalog::FacialHair>& facial,
-              std::vector<std::pair<uint8_t, uint8_t>>& baseInfo, std::vector<RaceCatalog::Outfit>& outfits)
+    const DbcColumn* Column(const DbcLayout& l, const std::string& name)
     {
-        auto str = [](const Dbc& d, uint32_t r, uint32_t f) { return f == kNone ? std::string() : d.Str(r, f); };
-        for (uint32_t r = 0; r < t.races.Rows(); ++r)
+        for (const DbcColumn& c : l.columns)
+            if (c.name == name) return &c;
+        return nullptr;
+    }
+
+    // ---------------------------------------------------------------------------------------------- rows <-> structs
+    uint32_t U(const nlohmann::json& row, const char* key) { const auto it = row.find(key); return it != row.end() && it->is_number() ? it->get<uint32_t>() : 0; }
+    std::string S(const nlohmann::json& row, const std::string& key) { const auto it = row.find(key); return it != row.end() && it->is_string() ? it->get<std::string>() : std::string(); }
+
+    RaceCatalog::Race RaceFrom(const nlohmann::json& row, bool hasAlliance)
+    {
+        RaceCatalog::Race r;
+        r.id = U(row, "ID");
+        r.flags = U(row, "Flags");
+        r.faction = U(row, "FactionID");
+        r.display[0] = U(row, "MaleDisplayID");
+        r.display[1] = U(row, "FemaleDisplayID");
+        r.prefix = S(row, "ClientPrefix");
+        r.baseLanguage = U(row, "BaseLanguage");
+        r.creatureType = U(row, "CreatureType");
+        r.fileString = S(row, "ClientFileString");
+        r.cinematic = U(row, "CinematicSequenceID");
+        r.alliance = hasAlliance ? int(U(row, "Alliance")) : -1;
+        r.name = S(row, "Name_lang");
+        r.names[0] = S(row, "Name_female_lang");
+        r.names[1] = S(row, "Name_male_lang");
+        r.row = row;
+        return r;
+    }
+    RaceCatalog::Section SectionFrom(const nlohmann::json& j)
+    {
+        RaceCatalog::Section s{ U(j, "ID"), U(j, "RaceID"), U(j, "SexID"), U(j, "BaseSection"), U(j, "VariationIndex"), U(j, "ColorIndex"), U(j, "Flags") };
+        for (int i = 0; i < 3; ++i) s.textures[i] = S(j, "TextureName[" + std::to_string(i) + "]");
+        return s;
+    }
+    nlohmann::json SectionJson(const RaceCatalog::Section& s)
+    {
+        return { { "ID", s.id }, { "RaceID", s.race }, { "SexID", s.sex }, { "BaseSection", s.type }, { "TextureName[0]", s.textures[0] },
+                 { "TextureName[1]", s.textures[1] }, { "TextureName[2]", s.textures[2] }, { "Flags", s.flags }, { "VariationIndex", s.variation },
+                 { "ColorIndex", s.color } };
+    }
+    RaceCatalog::HairGeoset HairFrom(const nlohmann::json& j)
+    {
+        return { U(j, "ID"), U(j, "RaceID"), U(j, "SexID"), U(j, "VariationID"), U(j, "GeosetID"), U(j, "Showscalp") };
+    }
+    nlohmann::json HairJson(const RaceCatalog::HairGeoset& h)
+    {
+        return { { "ID", h.id }, { "RaceID", h.race }, { "SexID", h.sex }, { "VariationID", h.variation }, { "GeosetID", h.geoset }, { "Showscalp", h.showScalp } };
+    }
+    RaceCatalog::FacialHair FacialFrom(const nlohmann::json& j)
+    {
+        RaceCatalog::FacialHair f{ U(j, "RaceID"), U(j, "SexID"), U(j, "VariationID") };
+        for (int i = 0; i < 5 && j.contains("Geoset[" + std::to_string(i) + "]"); ++i) f.geosets.push_back(U(j, ("Geoset[" + std::to_string(i) + "]").c_str()));
+        return f;
+    }
+    nlohmann::json FacialJson(const RaceCatalog::FacialHair& f)
+    {
+        nlohmann::json j = { { "RaceID", f.race }, { "SexID", f.sex }, { "VariationID", f.variation } };
+        for (int i = 0; i < 5; ++i) j["Geoset[" + std::to_string(i) + "]"] = size_t(i) < f.geosets.size() ? f.geosets[size_t(i)] : 0u;
+        return j;
+    }
+    RaceCatalog::Outfit OutfitFrom(const nlohmann::json& j)
+    {
+        RaceCatalog::Outfit o{ U(j, "ID"), uint8_t(U(j, "RaceID")), uint8_t(U(j, "ClassID")), uint8_t(U(j, "SexID")), uint8_t(U(j, "OutfitID")) };
+        for (int i = 0; j.contains("ItemID[" + std::to_string(i) + "]"); ++i)
         {
-            RaceCatalog::Race x;
-            x.id = t.races.U32(r, 0);
-            x.flags = t.races.U32(r, c.flags);
-            x.faction = t.races.U32(r, c.faction);
-            x.display[0] = t.races.U32(r, c.male);
-            x.display[1] = t.races.U32(r, c.female);
-            x.prefix = t.races.Str(r, c.prefix);
-            x.baseLanguage = t.races.U32(r, c.baseLanguage);
-            x.creatureType = t.races.U32(r, c.creatureType);
-            x.fileString = t.races.Str(r, c.fileString);
-            x.cinematic = t.races.U32(r, c.cinematic);
-            x.alliance = c.alliance == kNone ? -1 : int(t.races.U32(r, c.alliance));
-            x.name = t.races.Str(r, c.name);
-            x.names[0] = str(t.races, r, c.nameFemale);
-            x.names[1] = str(t.races, r, c.nameMale);
-            races.push_back(std::move(x));
+            const std::string n = "[" + std::to_string(i) + "]";
+            o.items.push_back(U(j, ("ItemID" + n).c_str()));
+            o.displays.push_back(U(j, ("DisplayItemID" + n).c_str()));
+            o.types.push_back(U(j, ("InventoryType" + n).c_str()));
         }
-        for (uint32_t r = 0; r < t.sections.Rows(); ++r)
+        return o;
+    }
+    nlohmann::json OutfitJson(const RaceCatalog::Outfit& o)
+    {
+        nlohmann::json j = { { "ID", o.id }, { "RaceID", o.race }, { "ClassID", o.cls }, { "SexID", o.sex }, { "OutfitID", o.outfit } };
+        for (size_t i = 0; i < 24; ++i)   // 3.3.5 has 24 slots; a 1.12 outfit fills the first 12
         {
-            RaceCatalog::Section s{ t.sections.U32(r, 0), t.sections.U32(r, 1), t.sections.U32(r, 2), t.sections.U32(r, 3),
-                                    t.sections.U32(r, c.sectionVariation), t.sections.U32(r, c.sectionColor), t.sections.U32(r, c.sectionFlags) };
-            for (uint32_t i = 0; i < 3; ++i) s.textures[i] = t.sections.Str(r, c.sectionTexture + i);
-            sections.push_back(std::move(s));
+            const std::string n = "[" + std::to_string(i) + "]";
+            j["ItemID" + n] = i < o.items.size() ? o.items[i] : 0u;
+            j["DisplayItemID" + n] = i < o.displays.size() ? o.displays[i] : 0u;
+            j["InventoryType" + n] = i < o.types.size() ? o.types[i] : 0u;
         }
-        for (uint32_t r = 0; r < t.hair.Rows(); ++r)
-            hair.push_back({ t.hair.U32(r, 0), t.hair.U32(r, 1), t.hair.U32(r, 2), t.hair.U32(r, 3), t.hair.U32(r, 4), t.hair.U32(r, 5) });
-        for (uint32_t r = 0; r < t.facial.Rows(); ++r)
-        {
-            RaceCatalog::FacialHair f{ t.facial.U32(r, 0), t.facial.U32(r, 1), t.facial.U32(r, 2) };
-            for (uint32_t i = 0; i < c.facialGeosets; ++i) f.geosets.push_back(t.facial.U32(r, c.facialStart + i));
-            facial.push_back(std::move(f));
-        }
-        for (uint32_t r = 0; r < t.baseInfo.Rows(); ++r) baseInfo.push_back({ t.baseInfo.U8At(r, 0), t.baseInfo.U8At(r, 1) });
-        for (uint32_t r = 0; r < t.outfits.Rows(); ++r)
-        {
-            RaceCatalog::Outfit o{ t.outfits.U32At(r, 0), t.outfits.U8At(r, 4), t.outfits.U8At(r, 5), t.outfits.U8At(r, 6), t.outfits.U8At(r, 7) };
-            for (uint32_t i = 0; i < c.outfitSlots; ++i)
-            {
-                o.items.push_back(t.outfits.U32At(r, 8 + 4 * i));
-                o.displays.push_back(t.outfits.U32At(r, 8 + 4 * (c.outfitSlots + i)));
-                o.types.push_back(t.outfits.U32At(r, 8 + 4 * (2 * c.outfitSlots + i)));
-            }
-            outfits.push_back(std::move(o));
-        }
+        return j;
+    }
+
+    /// The rows of a loaded table as JSON, or none when the file is not in `layout` (a table another tool reshaped).
+    std::vector<nlohmann::json> Rows(const Dbc& d, const DbcLayout& layout)
+    {
+        std::vector<nlohmann::json> out;
+        if (d.RecordSize() != layout.recordSize) return out;
+        out.reserve(d.Rows());
+        for (uint32_t r = 0; r < d.Rows(); ++r) out.push_back(DbcRowJson(d, r, layout));
+        return out;
     }
 }
+
+// ---------------------------------------------------------------------------------------------- rows
+
+nlohmann::json DbcRowJson(const Dbc& dbc, uint32_t row, const DbcLayout& layout)
+{
+    nlohmann::json j = nlohmann::json::object();
+    for (const DbcColumn& c : layout.columns)
+    {
+        if (c.type == 'b') j[c.name] = uint32_t(dbc.U8At(row, c.offset));
+        else if (c.type == 's') j[c.name] = dbc.Text(dbc.U32At(row, c.offset));
+        else if (c.type == 'f')
+        {
+            const uint32_t bits = dbc.U32At(row, c.offset);
+            float f;
+            std::memcpy(&f, &bits, 4);
+            j[c.name] = f;
+        }
+        else j[c.name] = dbc.U32At(row, c.offset);
+    }
+    return j;
+}
+
+std::vector<uint8_t> WriteDbcRows(const std::vector<nlohmann::json>& rows, const DbcLayout& layout)
+{
+    std::string strings(1, '\0');
+    std::map<std::string, uint32_t> offsets;
+    auto text = [&](const std::string& s) -> uint32_t {
+        if (s.empty()) return 0;
+        auto [it, added] = offsets.try_emplace(s, uint32_t(strings.size()));
+        if (added) strings.append(s).push_back('\0');
+        return it->second;
+    };
+    std::vector<uint8_t> body(rows.size() * layout.recordSize, 0);
+    for (size_t r = 0; r < rows.size(); ++r)
+    {
+        uint8_t* rec = body.data() + r * layout.recordSize;
+        for (const DbcColumn& c : layout.columns)
+        {
+            const auto it = rows[r].find(c.name);
+            if (it == rows[r].end() || it->is_null()) continue;
+            uint32_t bits = 0;
+            if (c.type == 's') bits = text(it->is_string() ? it->get<std::string>() : std::string());
+            else if (c.type == 'f') { const float f = it->get<float>(); std::memcpy(&bits, &f, 4); }
+            else bits = it->get<uint32_t>();
+            if (c.type == 'b') rec[c.offset] = uint8_t(bits);
+            else std::memcpy(rec + c.offset, &bits, 4);
+        }
+    }
+    const uint32_t header[5] = { 0x43424457 /* WDBC */, uint32_t(rows.size()), layout.fields, layout.recordSize, uint32_t(strings.size()) };
+    std::vector<uint8_t> out(sizeof header);
+    std::memcpy(out.data(), header, sizeof header);
+    out.insert(out.end(), body.begin(), body.end());
+    out.insert(out.end(), strings.begin(), strings.end());
+    return out;
+}
+
+const std::vector<DbcField>& CreatureDisplayInfoFields()
+{
+    static const std::vector<DbcField> k = [] {
+        std::vector<DbcField> f;
+        static std::vector<std::string> names;   // the DbcField names point into these
+        for (const DbcColumn& c : Wrath().displays.columns) names.push_back(c.name);
+        for (size_t i = 0; i < names.size(); ++i)
+            f.push_back({ names[i].c_str(), Wrath().displays.columns[i].offset / 4, Wrath().displays.columns[i].type });
+        return f;
+    }();
+    return k;
+}
+
+const std::vector<DbcField>& CreatureModelDataFields()
+{
+    static const std::vector<DbcField> k = [] {
+        std::vector<DbcField> f;
+        static std::vector<std::string> names;
+        for (const DbcColumn& c : Wrath().models.columns) names.push_back(c.name);
+        for (size_t i = 0; i < names.size(); ++i)
+            f.push_back({ names[i].c_str(), Wrath().models.columns[i].offset / 4, Wrath().models.columns[i].type });
+        return f;
+    }();
+    return k;
+}
+
+// ---------------------------------------------------------------------------------------------- catalog
 
 bool RaceCatalog::Load(const MpqChain& mpq, std::string& error)
 {
     *this = {};
-    Tables t;
-    t.races = ReadDbc(mpq, "ChrRaces");
-    const Columns* c = t.races.Fields() == kWrath.chrRacesFields ? &kWrath : t.races.Fields() == kClassic.chrRacesFields ? &kClassic : nullptr;
-    if (!t.races.Rows()) { error = "no ChrRaces.dbc"; return false; }
-    if (!c) { error = "ChrRaces.dbc has " + std::to_string(t.races.Fields()) + " fields: not a 1.12 or 3.3.5 layout"; return false; }
-    m_layout = c == &kWrath ? Layout::Wrath : Layout::Classic;
-    t.sections = ReadDbc(mpq, "CharSections");
-    t.hair = ReadDbc(mpq, "CharHairGeosets");
-    t.facial = ReadDbc(mpq, "CharacterFacialHairStyles");
-    t.baseInfo = ReadDbc(mpq, "CharBaseInfo");
-    t.outfits = ReadDbc(mpq, "CharStartOutfit");
-    Fill(t, *c, m_races, m_sections, m_hair, m_facial, m_baseInfo, m_outfits);
+    const Dbc races = ReadDbc(mpq, "ChrRaces");
+    if (!races.Rows()) { error = "no ChrRaces.dbc"; return false; }
+    const Layouts* l = races.RecordSize() == Wrath().races.recordSize ? &Wrath() : races.RecordSize() == Classic().races.recordSize ? &Classic() : nullptr;
+    if (!l) { error = "ChrRaces.dbc has " + std::to_string(races.Fields()) + " fields: not a 1.12 or 3.3.5 layout"; return false; }
+    m_layout = l == &Wrath() ? Layout::Wrath : Layout::Classic;
+    // Rows by 3.3.5 names whatever the layout; then the structs the window and the counts use.
+    for (const nlohmann::json& j : Rows(races, l->races)) m_races.push_back(RaceFrom(j, m_layout == Layout::Wrath));
+    for (const nlohmann::json& j : Rows(ReadDbc(mpq, "CharSections"), l->sections)) m_sections.push_back(SectionFrom(j));
+    for (const nlohmann::json& j : Rows(ReadDbc(mpq, "CharHairGeosets"), l->hair)) m_hair.push_back(HairFrom(j));
+    for (const nlohmann::json& j : Rows(ReadDbc(mpq, "CharacterFacialHairStyles"), l->facial)) m_facial.push_back(FacialFrom(j));
+    for (const nlohmann::json& j : Rows(ReadDbc(mpq, "CharBaseInfo"), l->baseInfo)) m_baseInfo.push_back({ uint8_t(U(j, "RaceID")), uint8_t(U(j, "ClassID")) });
+    for (const nlohmann::json& j : Rows(ReadDbc(mpq, "CharStartOutfit"), l->outfits)) m_outfits.push_back(OutfitFrom(j));
     m_displayInfo = ReadDbc(mpq, "CreatureDisplayInfo");
     m_modelData = ReadDbc(mpq, "CreatureModelData");
+    m_factionTemplates = ReadDbc(mpq, "FactionTemplate");
+    m_factions = ReadDbc(mpq, "Faction");
     return true;
+}
+
+std::string RaceCatalog::FactionName(uint32_t factionTemplate) const
+{
+    const auto t = m_factionTemplates.Find(factionTemplate);
+    const auto f = t ? m_factions.Find(m_factionTemplates.U32(*t, 1)) : std::nullopt;   // FactionTemplate.Faction
+    // Faction.Name_lang: column 23 in 3.3.5, 19 in 1.12 (no ParentFactionMod / Cap before it).
+    return f ? m_factions.Str(*f, m_factions.Fields() >= 57 ? 23 : 19) : std::string();
 }
 
 const RaceCatalog::Race* RaceCatalog::Find(uint32_t id) const
@@ -135,12 +355,40 @@ RaceCatalog::Counts RaceCatalog::Count(uint32_t race, uint32_t sex) const
     return { skins.size(), faces.size(), hairStyles.size(), hairColors.size(), facial.size() };
 }
 
+nlohmann::json RaceCatalog::DisplayRow(uint32_t id) const
+{
+    const auto row = m_displayInfo.Find(id);
+    if (!row) return nullptr;
+    const DbcLayout& l = m_displayInfo.RecordSize() == Wrath().displays.recordSize ? Wrath().displays : Classic().displays;
+    return m_displayInfo.RecordSize() == l.recordSize ? DbcRowJson(m_displayInfo, *row, l) : nlohmann::json();
+}
+
+nlohmann::json RaceCatalog::ModelRow(uint32_t id) const
+{
+    const auto row = m_modelData.Find(id);
+    if (!row) return nullptr;
+    const DbcLayout& l = m_modelData.RecordSize() == Wrath().models.recordSize ? Wrath().models : Classic().models;
+    return m_modelData.RecordSize() == l.recordSize ? DbcRowJson(m_modelData, *row, l) : nlohmann::json();
+}
+
+uint32_t RaceCatalog::ModelId(const std::string& model) const
+{
+    const std::string want = Lower(M2Name(model));
+    for (uint32_t r = 0; r < m_modelData.Rows(); ++r)
+        if (Lower(M2Name(m_modelData.Str(r, 2))) == want) return m_modelData.U32(r, 0);   // ModelName
+    return 0;
+}
+
 std::string RaceCatalog::Model(uint32_t race, uint32_t sex) const
 {
     const Race* r = Find(race);
-    const auto display = r ? m_displayInfo.Find(r->display[sex ? 1 : 0]) : std::nullopt;
-    const auto model = display ? m_modelData.Find(m_displayInfo.U32(*display, 1)) : std::nullopt;   // ModelID
-    const std::string name = model ? m_modelData.Str(*model, 2) : std::string();                    // ModelName
+    if (!r) return {};
+    const uint32_t display = r->display[sex ? 1 : 0];
+    if (m_modelOf)
+        if (std::string name = m_modelOf(display); !name.empty()) return M2Name(name);
+    const auto d = m_displayInfo.Find(display);
+    const auto model = d ? m_modelData.Find(m_displayInfo.U32(*d, 1)) : std::nullopt;   // ModelID
+    const std::string name = model ? m_modelData.Str(*model, 2) : std::string();         // ModelName
     return name.empty() ? name : M2Name(name);
 }
 
@@ -157,9 +405,7 @@ std::vector<std::string> RaceCatalog::Files(uint32_t race) const
     std::vector<std::string> out;
     std::set<std::string> seen;
     auto add = [&](const std::string& name) {
-        std::string lower = name;
-        for (char& ch : lower) ch = char(std::tolower((unsigned char)ch));
-        if (!name.empty() && seen.insert(lower).second) out.push_back(name);
+        if (!name.empty() && seen.insert(Lower(name)).second) out.push_back(name);
     };
     for (uint32_t sex = 0; sex < 2; ++sex) add(Model(race, sex));
     for (const Section& s : m_sections)
@@ -168,74 +414,244 @@ std::vector<std::string> RaceCatalog::Files(uint32_t race) const
     return out;
 }
 
+nlohmann::json RaceCatalog::Package(uint32_t race) const
+{
+    const Race* r = Find(race);
+    if (!r) return nullptr;
+    nlohmann::json p = { { "ChrRaces", r->row } };
+    nlohmann::json& sections = p["CharSections"] = nlohmann::json::array();
+    for (const Section& s : m_sections)
+        if (s.race == race) sections.push_back(SectionJson(s));
+    nlohmann::json& hair = p["CharHairGeosets"] = nlohmann::json::array();
+    for (const HairGeoset& h : m_hair)
+        if (h.race == race) hair.push_back(HairJson(h));
+    nlohmann::json& facial = p["CharacterFacialHairStyles"] = nlohmann::json::array();
+    for (const FacialHair& f : m_facial)
+        if (f.race == race) facial.push_back(FacialJson(f));
+    nlohmann::json& base = p["CharBaseInfo"] = nlohmann::json::array();
+    for (const auto& [rr, c] : m_baseInfo)
+        if (rr == race) base.push_back({ { "RaceID", rr }, { "ClassID", c } });
+    nlohmann::json& outfits = p["CharStartOutfit"] = nlohmann::json::array();
+    for (const Outfit& o : m_outfits)
+        if (o.race == race) outfits.push_back(OutfitJson(o));
+    return p;
+}
+
+void RaceCatalog::Apply(uint32_t race, const nlohmann::json& package)
+{
+    std::erase_if(m_races, [&](const Race& r) { return r.id == race; });
+    std::erase_if(m_sections, [&](const Section& s) { return s.race == race; });
+    std::erase_if(m_hair, [&](const HairGeoset& h) { return h.race == race; });
+    std::erase_if(m_facial, [&](const FacialHair& f) { return f.race == race; });
+    std::erase_if(m_baseInfo, [&](const std::pair<uint8_t, uint8_t>& b) { return b.first == race; });
+    std::erase_if(m_outfits, [&](const Outfit& o) { return o.race == race; });
+    if (!package.is_object()) return;
+    m_races.push_back(RaceFrom(package.at("ChrRaces"), true));
+    std::sort(m_races.begin(), m_races.end(), [](const Race& a, const Race& b) { return a.id < b.id; });
+    for (const nlohmann::json& j : ChangeStore::List(package, "CharSections")) m_sections.push_back(SectionFrom(j));
+    for (const nlohmann::json& j : ChangeStore::List(package, "CharHairGeosets")) m_hair.push_back(HairFrom(j));
+    for (const nlohmann::json& j : ChangeStore::List(package, "CharacterFacialHairStyles")) m_facial.push_back(FacialFrom(j));
+    for (const nlohmann::json& j : ChangeStore::List(package, "CharBaseInfo")) m_baseInfo.push_back({ uint8_t(U(j, "RaceID")), uint8_t(U(j, "ClassID")) });
+    for (const nlohmann::json& j : ChangeStore::List(package, "CharStartOutfit")) m_outfits.push_back(OutfitFrom(j));
+}
+
+std::set<uint32_t> RaceCatalog::Ids(const std::string& table) const
+{
+    std::set<uint32_t> out;
+    if (table == "CharSections") for (const Section& s : m_sections) out.insert(s.id);
+    if (table == "CharHairGeosets") for (const HairGeoset& h : m_hair) out.insert(h.id);
+    if (table == "CharStartOutfit") for (const Outfit& o : m_outfits) out.insert(o.id);
+    return out;
+}
+
+// ---------------------------------------------------------------------------------------------- the project's races
+
+Change RaceAdapter::MakeChange(uint32_t race, const nlohmann::json& after, const std::string& label) const
+{
+    Change c;
+    c.domain = Domain();
+    c.label = label;
+    const nlohmann::json* before = Package(race);
+    const nlohmann::json& shown = after.is_object() ? after : before ? *before : after;
+    c.target = "race " + std::to_string(race) + (shown.is_object() ? " " + S(shown.at("ChrRaces"), "Name_lang") : "");
+    c.data = { { "race", race }, { "before", before ? *before : nlohmann::json() }, { "after", after } };
+    return c;
+}
+
+void RaceAdapter::Set(const Change& change, bool after)
+{
+    const uint32_t race = change.data.at("race");
+    const nlohmann::json& p = change.data.at(after ? "after" : "before");
+    if (p.is_null()) m_packages.erase(race);
+    else m_packages[race] = p;
+    ++m_version;
+}
+
+std::vector<Change> ImportRaceChanges(const RaceCatalog& source, const std::string& sourceName, uint32_t sourceRace, uint32_t target,
+                                      const RaceCatalog& project, const RaceAdapter& races, const DbcTable& displays, const DbcTable& models,
+                                      const Project& ranges, std::string& error, const RaceImportOptions& options)
+{
+    nlohmann::json p = source.Package(sourceRace);
+    if (!p.is_object()) { error = "the source has no race " + std::to_string(sourceRace); return {}; }
+
+    // The import's choices: team, faction, and the classes it can be (outfits of an added class from the donor race).
+    if (options.alliance >= 0) p["ChrRaces"]["Alliance"] = options.alliance;
+    if (options.faction) p["ChrRaces"]["FactionID"] = options.faction;
+    if (options.classes)
+    {
+        const std::set<uint32_t>& keep = *options.classes;
+        std::set<uint32_t> had;   // classes the race has outfits of (some clients keep outfits of classes it cannot be)
+        for (const nlohmann::json& row : p["CharStartOutfit"]) had.insert(U(row, "ClassID"));
+        nlohmann::json base = nlohmann::json::array(), outfits = nlohmann::json::array();
+        for (uint32_t c : keep) base.push_back({ { "RaceID", sourceRace }, { "ClassID", c } });
+        for (const nlohmann::json& row : p["CharStartOutfit"])
+            if (keep.count(U(row, "ClassID"))) outfits.push_back(row);
+        const nlohmann::json donor = options.outfitDonor ? project.Package(options.outfitDonor) : nlohmann::json();
+        if (donor.is_object())
+            for (const nlohmann::json& row : donor["CharStartOutfit"])
+                if (keep.count(U(row, "ClassID")) && !had.count(U(row, "ClassID"))) outfits.push_back(row);
+        p["CharBaseInfo"] = std::move(base);
+        p["CharStartOutfit"] = std::move(outfits);
+    }
+
+    // Ids: the lowest free in the project's range for each table, never one the client or the project uses already.
+    std::map<std::string, std::set<uint32_t>> taken;
+    auto next = [&](const std::string& table, const char* range, const std::function<bool(uint32_t)>& used) -> uint32_t {
+        const Project::IdRange r = ranges.Range(range);
+        std::set<uint32_t>& mine = taken[table];
+        for (uint32_t id = std::max(r.first, 1u); id && id <= r.last; ++id)
+            if (!mine.count(id) && !used(id)) { mine.insert(id); return id; }
+        error = std::string("the ") + range + " range is full";
+        return 0;
+    };
+    const std::set<uint32_t> sectionIds = project.Ids("CharSections"), hairIds = project.Ids("CharHairGeosets"), outfitIds = project.Ids("CharStartOutfit");
+
+    p["ChrRaces"]["ID"] = target;
+    for (const char* table : { "CharSections", "CharHairGeosets", "CharacterFacialHairStyles", "CharBaseInfo", "CharStartOutfit" })
+        for (nlohmann::json& row : p[table]) row["RaceID"] = target;
+    for (nlohmann::json& row : p["CharSections"])
+        if (!(row["ID"] = next("CharSections", "charsections.id", [&](uint32_t id) { return sectionIds.count(id) != 0; })).get<uint32_t>()) return {};
+    for (nlohmann::json& row : p["CharHairGeosets"])
+        if (!(row["ID"] = next("CharHairGeosets", "charhairgeosets.id", [&](uint32_t id) { return hairIds.count(id) != 0; })).get<uint32_t>()) return {};
+    for (nlohmann::json& row : p["CharStartOutfit"])
+        if (!(row["ID"] = next("CharStartOutfit", "charstartoutfit.id", [&](uint32_t id) { return outfitIds.count(id) != 0; })).get<uint32_t>()) return {};
+
+    // The two character displays, each with its model: a model the project's client lists keeps its row.
+    std::vector<Change> rows;
+    nlohmann::json added = { { "CreatureDisplayInfo", nlohmann::json::array() }, { "CreatureModelData", nlohmann::json::array() } };
+    std::map<uint32_t, uint32_t> displayFor;   // source display -> new display
+    for (const char* key : { "MaleDisplayID", "FemaleDisplayID" })
+    {
+        const uint32_t from = p["ChrRaces"].value(key, 0u);
+        if (!from) continue;
+        if (auto done = displayFor.find(from); done != displayFor.end()) { p["ChrRaces"][key] = done->second; continue; }
+        nlohmann::json display = source.DisplayRow(from);
+        if (!display.is_object()) { error = "the source has no CreatureDisplayInfo row " + std::to_string(from) + " for its race"; return {}; }
+        const nlohmann::json model = source.ModelRow(display.value("ModelID", 0u));
+        if (!model.is_object()) { error = "the source has no CreatureModelData row for display " + std::to_string(from); return {}; }
+        uint32_t modelId = project.ModelId(model.value("ModelName", ""));
+        if (!modelId)
+            for (const auto& [id, row] : models.Rows())   // one the project added already (another race of the same source)
+                if (Lower(M2Name(S(row, "ModelName"))) == Lower(M2Name(S(model, "ModelName")))) { modelId = id; break; }
+        if (!modelId)
+        {
+            modelId = next("CreatureModelData", "creaturemodeldata.id", [&](uint32_t id) { return !models.Row(id).is_null(); });
+            if (!modelId) return {};
+            nlohmann::json row = nlohmann::json::object();
+            for (const DbcField& f : CreatureModelDataFields()) row[f.name] = model.contains(f.name) ? model[f.name] : f.type == 's' ? nlohmann::json("") : nlohmann::json(0);
+            row["ID"] = modelId;
+            rows.push_back(models.MakeChange(modelId, nullptr, row, "import race"));
+            added["CreatureModelData"].push_back(modelId);
+        }
+        const uint32_t displayId = next("CreatureDisplayInfo", "creaturedisplayinfo.id", [&](uint32_t id) { return !displays.Row(id).is_null(); });
+        if (!displayId) return {};
+        nlohmann::json row = nlohmann::json::object();
+        for (const DbcField& f : CreatureDisplayInfoFields()) row[f.name] = display.contains(f.name) ? display[f.name] : f.type == 's' ? nlohmann::json("") : nlohmann::json(0);
+        row["ID"] = displayId;
+        row["ModelID"] = modelId;
+        rows.push_back(displays.MakeChange(displayId, nullptr, row, "import race"));
+        added["CreatureDisplayInfo"].push_back(displayId);
+        displayFor[from] = displayId;
+        p["ChrRaces"][key] = displayId;
+    }
+    // 1.12 rows have no Alliance: the faction of the client's race with the same faction template, else Horde.
+    if (!p["ChrRaces"].contains("Alliance"))
+    {
+        int alliance = 1;
+        for (const RaceCatalog::Race& r : project.Races())
+            if (r.faction == U(p["ChrRaces"], "FactionID") && r.alliance >= 0) { alliance = r.alliance; break; }
+        p["ChrRaces"]["Alliance"] = alliance;
+    }
+    p["source"] = { { "client", sourceName }, { "race", sourceRace } };
+    p["added"] = added;
+    std::vector<Change> out{ races.MakeChange(target, p, "import race") };
+    out.insert(out.end(), rows.begin(), rows.end());
+    return out;
+}
+
+std::vector<Change> RemoveRaceChanges(uint32_t race, const RaceAdapter& races, const DbcTable& displays, const DbcTable& models)
+{
+    const nlohmann::json* p = races.Package(race);
+    if (!p) return {};
+    std::vector<Change> out{ races.MakeChange(race, nullptr, "remove race") };
+    const nlohmann::json added = p->value("added", nlohmann::json::object());
+    for (const nlohmann::json& id : ChangeStore::List(added, "CreatureDisplayInfo"))
+        if (const nlohmann::json* row = displays.Edited(id)) out.push_back(displays.MakeChange(id, *row, nullptr, "remove race"));
+    for (const nlohmann::json& id : ChangeStore::List(added, "CreatureModelData"))
+        if (const nlohmann::json* row = models.Edited(id)) out.push_back(models.MakeChange(id, *row, nullptr, "remove race"));
+    return out;
+}
+
 bool RacesSelfTest()
 {
-    // A WDBC file of `fields` 32-bit fields per record (or `recordSize` bytes), the strings after the records.
-    auto dbc = [](uint32_t fields, uint32_t recordSize, const std::vector<std::vector<uint8_t>>& records, const std::string& strings) {
-        std::vector<uint8_t> b(20);
-        const uint32_t header[5] = { 0x43424457, uint32_t(records.size()), fields, recordSize, uint32_t(strings.size()) };
-        std::memcpy(b.data(), header, 20);
-        for (const auto& r : records) b.insert(b.end(), r.begin(), r.end());
-        b.insert(b.end(), strings.begin(), strings.end());
-        Dbc d;
-        d.Load(b);
-        return d;
-    };
-    auto u32s = [](std::initializer_list<uint32_t> v) {
-        std::vector<uint8_t> out(v.size() * 4);
-        std::memcpy(out.data(), std::data(v), out.size());
-        return out;
-    };
-    const std::string strings = std::string("\0Gn\0Gnome\0Gnomish\0skin.blp\0face.blp\0", 37);   // offsets 1, 4, 10, 18, 27
-    auto check = [&](const Columns& c, bool classic) {
-        std::vector<uint32_t> race(c.chrRacesFields, 0);
-        race[0] = 7;
-        race[c.male] = 1563;
-        race[c.female] = 1564;
-        race[c.prefix] = 1;
-        race[c.fileString] = 4;
-        race[c.name] = 10;
-        if (c.alliance != kNone) race[c.alliance] = 0;
-        std::vector<uint8_t> raceBytes(race.size() * 4);
-        std::memcpy(raceBytes.data(), race.data(), raceBytes.size());
-        std::vector<uint32_t> section(10, 0);
-        section[0] = 500; section[1] = 7; section[2] = 1; section[3] = 1;
-        section[c.sectionVariation] = 3;
-        section[c.sectionColor] = 2;
-        section[c.sectionTexture] = 27;
-        section[c.sectionFlags] = 1;
-        std::vector<uint8_t> sectionBytes(40);
-        std::memcpy(sectionBytes.data(), section.data(), 40);
-        Tables t;
-        t.races = dbc(c.chrRacesFields, c.chrRacesFields * 4, { raceBytes }, strings);
-        t.sections = dbc(10, 40, { sectionBytes }, strings);
-        t.hair = dbc(6, 24, { u32s({ 9, 7, 1, 4, 2, 1 }) }, strings);
-        std::vector<uint32_t> facial = { 7, 0, 5 };
-        while (facial.size() < c.facialStart) facial.push_back(0xCCCCCCCC);
-        for (uint32_t i = 0; i < c.facialGeosets; ++i) facial.push_back(10 + i);
-        std::vector<uint8_t> facialBytes(facial.size() * 4);
-        std::memcpy(facialBytes.data(), facial.data(), facialBytes.size());
-        t.facial = dbc(uint32_t(facial.size()), uint32_t(facialBytes.size()), { facialBytes }, strings);
-        t.baseInfo = dbc(2, 2, { { 7, 1 }, { 7, 8 } }, strings);
-        std::vector<uint8_t> outfit = u32s({ 12 });
-        outfit.insert(outfit.end(), { 7, 4, 1, 0 });
-        for (uint32_t i = 0; i < 3 * c.outfitSlots; ++i) { const auto w = u32s({ i < c.outfitSlots ? 100 + i : 0 }); outfit.insert(outfit.end(), w.begin(), w.end()); }
-        t.outfits = dbc(1 + 4 + 3 * c.outfitSlots, uint32_t(outfit.size()), { outfit }, strings);
-
-        std::vector<RaceCatalog::Race> races;
-        std::vector<RaceCatalog::Section> sections;
-        std::vector<RaceCatalog::HairGeoset> hair;
-        std::vector<RaceCatalog::FacialHair> facials;
-        std::vector<std::pair<uint8_t, uint8_t>> baseInfo;
-        std::vector<RaceCatalog::Outfit> outfits;
-        Fill(t, c, races, sections, hair, facials, baseInfo, outfits);
-        return races.size() == 1 && races[0].id == 7 && races[0].prefix == "Gn" && races[0].fileString == "Gnome" && races[0].name == "Gnomish" &&
-               races[0].display[0] == 1563 && races[0].display[1] == 1564 && races[0].alliance == (classic ? -1 : 0) &&
-               sections.size() == 1 && sections[0].variation == 3 && sections[0].color == 2 && sections[0].textures[0] == "face.blp" &&
-               sections[0].flags == 1 && sections[0].type == 1 && hair.size() == 1 && hair[0].geoset == 2 && hair[0].variation == 4 && facials.size() == 1 &&
-               facials[0].geosets.size() == c.facialGeosets && facials[0].geosets.back() == 10 + c.facialGeosets - 1 && baseInfo.size() == 2 &&
-               baseInfo[1] == std::pair<uint8_t, uint8_t>(7, 8) && outfits.size() == 1 && outfits[0].cls == 4 && outfits[0].sex == 1 &&
-               outfits[0].items.size() == c.outfitSlots && outfits[0].items.back() == 100 + c.outfitSlots - 1 && outfits[0].displays[0] == 0;
-    };
-    return check(kClassic, true) && check(kWrath, false);
+    // Synthetic tables of both layouts, written from 3.3.5-named rows and read back as the catalog reads them.
+    for (const Layouts* l : { &Classic(), &Wrath() })
+    {
+        const bool classic = l == &Classic();
+        nlohmann::json race = { { "ID", 7 }, { "MaleDisplayID", 1563 }, { "FemaleDisplayID", 1564 }, { "ClientPrefix", "Gn" },
+                                { "ClientFileString", "Gnome" }, { "Name_lang", "Gnomish" }, { "Alliance", 0 } };
+        const nlohmann::json section = { { "ID", 500 }, { "RaceID", 7 }, { "SexID", 1 }, { "BaseSection", 1 }, { "TextureName[0]", "face.blp" },
+                                         { "Flags", 1 }, { "VariationIndex", 3 }, { "ColorIndex", 2 } };
+        const nlohmann::json hair = { { "ID", 9 }, { "RaceID", 7 }, { "SexID", 1 }, { "VariationID", 4 }, { "GeosetID", 2 }, { "Showscalp", 1 } };
+        const nlohmann::json facial = { { "RaceID", 7 }, { "SexID", 0 }, { "VariationID", 5 }, { "Geoset[0]", 10 }, { "Geoset[1]", 11 }, { "Geoset[2]", 12 } };
+        nlohmann::json outfit = { { "ID", 12 }, { "RaceID", 7 }, { "ClassID", 4 }, { "SexID", 1 }, { "OutfitID", 0 } };
+        for (int i = 0; i < 12; ++i) outfit["ItemID[" + std::to_string(i) + "]"] = 100 + i;
+        Dbc races, sections, hairs, facials, base, outfits;
+        races.Load(WriteDbcRows({ race }, l->races));
+        sections.Load(WriteDbcRows({ section }, l->sections));
+        hairs.Load(WriteDbcRows({ hair }, l->hair));
+        facials.Load(WriteDbcRows({ facial }, l->facial));
+        base.Load(WriteDbcRows({ { { "RaceID", 7 }, { "ClassID", 1 } }, { { "RaceID", 7 }, { "ClassID", 8 } } }, l->baseInfo));
+        outfits.Load(WriteDbcRows({ outfit }, l->outfits));
+        const RaceCatalog::Race r = RaceFrom(Rows(races, l->races).at(0), !classic);
+        const RaceCatalog::Section s = SectionFrom(Rows(sections, l->sections).at(0));
+        const RaceCatalog::HairGeoset h = HairFrom(Rows(hairs, l->hair).at(0));
+        const RaceCatalog::FacialHair f = FacialFrom(Rows(facials, l->facial).at(0));
+        const auto b = Rows(base, l->baseInfo);
+        const RaceCatalog::Outfit o = OutfitFrom(Rows(outfits, l->outfits).at(0));
+        if (r.id != 7 || r.prefix != "Gn" || r.fileString != "Gnome" || r.name != "Gnomish" || r.display[0] != 1563 || r.display[1] != 1564 ||
+            r.alliance != (classic ? -1 : 0))
+            return false;
+        if (s.variation != 3 || s.color != 2 || s.textures[0] != "face.blp" || s.flags != 1 || s.type != 1 || h.geoset != 2 || h.variation != 4)
+            return false;
+        if (f.geosets.size() != (classic ? 3u : 5u) || f.geosets[2] != 12 || b.size() != 2 || U(b[1], "ClassID") != 8)
+            return false;
+        if (o.cls != 4 || o.sex != 1 || o.items.size() != (classic ? 12u : 24u) || o.items[11] != 111 || o.displays[0] != 0) return false;
+        // A 1.12 header must match what the client reads: a CharSections file of the 1.12 order puts variation first.
+        if (classic && sections.U32At(0, 16) != 3) return false;
+    }
+    // A package round-trips through a catalog: applied, read back, removed.
+    RaceCatalog c;
+    nlohmann::json p = { { "ChrRaces", { { "ID", 30 }, { "Name_lang", "Test" }, { "MaleDisplayID", 1 }, { "Alliance", 1 } } },
+                         { "CharSections", { SectionJson({ 600000, 30, 0, 0, 0, 2, 1, { "a.blp", "", "" } }) } },
+                         { "CharHairGeosets", { HairJson({ 9000, 30, 0, 1, 3, 1 }) } },
+                         { "CharacterFacialHairStyles", { FacialJson({ 30, 0, 1, { 101, 301, 201 } }) } },
+                         { "CharBaseInfo", { { { "RaceID", 30 }, { "ClassID", 1 } } } }, { "CharStartOutfit", nlohmann::json::array() } };
+    c.Apply(30, p);
+    const nlohmann::json back = c.Package(30);
+    if (!back.is_object() || back["CharSections"].size() != 1 || back["CharSections"][0]["ColorIndex"] != 2 || back["CharHairGeosets"][0]["GeosetID"] != 3 ||
+        back["CharacterFacialHairStyles"][0]["Geoset[2]"] != 201 || back["CharBaseInfo"].size() != 1 || c.Count(30, 0).skins != 1 || c.Classes(30) != std::vector<uint32_t>{ 1 })
+        return false;
+    c.Apply(30, nullptr);
+    return !c.Find(30) && c.Sections().empty();
 }

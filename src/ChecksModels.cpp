@@ -1298,4 +1298,190 @@ namespace checks
         printf("%d problem(s)\n", problems);
         return problems ? 1 : 0;
     }
+
+    /// `--race-import-check <data dir> <source data dir> <source race> [target race]`: imports a race of another client
+    /// into a project on the first, as the Races window does, and checks the result: every row carries the new race id,
+    /// every id of its own is new and inside the project's ranges, its displays point at models with the source's model
+    /// files, the project's races show the same choices the source has, and saving, reloading, undo, redo and removing
+    /// all give back what they should.
+    int RaceImportCheck()
+    {
+        if (__argc < 5 || !__wargv) return 2;
+        setvbuf(stdout, nullptr, _IONBF, 0);
+        namespace fs = std::filesystem;
+        auto arg = [](int i) { return std::filesystem::path(__wargv[i]).string(); };
+        int problems = 0;
+        auto expect = [&](bool ok, const std::string& what) { printf("%s %s\n", ok ? "ok  " : "FAIL", what.c_str()); problems += !ok; };
+        auto lower = [](std::string s) { for (char& c : s) c = char(std::tolower((unsigned char)c)); return s; };
+
+        MpqChain base, source;
+        base.Open(arg(2));
+        source.Open(arg(3));
+        const uint32_t sourceRace = uint32_t(_wtoi(__wargv[4]));
+        RaceCatalog baseRaces, sourceRaces;
+        std::string error;
+        if (!baseRaces.Load(base, error) || !sourceRaces.Load(source, error)) { printf("%s\n", error.c_str()); return 1; }
+        const Project project;   // the default id ranges
+        const Project::IdRange raceRange = project.Range("race.id");
+        uint32_t target = __argc > 5 ? uint32_t(_wtoi(__wargv[5])) : 0;
+        for (uint32_t id = raceRange.first; !target && id <= raceRange.last; ++id)
+            if (!baseRaces.Find(id)) target = id;
+        const RaceCatalog::Race* from = sourceRaces.Find(sourceRace);
+        if (!from || !target) { printf("no race %u in the source, or no free race id\n", sourceRace); return 1; }
+        printf("importing %s (race %u, %s layout) as race %u\n", from->name.c_str(), sourceRace, RaceCatalog::LayoutName(sourceRaces.Format()), target);
+
+        // A project as the window has it: the race packages and the display and model tables, in one change store.
+        struct Tables
+        {
+            ChangeStore store;
+            RaceAdapter races;
+            DbcTable displays, models;
+            explicit Tables(MpqChain& mpq) : displays(mpq, store, "CreatureDisplayInfo", CreatureDisplayInfoFields(), 16),
+                                             models(mpq, store, "CreatureModelData", CreatureModelDataFields(), 28)
+            {
+                store.Register(races);
+                store.Register(displays);
+                store.Register(models);
+            }
+            void Apply(const std::vector<Change>& parts)
+            {
+                for (const Change& c : parts)
+                    if (c.domain == races.Domain()) races.Apply(c);
+                    else if (c.domain == displays.Domain()) displays.Apply(c);
+                    else models.Apply(c);
+            }
+            RaceCatalog Project(const RaceCatalog& client) const
+            {
+                RaceCatalog p = client;
+                p.SetModelLookup([this](uint32_t display) -> std::string {
+                    const nlohmann::json* d = displays.Edited(display);
+                    const nlohmann::json& m = d && d->is_object() ? models.Row(d->value("ModelID", 0u)) : nlohmann::json();
+                    return m.is_object() ? m.value("ModelName", "") : std::string();
+                });
+                for (const auto& [id, package] : races.Packages()) p.Apply(id, package);
+                return p;
+            }
+        };
+        Tables t(base);
+        auto parts = ImportRaceChanges(sourceRaces, "source", sourceRace, target, baseRaces, t.races, t.displays, t.models, project, error);
+        if (parts.empty()) { printf("import: %s\n", error.c_str()); return 1; }
+        t.Apply(parts);
+        t.store.Commit(parts, "import race");
+        const nlohmann::json* p = t.races.Package(target);
+        expect(p && p->at("ChrRaces").value("ID", 0u) == target, "the race package is race " + std::to_string(target));
+        if (!p) return 1;
+
+        // Every row carries the new race; every id of its own is new and in the project's range.
+        const nlohmann::json sourcePackage = sourceRaces.Package(sourceRace);
+        bool raceIds = true;
+        for (const char* table : { "CharSections", "CharHairGeosets", "CharacterFacialHairStyles", "CharBaseInfo", "CharStartOutfit" })
+        {
+            for (const nlohmann::json& row : p->at(table)) raceIds = raceIds && row.value("RaceID", 0u) == target;
+            expect(p->at(table).size() == sourcePackage.at(table).size(),
+                   std::string(table) + ": " + std::to_string(p->at(table).size()) + " row(s), as the source has");
+        }
+        expect(raceIds, "every row is of race " + std::to_string(target));
+        for (const auto& [table, range] : { std::pair{ "CharSections", "charsections.id" }, std::pair{ "CharHairGeosets", "charhairgeosets.id" },
+                                            std::pair{ "CharStartOutfit", "charstartoutfit.id" } })
+        {
+            const Project::IdRange r = project.Range(range);
+            const std::set<uint32_t> client = baseRaces.Ids(table);
+            std::set<uint32_t> seen;
+            bool ok = true;
+            for (const nlohmann::json& row : p->at(table))
+            {
+                const uint32_t id = row.value("ID", 0u);
+                ok = ok && id >= r.first && id <= r.last && !client.count(id) && seen.insert(id).second;
+            }
+            expect(ok, std::string(table) + " ids are new, once each, inside " + range);
+        }
+        // Displays: new, in range, each pointing at a model with the source's model file.
+        for (uint32_t sex = 0; sex < 2; ++sex)
+        {
+            const uint32_t display = p->at("ChrRaces").value(sex ? "FemaleDisplayID" : "MaleDisplayID", 0u);
+            const Project::IdRange r = project.Range("creaturedisplayinfo.id");
+            const nlohmann::json* row = t.displays.Edited(display);
+            const uint32_t model = row && row->is_object() ? row->value("ModelID", 0u) : 0;
+            const nlohmann::json& modelRow = t.models.Row(model);
+            const std::string modelName = modelRow.is_object() ? modelRow.value("ModelName", "") : std::string();
+            expect(display >= r.first && display <= r.last && row, std::string(sex ? "female" : "male") + " display " + std::to_string(display) + " is the project's");
+            expect(lower(M2Name(modelName)) == lower(sourceRaces.Model(sourceRace, sex)),
+                   std::string(sex ? "female" : "male") + " model " + std::to_string(model) + " is " + modelName);
+        }
+        // The project's races show what the source shows.
+        const RaceCatalog projected = t.Project(baseRaces);
+        for (uint32_t sex = 0; sex < 2; ++sex)
+        {
+            const RaceCatalog::Counts a = sourceRaces.Count(sourceRace, sex), b = projected.Count(target, sex);
+            expect(a.skins == b.skins && a.faces == b.faces && a.hairStyles == b.hairStyles && a.hairColors == b.hairColors && a.facialHair == b.facialHair,
+                   std::string(sex ? "female" : "male") + " choices " + std::to_string(b.skins) + "/" + std::to_string(b.faces) + "/" +
+                       std::to_string(b.hairStyles) + "/" + std::to_string(b.hairColors) + "/" + std::to_string(b.facialHair) + " as in the source");
+        }
+        expect(projected.Classes(target) == sourceRaces.Classes(sourceRace), "the same classes");
+
+        // Saved and loaded again: the same package and rows.
+        const fs::path dir = fs::temp_directory_path() / "wow-world-editor-raceimport";
+        std::error_code ec;
+        fs::remove_all(dir, ec);
+        expect(t.store.Save(dir, error), "changes saved " + error);
+        {
+            Tables again(base);
+            expect(again.store.Load(dir, error), "changes loaded " + error);
+            const nlohmann::json* q = again.races.Package(target);
+            expect(q && *q == *p && again.displays.Count() == t.displays.Count() && again.models.Count() == t.models.Count(), "reloaded: the same package and rows");
+        }
+        fs::remove_all(dir, ec);
+
+        // Undo, redo, remove, undo the removal.
+        const nlohmann::json kept = *p;
+        const size_t displays = t.displays.Count(), models = t.models.Count();
+        t.store.Undo();
+        expect(t.races.Packages().empty() && !t.displays.Count() && !t.models.Count(), "undo leaves nothing");
+        t.store.Redo();
+        expect(t.races.Package(target) && *t.races.Package(target) == kept && t.displays.Count() == displays && t.models.Count() == models, "redo brings it back");
+        auto removal = RemoveRaceChanges(target, t.races, t.displays, t.models);
+        t.Apply(removal);
+        t.store.Commit(removal, "remove race");
+        expect(t.races.Packages().empty() && !t.displays.Count() && !t.models.Count(), "remove takes the race and the rows its import added");
+        t.store.Undo();
+        expect(t.races.Package(target) && t.displays.Count() == displays, "undoing the removal brings it back");
+        printf("%zu display(s) and %zu model(s) added, %zu CharSections rows\n", displays, models, kept.at("CharSections").size());
+
+        // The import's choices: the other team, Orc's faction template, Warrior and Mage kept, Paladin added with Human's
+        // starting outfits, every other class dropped.
+        {
+            Tables o(base);
+            RaceImportOptions options;
+            options.alliance = from->alliance == 1 ? 0 : 1;
+            options.faction = 2;
+            options.classes = std::set<uint32_t>{ 1, 2, 8 };
+            options.outfitDonor = 1;
+            size_t sourcePaladin = 0;   // its own Paladin outfits, kept over the donor's
+            const nlohmann::json sourceOutfits = sourceRaces.Package(sourceRace).at("CharStartOutfit");
+            for (const nlohmann::json& row : sourceOutfits) sourcePaladin += row.value("ClassID", 0u) == 2;
+            auto chosen = ImportRaceChanges(sourceRaces, "source", sourceRace, target, baseRaces, o.races, o.displays, o.models, project, error, options);
+            o.Apply(chosen);
+            o.store.Commit(chosen, "import race");
+            const nlohmann::json* q = o.races.Package(target);
+            expect(q && q->at("ChrRaces").value("Alliance", -1) == options.alliance && q->at("ChrRaces").value("FactionID", 0u) == 2u,
+                   "team and faction template as chosen (2: " + baseRaces.FactionName(2) + ")");
+            std::set<uint32_t> classes, outfitClasses;
+            for (const nlohmann::json& row : q->at("CharBaseInfo")) classes.insert(row.value("ClassID", 0u));
+            for (const nlohmann::json& row : q->at("CharStartOutfit")) outfitClasses.insert(row.value("ClassID", 0u));
+            expect(classes == std::set<uint32_t>{ 1, 2, 8 }, "classes Warrior, Paladin, Mage");
+            size_t humanPaladin = 0, paladin = 0;
+            const nlohmann::json human = baseRaces.Package(1);
+            for (const nlohmann::json& row : human.at("CharStartOutfit")) humanPaladin += row.value("ClassID", 0u) == 2;
+            for (const nlohmann::json& row : q->at("CharStartOutfit")) paladin += row.value("ClassID", 0u) == 2;
+            expect(std::includes(classes.begin(), classes.end(), outfitClasses.begin(), outfitClasses.end()) &&
+                       paladin == (sourcePaladin ? sourcePaladin : humanPaladin),
+                   "outfits only for its classes; Paladin's " + std::to_string(paladin) + (sourcePaladin ? " its own" : " from Human"));
+            const std::set<uint32_t> client = baseRaces.Ids("CharStartOutfit");
+            bool fresh = true;
+            for (const nlohmann::json& row : q->at("CharStartOutfit")) fresh = fresh && !client.count(row.value("ID", 0u)) && row.value("RaceID", 0u) == target;
+            expect(fresh, "the outfits copied from Human have new ids and the new race");
+        }
+        printf("%d problem(s)\n", problems);
+        return problems ? 1 : 0;
+    }
 }

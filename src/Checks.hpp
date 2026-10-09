@@ -93,6 +93,7 @@ namespace checks
     int MinimapCheck();
     int RaceCheck();
     int RaceLookCheck();
+    int RaceImportCheck();
     int LoaderCheck();
     int RenderCheck();
     int PoisCheck();

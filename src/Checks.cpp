@@ -125,6 +125,7 @@ int RunCheck()
          } },
         { L"--race-check", 3, checks::RaceCheck },
         { L"--race-look", 6, checks::RaceLookCheck },
+        { L"--race-import-check", 5, checks::RaceImportCheck },
         { L"--check", 0, checks::Check },
     };
     if (__argc < 2 || !__wargv) return -1;

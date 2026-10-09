@@ -173,6 +173,8 @@ public:
     uint8_t U8At(uint32_t row, uint32_t offset) const;
     uint32_t U32At(uint32_t row, uint32_t offset) const;
     uint32_t RecordSize() const { return m_recordSize; }
+    /// The string at an offset into the string block ("" for 0 or past it).
+    std::string Text(uint32_t offset) const;
     /// Row index of an id, if present.
     std::optional<uint32_t> Find(uint32_t id) const;
     uint32_t Fields() const { return m_fields; }

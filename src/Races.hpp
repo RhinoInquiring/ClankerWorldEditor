@@ -1,12 +1,33 @@
 #pragma once
 
+#include "Areas.hpp"
+#include "Changes.hpp"
 #include "Formats.hpp"
 
+#include <nlohmann/json.hpp>
+
 #include <cstdint>
+#include <functional>
+#include <map>
+#include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
 class MpqChain;
+struct Project;
+
+/// One column of a client table: its name as mod-dbc-patch's schemas give it (`Name[i]` for arrays; a localized string
+/// is `Name_lang` for enUS, `Name_lang[i]` for locale slot i and `Name_lang_flags`), its byte offset in the record and
+/// its type: 'i' 32-bit integer, 'b' 8-bit integer, 'f' float, 's' string.
+struct DbcColumn { std::string name; uint32_t offset; char type; };
+/// The columns of a table in one client layout. `fields` is what a WDBC header of it says.
+struct DbcLayout { std::vector<DbcColumn> columns; uint32_t recordSize = 0, fields = 0; };
+
+/// A row as a JSON object by column name.
+nlohmann::json DbcRowJson(const Dbc& dbc, uint32_t row, const DbcLayout& layout);
+/// A WDBC file of `rows` (JSON objects by column name, in the order given; missing columns 0 or "") in `layout`.
+std::vector<uint8_t> WriteDbcRows(const std::vector<nlohmann::json>& rows, const DbcLayout& layout);
 
 /// The races of one client and what their characters can look like: ChrRaces, CharSections, CharHairGeosets,
 /// CharacterFacialHairStyles, CharBaseInfo, CharStartOutfit and the race's character displays, read in that client's
@@ -22,11 +43,12 @@ public:
         uint32_t id = 0, flags = 0, faction = 0, display[2] = {}, baseLanguage = 0, creatureType = 0, cinematic = 0;
         int alliance = -1;                       // 0 Alliance, 1 Horde; -1: the layout has no such field (1.12)
         std::string name, names[2], prefix, fileString;   // names: female and male forms (3.3.5 only)
+        nlohmann::json row;                      // the whole ChrRaces row, by 3.3.5 column names
     };
     /// One CharSections row. type: 0 skin, 1 face, 2 facial hair, 3 hair (scalp), 4 underwear.
     struct Section { uint32_t id = 0, race = 0, sex = 0, type = 0, variation = 0, color = 0, flags = 0; std::string textures[3]; };
     struct HairGeoset { uint32_t id = 0, race = 0, sex = 0, variation = 0, geoset = 0, showScalp = 0; };
-    /// CharacterFacialHairStyles: no id of its own; race, sex and variation are the key. Geosets: 5 in 3.3.5, 6 in 1.12.
+    /// CharacterFacialHairStyles: no id of its own; race, sex and variation are the key. Geosets: 5 in 3.3.5, 3 in 1.12.
     struct FacialHair { uint32_t race = 0, sex = 0, variation = 0; std::vector<uint32_t> geosets; };
     /// CharStartOutfit: what a race / class / sex starts wearing (12 slots in 1.12, 24 in 3.3.5).
     struct Outfit { uint32_t id = 0; uint8_t race = 0, cls = 0, sex = 0, outfit = 0; std::vector<uint32_t> items, displays, types; };
@@ -56,6 +78,24 @@ public:
     /// Every game file the race's characters use: both models and every CharSections texture, once each.
     std::vector<std::string> Files(uint32_t race) const;
 
+    /// A race and every row of its own, by 3.3.5 column names whatever the client's layout: {"ChrRaces": row,
+    /// "CharSections": [rows], "CharHairGeosets": [...], "CharacterFacialHairStyles": [...], "CharBaseInfo": [...],
+    /// "CharStartOutfit": [...]}. Null when there is no such race.
+    nlohmann::json Package(uint32_t race) const;
+    /// Makes `race` what `package` says (rows of the race replaced), or removes it (package null): the project's races
+    /// over the client's. `models` names the model of a display the client's tables lack (the project's displays).
+    void Apply(uint32_t race, const nlohmann::json& package);
+    void SetModelLookup(std::function<std::string(uint32_t display)> models) { m_modelOf = std::move(models); }
+    /// A CreatureDisplayInfo / CreatureModelData row by 3.3.5 column names; null when there is none.
+    nlohmann::json DisplayRow(uint32_t id) const;
+    nlohmann::json ModelRow(uint32_t id) const;
+    /// The id of a CreatureModelData row with this model (case-insensitive, .mdx and .m2 alike); 0 when none.
+    uint32_t ModelId(const std::string& model) const;
+    /// Ids the rows of a table use ("CharSections", "CharHairGeosets", "CharStartOutfit").
+    std::set<uint32_t> Ids(const std::string& table) const;
+    /// The name of the faction a FactionTemplate id belongs to in this client ("PLAYER, Human"); empty when it has none.
+    std::string FactionName(uint32_t factionTemplate) const;
+
 private:
     Layout m_layout = Layout::None;
     std::vector<Race> m_races;
@@ -64,8 +104,57 @@ private:
     std::vector<FacialHair> m_facial;
     std::vector<std::pair<uint8_t, uint8_t>> m_baseInfo;
     std::vector<Outfit> m_outfits;
-    Dbc m_displayInfo, m_modelData;
+    Dbc m_displayInfo, m_modelData, m_factionTemplates, m_factions;
+    std::function<std::string(uint32_t)> m_modelOf;
 };
 
-/// Reads synthetic 1.12 and 3.3.5 tables; false on the first wrong field.
+/// The races the project adds or changes, each as one package (RaceCatalog::Package's form, plus "source" {client, race}
+/// it came from and "added" {table: [ids]}: the display and model rows its import added). Domain "race"; change data
+/// {"race": id, "before": package | null, "after": package | null}; null = the client's race (or none).
+class RaceAdapter final : public Adapter
+{
+public:
+    const char* Domain() const override { return "race"; }
+    void Apply(const Change& change) override { Set(change, true); }
+    void Revert(const Change& change) override { Set(change, false); }
+    /// The project's package of a race; null when the project has not touched it.
+    const nlohmann::json* Package(uint32_t race) const { auto it = m_packages.find(race); return it == m_packages.end() ? nullptr : &it->second; }
+    const std::map<uint32_t, nlohmann::json>& Packages() const { return m_packages; }
+    Change MakeChange(uint32_t race, const nlohmann::json& after, const std::string& label) const;
+    /// Forget every package (the project closed).
+    void Clear() { m_packages.clear(); ++m_version; }
+    uint64_t Version() const { return m_version; }
+
+private:
+    void Set(const Change& change, bool after);
+    std::map<uint32_t, nlohmann::json> m_packages;
+    uint64_t m_version = 0;
+};
+
+/// The 3.3.5 columns of CreatureDisplayInfo and CreatureModelData, as their DbcTables take them.
+const std::vector<DbcField>& CreatureDisplayInfoFields();
+const std::vector<DbcField>& CreatureModelDataFields();
+
+/// What an import changes about the race besides its ids. Unset values keep the source's.
+struct RaceImportOptions
+{
+    int alliance = -1;                   // ChrRaces.Alliance: 0 Alliance, 1 Horde
+    uint32_t faction = 0;                // ChrRaces.FactionID (a FactionTemplate id)
+    std::optional<std::set<uint32_t>> classes;   // CharBaseInfo: the classes it can be; a class left out loses its starting outfits
+    uint32_t outfitDonor = 0;            // a race of the project whose starting outfits a class takes that the source has none of
+};
+
+/// What importing race `sourceRace` of `source` (a client named `sourceName`) as race `target` of the project takes, as
+/// changes not yet applied: the race package with every id of its own renumbered into the project's ranges
+/// (CharSections, CharHairGeosets, CharStartOutfit), and new CreatureDisplayInfo rows for its two displays with their
+/// CreatureModelData (a model the project's client already lists keeps its row). `project` is the project's races as
+/// they are now (client and packages), `displays` / `models` the project's tables. Empty (and `error`) when a range is full
+/// or the race has no row.
+std::vector<Change> ImportRaceChanges(const RaceCatalog& source, const std::string& sourceName, uint32_t sourceRace, uint32_t target,
+                                      const RaceCatalog& project, const RaceAdapter& races, const DbcTable& displays, const DbcTable& models,
+                                      const Project& ranges, std::string& error, const RaceImportOptions& options = {});
+/// The changes removing a project race the project added: its package and the display and model rows its import added.
+std::vector<Change> RemoveRaceChanges(uint32_t race, const RaceAdapter& races, const DbcTable& displays, const DbcTable& models);
+
+/// Reads synthetic 1.12 and 3.3.5 tables and round-trips a package; false on the first wrong field.
 bool RacesSelfTest();
