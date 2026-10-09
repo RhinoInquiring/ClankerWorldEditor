@@ -129,6 +129,7 @@ drawn into place. Right: Blizzard's baked skins (left column) beside the editor'
 - [Change model](docs/concepts/change-model.md): how edits are recorded, undone, saved and exported; the project folder
 - [Command-line checks](docs/development/checks.md): headless tests and tools (`--selftest`, `--tiles-check`, ...)
 - [Code layout](docs/development/code-layout.md): what each source file holds
+- [Known bugs](docs/development/known-bugs.md): bugs left for later and the checks that show them
 
 The scene pictures are drawn by the editor's own renderer from the command line (`tools/readme-images.ps1`); the
 pictures of its panels are taken by hand ([docs/images](docs/images/README.md)).
