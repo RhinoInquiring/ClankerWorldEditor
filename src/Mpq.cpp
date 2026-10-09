@@ -207,6 +207,16 @@ MpqChain::~MpqChain() { Close(); }
 
 bool LoadsAfter(const std::string& a, const std::string& b) { return Rank(a) > Rank(b); }
 
+std::optional<std::vector<uint8_t>> ReadFileBytes(const std::filesystem::path& path)
+{
+    std::ifstream f(path, std::ios::binary | std::ios::ate);
+    if (!f) return std::nullopt;
+    std::vector<uint8_t> bytes(size_t(f.tellg()));
+    f.seekg(0);
+    if (!f.read(reinterpret_cast<char*>(bytes.data()), std::streamsize(bytes.size()))) return std::nullopt;
+    return bytes;
+}
+
 namespace
 {
     /// .build.info as rows of column name -> cell: a '|' separated table whose first line names the columns
@@ -534,13 +544,14 @@ size_t MpqChain::Open(const std::vector<MpqLayer>& layers)
         for (const auto& path : found)
         {
             HANDLE h = nullptr;
-            if (SFileOpenArchive(path.string().c_str(), 0, MPQ_OPEN_READ_ONLY, &h))
+            // No listfile here: reads go by hash, and parsing the names took 4 of the 4.4 s a stock client opens in.
+            // List() loads them when something first enumerates the archive.
+            if (SFileOpenArchive(path.string().c_str(), 0, MPQ_OPEN_READ_ONLY | MPQ_OPEN_NO_LISTFILE | MPQ_OPEN_NO_ATTRIBUTES, &h))
             {
                 Archive a;
                 a.handle = h;
                 a.installed = layer.installed;
                 a.layer = li;
-            a.layer = li;
                 m_archives.push_back(std::move(a));
                 m_names.push_back(path.filename().string());
                 ++report.archives;
@@ -579,6 +590,18 @@ std::vector<MpqChain::Entry> MpqChain::List() const
                 if (seen.insert(Lower(name)).second) out.push_back({ name, a });
             continue;
         }
+        if (!m_archives[a].listLoaded)   // the archives' own (listfile)s, all at once: one thread per archive
+        {
+            std::vector<std::thread> loads;
+            for (const Archive& b : m_archives)
+                if (b.handle && !b.listLoaded)
+                {
+                    loads.emplace_back([&b] { std::lock_guard l(*b.lock); SFileAddListFile(b.handle, nullptr); });
+                    b.listLoaded = true;
+                }
+            for (std::thread& t : loads) t.join();
+        }
+        std::lock_guard archiveLock(*m_archives[a].lock);
         SFILE_FIND_DATA fd{};
         HANDLE find = SFileFindFirstFile(m_archives[a].handle, "*", &fd, nullptr);
         if (!find) continue;
@@ -635,8 +658,7 @@ std::optional<size_t> MpqChain::MapHome(const std::string& name) const
 std::optional<std::vector<uint8_t>> MpqChain::Read(const std::string& name) const
 {
     if (const auto path = OverlayPath(name); !path.empty())
-        if (std::ifstream f(path, std::ios::binary); f)
-            return std::vector<uint8_t>((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        if (auto bytes = ReadFileBytes(path)) return bytes;
     if (const auto home = MapHome(name))   // a map's own files: from the layer the map comes from
         if (auto bytes = ReadFromLayer(*home, name)) return bytes;
     for (size_t a = 0; a < m_archives.size(); ++a)
@@ -706,7 +728,7 @@ std::optional<std::vector<uint8_t>> MpqChain::ReadCasc(const Archive& a, uint32_
     auto read = [&](HANDLE storage) { return CascReadId(storage, id); };
     ++g_cascReads;
     {
-        std::lock_guard lock(m_lock);
+        std::lock_guard lock(*a.lock);
         if (auto bytes = read(a.casc)) return bytes;
     }
     ++g_cascLocalMisses;
@@ -760,11 +782,9 @@ std::optional<std::vector<uint8_t>> MpqChain::ReadFrom(size_t archive, const std
     {
         const auto it = a.files.find(Lower(Backslashes(name)));
         if (it == a.files.end()) return std::nullopt;
-        std::ifstream f(it->second, std::ios::binary);
-        if (!f) return std::nullopt;
-        return std::vector<uint8_t>((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        return ReadFileBytes(it->second);
     }
-    std::lock_guard lock(m_lock);
+    std::lock_guard lock(*a.lock);
     HANDLE file = nullptr;
     if (!SFileOpenFileEx(a.handle, Backslashes(name).c_str(), SFILE_OPEN_FROM_MPQ, &file)) return std::nullopt;
     std::vector<uint8_t> bytes(SFileGetFileSize(file, nullptr));
@@ -785,6 +805,6 @@ bool MpqChain::Has(size_t archive, const std::string& name) const
         return id && a.present.count(*id);
     }
     if (!a.handle) return a.files.count(Lower(Backslashes(name))) != 0;
-    std::lock_guard lock(m_lock);
+    std::lock_guard lock(*a.lock);
     return SFileHasFile(a.handle, Backslashes(name).c_str());
 }

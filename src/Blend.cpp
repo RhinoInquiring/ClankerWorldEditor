@@ -51,18 +51,60 @@ namespace
         return out;
     }
 
-    /// Distance from every node to the nearest node of `targets` (brute force over the target list).
+    /// Distance from every node to the nearest node of `targets`: exact Euclidean distance transform (Felzenszwalb and
+    /// Huttenlocher), squared distances per column, then the lower envelope of parabolas along each row.
     std::vector<float> DistanceTo(const BlendGrid& g, const std::vector<std::pair<int, int>>& targets)
     {
         std::vector<float> d(size_t(g.width) * g.height, 1e9f);
         if (targets.empty()) return d;
+        constexpr int64_t kNone = -1;
+        // Columns: squared distance to the nearest target above or below (kNone: the column has none).
+        std::vector<int64_t> col(d.size(), kNone);
+        std::vector<uint8_t> is(d.size(), 0);
+        for (const auto& [tx, ty] : targets) is[g.At(tx, ty)] = 1;
+        for (int x = 0; x < g.width; ++x)
+        {
+            int last = -1;
+            for (int y = 0; y < g.height; ++y)
+            {
+                if (is[g.At(x, y)]) last = y;
+                if (last >= 0) col[g.At(x, y)] = int64_t(y - last) * (y - last);
+            }
+            last = -1;
+            for (int y = g.height - 1; y >= 0; --y)
+            {
+                if (is[g.At(x, y)]) last = y;
+                if (last >= 0 && (col[g.At(x, y)] == kNone || int64_t(last - y) * (last - y) < col[g.At(x, y)]))
+                    col[g.At(x, y)] = int64_t(last - y) * (last - y);
+            }
+        }
+        // Rows: min over columns q of (x - q)^2 + col(q).
+        std::vector<int> v(size_t(g.width));
+        std::vector<double> z(size_t(g.width) + 1);
         for (int y = 0; y < g.height; ++y)
+        {
+            auto f = [&](int q) { return col[g.At(q, y)]; };
+            auto cross = [&](int q, int p) { return (double(f(q) + int64_t(q) * q) - double(f(p) + int64_t(p) * p)) / (2.0 * (q - p)); };
+            int k = -1;
+            for (int q = 0; q < g.width; ++q)
+            {
+                if (f(q) == kNone) continue;
+                double s = -1e300;
+                while (k >= 0 && (s = cross(q, v[size_t(k)])) <= z[size_t(k)]) --k;
+                if (k < 0) s = -1e300;
+                v[size_t(++k)] = q;
+                z[size_t(k)] = s;
+            }
+            if (k < 0) continue;   // no column of this row reaches a target (only with targets nowhere)
+            z[size_t(k) + 1] = 1e300;
+            int j = 0;
             for (int x = 0; x < g.width; ++x)
             {
-                float best = 1e18f;
-                for (const auto& [tx, ty] : targets) best = std::min(best, float((tx - x) * (tx - x) + (ty - y) * (ty - y)));
-                d[g.At(x, y)] = std::sqrt(best);
+                while (z[size_t(j) + 1] < x) ++j;
+                const int q = v[size_t(j)];
+                d[g.At(x, y)] = std::sqrt(float(int64_t(x - q) * (x - q) + f(q)));
             }
+        }
         return d;
     }
 }
@@ -120,55 +162,58 @@ BlendResult BlendHeights(const BlendGrid& g, float width)
     }
 
     // Minimise sum (Laplacian of lo)^2 over nodes whose four neighbours exist: (L^T L) x = 0 on free nodes.
-    auto valid = [&](int x, int y) { return x > 0 && y > 0 && x < g.width - 1 && y < g.height - 1 && g.exists[g.At(x, y)] &&
-                                            g.exists[g.At(x - 1, y)] && g.exists[g.At(x + 1, y)] && g.exists[g.At(x, y - 1)] && g.exists[g.At(x, y + 1)]; };
+    // The nodes in row-major order, worked out once: CG applies L^T L up to 2000 times. Only those touching a free
+    // node: CG reads the result on free nodes alone, and the others add nothing there.
+    const size_t row = size_t(g.width);
+    std::vector<size_t> centres;
+    for (int y = 1; y < g.height - 1; ++y)
+        for (int x = 1; x < g.width - 1; ++x)
+            if (const size_t i = g.At(x, y); g.exists[i] && g.exists[i - 1] && g.exists[i + 1] && g.exists[i - row] && g.exists[i + row] &&
+                                             (isFree[i] || isFree[i - 1] || isFree[i + 1] || isFree[i - row] || isFree[i + row]))
+                centres.push_back(i);
+    std::vector<float> lap(n, 0);
     auto applyLtL = [&](const std::vector<float>& v, std::vector<float>& out) {
-        std::vector<float> lap(n, 0);
-        for (int y = 0; y < g.height; ++y)
-            for (int x = 0; x < g.width; ++x)
-                if (valid(x, y))
-                    lap[g.At(x, y)] = v[g.At(x - 1, y)] + v[g.At(x + 1, y)] + v[g.At(x, y - 1)] + v[g.At(x, y + 1)] - 4 * v[g.At(x, y)];
+        for (size_t i : centres) lap[i] = v[i - 1] + v[i + 1] + v[i - row] + v[i + row] - 4 * v[i];
         std::fill(out.begin(), out.end(), 0.0f);
-        for (int y = 0; y < g.height; ++y)
-            for (int x = 0; x < g.width; ++x)
-                if (valid(x, y))
-                {
-                    const float l = lap[g.At(x, y)];
-                    out[g.At(x, y)] -= 4 * l;
-                    out[g.At(x - 1, y)] += l;
-                    out[g.At(x + 1, y)] += l;
-                    out[g.At(x, y - 1)] += l;
-                    out[g.At(x, y + 1)] += l;
-                }
+        for (size_t i : centres)
+        {
+            const float l = lap[i];
+            out[i] -= 4 * l;
+            out[i - 1] += l;
+            out[i + 1] += l;
+            out[i - row] += l;
+            out[i + row] += l;
+        }
     };
 
     // Start the free nodes from the crossfade, then conjugate gradients on the free nodes only.
+    // r and p stay 0 off the free nodes, so the vector steps only visit those.
+    std::vector<size_t> freeNodes;
     for (size_t i = 0; i < n; ++i)
-        if (isFree[i]) lo[i] = loGround[i];
-    std::vector<float> r(n), p(n), ap(n);
+        if (isFree[i]) freeNodes.push_back(i);
+    for (size_t i : freeNodes) lo[i] = loGround[i];
+    std::vector<float> r(n), p(n, 0.0f), ap(n);
     applyLtL(lo, r);
     for (size_t i = 0; i < n; ++i) r[i] = isFree[i] ? -r[i] : 0.0f;
     p = r;
     double rr = 0;
-    for (size_t i = 0; i < n; ++i) rr += double(r[i]) * r[i];
+    for (size_t i : freeNodes) rr += double(r[i]) * r[i];
     for (int iter = 0; iter < 2000 && rr > 1e-8; ++iter)
     {
         applyLtL(p, ap);
         double pap = 0;
-        for (size_t i = 0; i < n; ++i)
-            if (isFree[i]) pap += double(p[i]) * ap[i];
+        for (size_t i : freeNodes) pap += double(p[i]) * ap[i];
         if (pap <= 0) break;
         const float alpha = float(rr / pap);
         double rrNew = 0;
-        for (size_t i = 0; i < n; ++i)
+        for (size_t i : freeNodes)
         {
-            if (!isFree[i]) continue;
             lo[i] += alpha * p[i];
             r[i] -= alpha * ap[i];
             rrNew += double(r[i]) * r[i];
         }
         const float beta = float(rrNew / rr);
-        for (size_t i = 0; i < n; ++i) p[i] = isFree[i] ? r[i] + beta * p[i] : 0.0f;
+        for (size_t i : freeNodes) p[i] = r[i] + beta * p[i];
         rr = rrNew;
     }
 
@@ -250,5 +295,21 @@ bool BlendSelfTest()
     float worstStep = 0;
     for (int x = 1; x < 60; ++x) worstStep = std::max(worstStep, std::fabs(r.heights[g.At(x, 30)] - r.heights[g.At(x - 1, 30)]));
     // A hard edge would step 10 at once; spread over ~10 nodes the steepest step should be far smaller.
-    return worstStep < 2.5f && AutoBlendWidth(g) >= 12.0f && kNodeYards > 4.0f;
+    if (worstStep >= 2.5f || AutoBlendWidth(g) < 12.0f || kNodeYards <= 4.0f) return false;
+
+    // The distance transform against brute force, on scattered targets of a ragged grid.
+    BlendGrid d;
+    d.width = 37;
+    d.height = 23;
+    std::vector<std::pair<int, int>> targets;
+    for (int k = 0; k < 9; ++k) targets.push_back({ (k * 17 + 3) % d.width, (k * 11 + 5) % d.height });
+    const std::vector<float> fast = DistanceTo(d, targets);
+    for (int y = 0; y < d.height; ++y)
+        for (int x = 0; x < d.width; ++x)
+        {
+            int best = 1 << 30;
+            for (const auto& [tx, ty] : targets) best = std::min(best, (tx - x) * (tx - x) + (ty - y) * (ty - y));
+            if (fast[d.At(x, y)] != std::sqrt(float(best))) return false;
+        }
+    return true;
 }

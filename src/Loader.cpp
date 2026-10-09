@@ -14,12 +14,15 @@ namespace
     }
 }
 
-void Loader::Start(const MpqChain* mpq)
+void Loader::Start(const MpqChain* mpq, unsigned threads)
 {
     Stop();
     m_mpq = mpq;
+    m_liquidTypes = {};
+    m_liquidTypes.Load(mpq->Read("DBFilesClient\\LiquidType.dbc").value_or(std::vector<uint8_t>{}));
     m_stop = false;
-    m_thread = std::thread([this] { Run(); });
+    if (!threads) threads = std::clamp(std::thread::hardware_concurrency() / 2, 1u, 4u);
+    for (unsigned i = 0; i < threads; ++i) m_threads.emplace_back([this] { Run(); });
 }
 
 void Loader::Stop()
@@ -29,13 +32,16 @@ void Loader::Stop()
         m_stop = true;
     }
     m_wake.notify_all();
-    if (m_thread.joinable()) m_thread.join();
+    m_finished.notify_all();
+    for (std::thread& t : m_threads) t.join();
+    m_threads.clear();
     std::lock_guard lock(m_lock);
     m_wanted.clear();
     m_wantedModels.clear();
     m_working.clear();
     m_ready.clear();
     m_seen.clear();
+    m_preparing.clear();
     m_images.clear();
     m_meshes.clear();
     m_map.clear();
@@ -105,28 +111,51 @@ std::optional<ModelMesh> Loader::TakeMesh(const std::string& lowerName)
     return mesh;
 }
 
+bool Loader::Claim(const std::string& key)
+{
+    std::unique_lock lock(m_lock);
+    if (m_seen.insert(key).second)
+    {
+        m_preparing.insert(key);
+        return true;
+    }
+    m_finished.wait(lock, [&] { return m_stop || !m_preparing.count(key); });
+    return false;
+}
+
+void Loader::Finish(const std::string& key)
+{
+    {
+        std::lock_guard lock(m_lock);
+        m_preparing.erase(key);
+    }
+    m_finished.notify_all();
+}
+
 void Loader::PrepareImage(const std::string& name)
 {
     const std::string key = Lower(name);
+    if (name.empty() || !Claim(key)) return;
+    std::optional<BlpImage> image;
+    if (auto bytes = m_mpq->Read(name)) image = ParseBlp(*bytes);
+    if (image)
     {
         std::lock_guard lock(m_lock);
-        if (name.empty() || !m_seen.insert(key).second) return;
+        m_images[key] = std::move(*image);
     }
-    if (auto bytes = m_mpq->Read(name))
-        if (auto image = ParseBlp(*bytes))
-        {
-            std::lock_guard lock(m_lock);
-            m_images[key] = std::move(*image);
-        }
+    Finish(key);
 }
 
 void Loader::PrepareModel(const std::string& name, bool wmo)
 {
     const std::string key = Lower(name);
+    if (!Claim("model:" + key)) return;
+    struct Done   // however this ends, a worker waiting for the model goes on
     {
-        std::lock_guard lock(m_lock);
-        if (!m_seen.insert("model:" + key).second) return;
-    }
+        Loader& l;
+        std::string key;
+        ~Done() { l.Finish(key); }
+    } done{ *this, "model:" + key };
     std::optional<ModelMesh> mesh;
     if (wmo)
     {
@@ -148,7 +177,7 @@ void Loader::PrepareModel(const std::string& name, bool wmo)
         if (!d.model.empty()) PrepareModel(M2Name(d.model), false);
     std::lock_guard lock(m_lock);
     m_meshes[key] = std::move(*mesh);
-}
+}   // `done` releases waiters after the mesh is in m_meshes
 
 void Loader::Run()
 {
@@ -184,6 +213,15 @@ void Loader::Run()
         if (tile.adt)
         {
             for (const std::string& t : tile.adt->textures) PrepareImage(t);
+            std::set<uint16_t> liquids;   // their animation frames, as Renderer::LiquidFrames loads them
+            for (const AdtLiquid& l : tile.adt->liquids)
+                if (liquids.insert(l.type).second)
+                    for (int i = 1; i <= 64; ++i)
+                    {
+                        const std::string name = LiquidFrameName(m_liquidTypes, l.type, i);
+                        if (name.empty() || !m_mpq->HasOwn(name)) break;
+                        PrepareImage(name);
+                    }
             for (const auto& d : tile.adt->doodads) PrepareModel(M2Name(d.model), false);
             for (const auto& w : tile.adt->wmos) PrepareModel(w.model, true);
         }

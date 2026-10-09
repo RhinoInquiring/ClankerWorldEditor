@@ -75,7 +75,19 @@ format code never touches the GPU; the `App*` files are the UI.
 | `src/AppWorldMap.cpp` | World map drawing |
 | `src/AppInspect.cpp` | Inspector |
 | `src/AppServer.cpp` | Server setup, Server panel, Problems |
-| `src/main.cpp` | Window and device, frame loop, the [command-line checks](checks.md) |
+| `src/main.cpp` | Window and device, frame loop |
+
+## Command-line checks
+
+| File | Contents |
+| --- | --- |
+| `src/Checks.*` | The [checks](checks.md)' table (`RunCheck`: the first argument picks one, exactly), helpers they share, every check's declaration |
+| `src/ChecksCore.cpp` | Tiles, structure, normals, streaming, the loader, timing |
+| `src/ChecksTerrain.cpp` | Copy and paste, water, sculpt, shading, impassable, texture swap, new maps, blueprints, roads |
+| `src/ChecksModels.cpp` | Models, skins, appearances, animation, catalog, assets, CASC to MPQ, rendering, map pictures, minimaps |
+| `src/ChecksVersions.cpp` | Ghosts, compare, differences, added tiles |
+| `src/ChecksSources.cpp` | Sources, scanning, MPQ packing, export, CDN, and the file tools (find, extract, where) |
+| `src/ChecksServer.cpp` | Server link, SQL, spawns, units, dialogue, NPCs, weather, areas, triggers, POIs, flights, server data, sound, lights |
 
 ## Adding a tool that moves things
 

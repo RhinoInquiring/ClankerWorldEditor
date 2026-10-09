@@ -179,6 +179,10 @@ private:
     std::vector<std::pair<uint32_t, uint32_t>> m_index;   // (id, row), sorted
 };
 
+/// Frame `frame` (from 1) of a liquid type's animated texture: LiquidType.dbc Texture[0] with its %d filled in, e.g.
+/// XTextures\river\lake_a.1.blp; empty when the type has none.
+std::string LiquidFrameName(const Dbc& liquidTypes, uint16_t type, int frame);
+
 /// Low-detail heights of a whole map from its .wdl: per tile (y * 64 + x) the 17 x 17 outer grid in yards
 /// (row along z, column along x, the tile's corner vertices included), empty where the map has no tile.
 std::vector<std::vector<int16_t>> ParseWdl(const std::vector<uint8_t>& wdl);

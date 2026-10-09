@@ -47,6 +47,9 @@ std::string CascBuildInfo(const std::filesystem::path& install, const std::strin
 /// True when the client loads archive `a` after archive `b` (file names, e.g. "patch-enUS-Z.MPQ"): `a`'s files win.
 bool LoadsAfter(const std::string& a, const std::string& b);
 
+/// A whole file from disk in one read; none when it cannot be opened.
+std::optional<std::vector<uint8_t>> ReadFileBytes(const std::filesystem::path& path);
+
 /// One layer of game files: a folder of MPQs (a client's Data folder: its archives in the client's load order, locale
 /// folders included), a single MPQ, or an unpacked folder laid out by game path (World\Maps\..., DBFilesClient\...).
 /// Casc: a modern client's CASC storage (path = the install folder holding .build.info, `product` = which of its
@@ -170,11 +173,14 @@ private:
         std::vector<std::string> listed;                                // unpacked folder: game paths as found
         bool installed = true;
         size_t layer = 0;                                               // index into the layers Open was given
+        mutable bool listLoaded = false;   // MPQ: its (listfile) read in, on the first List() (seconds for common.MPQ)
+        // StormLib and CascLib handles are not safe to share between threads: every call into this archive's handle
+        // takes its lock, so threads reading different archives (loader, ghosts, the window) do not wait on each other.
+        std::unique_ptr<std::mutex> lock = std::make_unique<std::mutex>();
     };
-    /// One CASC file by FileDataID: from disk, else the CDN. Caller holds m_lock.
+    /// One CASC file by FileDataID: from disk, else the CDN. Takes the archive's lock.
     std::optional<std::vector<uint8_t>> ReadCasc(const Archive& a, uint32_t id) const;
-    // StormLib handles are not safe to share between threads: every call into them takes this lock (the tile loader
-    // reads on its own thread). Open/Close must only run while no loader is reading.
+    // List() one at a time (it fills `listLoaded`). Open/Close must only run while no loader is reading.
     mutable std::mutex m_lock;
     bool m_mapsFromLowest = false;
     mutable std::mutex m_homeLock;

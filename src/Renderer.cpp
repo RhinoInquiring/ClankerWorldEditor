@@ -108,6 +108,17 @@ float4 PsMain(VsOut i) : SV_TARGET
     // ambient.w: game lighting on; fog: start, end (yards from the eye), on.
     struct FrameConstants { XMFLOAT4X4 viewProj; XMFLOAT4 lightDir; XMFLOAT4 params; XMFLOAT4 tint; XMFLOAT4 ambient; XMFLOAT4 diffuse; XMFLOAT4 fogColor; XMFLOAT4 fog; };
 
+    /// Replaces a dynamic buffer's contents with `data`.
+    template <class T> void Upload(ID3D11DeviceContext* context, ID3D11Buffer* buffer, const T& data)
+    {
+        D3D11_MAPPED_SUBRESOURCE mapped;
+        if (SUCCEEDED(context->Map(buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
+        {
+            memcpy(mapped.pData, &data, sizeof data);
+            context->Unmap(buffer, 0);
+        }
+    }
+
     /// The scene light's part of the frame constants (left zero, editor lighting, when it is off).
     void LightConstants(const SceneLight& light, FrameConstants& fc)
     {
@@ -650,12 +661,7 @@ void Renderer::BakeTile(TileGpu& tile, const DrawOptions& options)
     XMStoreFloat4x4(&fc.viewProj, XMMatrixTranspose(ortho));
     XMStoreFloat4(&fc.lightDir, XMVector3Normalize(XMVectorSet(-0.4f, -1.0f, -0.3f, 0)));
     fc.params = { options.textureRepeat, 0, 0, 0 };
-    D3D11_MAPPED_SUBRESOURCE mapped;
-    if (SUCCEEDED(m_context->Map(m_frameCb.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
-    {
-        memcpy(mapped.pData, &fc, sizeof fc);
-        m_context->Unmap(m_frameCb.Get(), 0);
-    }
+    Upload(m_context, m_frameCb.Get(), fc);
     const float clear[4] = { 0, 0, 0, 1 };
     m_context->ClearRenderTargetView(tile.bakedRtv.Get(), clear);
     m_context->ClearDepthStencilView(m_bakeDepth.Get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
@@ -702,12 +708,7 @@ void Renderer::Draw(FXMMATRIX viewProj, const DrawOptions& options)
         fc.params.y = tinted;
         fc.params.z = opacity;
         fc.tint = tint;
-        D3D11_MAPPED_SUBRESOURCE mapped;
-        if (SUCCEEDED(m_context->Map(m_frameCb.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
-        {
-            memcpy(mapped.pData, &fc, sizeof fc);
-            m_context->Unmap(m_frameCb.Get(), 0);
-        }
+        Upload(m_context, m_frameCb.Get(), fc);
     };
     upload(0);
 
@@ -845,12 +846,7 @@ void Renderer::DrawWater(FXMMATRIX viewProj, int solo)
     FrameConstants fc{};
     XMStoreFloat4x4(&fc.viewProj, XMMatrixTranspose(viewProj));
     fc.params = { kUnitSize * 2, 0, 0, 0 };   // the liquid texture repeats every two vertex steps (8.3 yd)
-    D3D11_MAPPED_SUBRESOURCE mapped;
-    if (SUCCEEDED(m_context->Map(m_frameCb.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
-    {
-        memcpy(mapped.pData, &fc, sizeof fc);
-        m_context->Unmap(m_frameCb.Get(), 0);
-    }
+    Upload(m_context, m_frameCb.Get(), fc);
     const UINT stride = sizeof(LineVertex), offset = 0;
     m_context->VSSetConstantBuffers(0, 1, m_frameCb.GetAddressOf());
     m_context->PSSetConstantBuffers(0, 1, m_frameCb.GetAddressOf());
@@ -941,12 +937,7 @@ void Renderer::DrawSky(FXMMATRIX viewProj)
     fc.ambient = { s[2].x, s[2].y, s[2].z, 0 };
     fc.diffuse = { s[3].x, s[3].y, s[3].z, 0 };
     fc.fog = { s[4].x, s[4].y, s[4].z, 0 };
-    D3D11_MAPPED_SUBRESOURCE mapped;
-    if (SUCCEEDED(m_context->Map(m_frameCb.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
-    {
-        memcpy(mapped.pData, &fc, sizeof fc);
-        m_context->Unmap(m_frameCb.Get(), 0);
-    }
+    Upload(m_context, m_frameCb.Get(), fc);
     m_context->VSSetConstantBuffers(0, 1, m_frameCb.GetAddressOf());
     m_context->PSSetConstantBuffers(0, 1, m_frameCb.GetAddressOf());
     m_context->OMSetBlendState(nullptr, nullptr, 0xffffffff);
@@ -965,12 +956,7 @@ void Renderer::DrawFar(FXMMATRIX viewProj)
     FrameConstants fc{};
     LightConstants(m_light, fc);
     XMStoreFloat4x4(&fc.viewProj, XMMatrixTranspose(viewProj));
-    D3D11_MAPPED_SUBRESOURCE mapped;
-    if (SUCCEEDED(m_context->Map(m_frameCb.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
-    {
-        memcpy(mapped.pData, &fc, sizeof fc);
-        m_context->Unmap(m_frameCb.Get(), 0);
-    }
+    Upload(m_context, m_frameCb.Get(), fc);
     const UINT stride = sizeof(LineVertex), offset = 0;
     m_context->VSSetConstantBuffers(0, 1, m_frameCb.GetAddressOf());
     m_context->PSSetConstantBuffers(0, 1, m_frameCb.GetAddressOf());
@@ -997,12 +983,7 @@ void Renderer::DrawOverlay(FXMMATRIX viewProj, const std::vector<LineVertex>& ov
     XMStoreFloat4x4(&fc.viewProj, XMMatrixTranspose(viewProj));
     fc.lightDir = { 0, -1, 0, 0 };
     fc.params = { 8, 0, 1, 0 };
-    D3D11_MAPPED_SUBRESOURCE mapped;
-    if (SUCCEEDED(m_context->Map(m_frameCb.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
-    {
-        memcpy(mapped.pData, &fc, sizeof fc);
-        m_context->Unmap(m_frameCb.Get(), 0);
-    }
+    Upload(m_context, m_frameCb.Get(), fc);
     m_context->VSSetConstantBuffers(0, 1, m_frameCb.GetAddressOf());
     m_context->PSSetConstantBuffers(0, 1, m_frameCb.GetAddressOf());
     if (!overlay.empty())
@@ -1055,12 +1036,7 @@ void Renderer::DrawSolids(FXMMATRIX viewProj, const std::vector<LineVertex>& tri
     if (triangles.empty()) return;
     FrameConstants fc{};
     XMStoreFloat4x4(&fc.viewProj, XMMatrixTranspose(viewProj));
-    D3D11_MAPPED_SUBRESOURCE mapped;
-    if (SUCCEEDED(m_context->Map(m_frameCb.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
-    {
-        memcpy(mapped.pData, &fc, sizeof fc);
-        m_context->Unmap(m_frameCb.Get(), 0);
-    }
+    Upload(m_context, m_frameCb.Get(), fc);
     if (triangles.size() > m_solidsCapacity)
     {
         m_solidsCapacity = UINT(std::max<size_t>(triangles.size() * 2, 4096));
@@ -1068,6 +1044,7 @@ void Renderer::DrawSolids(FXMMATRIX viewProj, const std::vector<LineVertex>& tri
         m_solids.Reset();
         m_device->CreateBuffer(&desc, nullptr, &m_solids);
     }
+    D3D11_MAPPED_SUBRESOURCE mapped;
     if (!m_solids || FAILED(m_context->Map(m_solids.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return;
     memcpy(mapped.pData, triangles.data(), triangles.size() * sizeof(LineVertex));
     m_context->Unmap(m_solids.Get(), 0);
@@ -1149,14 +1126,10 @@ const std::vector<ID3D11ShaderResourceView*>& Renderer::LiquidFrames(uint16_t ty
         m_liquidTypes.Load(mpq.Read("DBFilesClient\\LiquidType.dbc").value_or(std::vector<uint8_t>{}));
     }
     std::vector<ID3D11ShaderResourceView*>& frames = m_liquidFrames[type];
-    const auto row = m_liquidTypes.Find(type);
-    const std::string pattern = row ? m_liquidTypes.Str(*row, 15) : std::string();   // Texture[0], e.g. XTextures\river\lake_a.%d.blp
-    const size_t at = pattern.find("%d");
-    if (at == std::string::npos) return frames;
-    for (int i = 1; i <= 64; ++i)
+    for (int i = 1; i <= 64; ++i)   // the loader prepares the same frames (Loader::Run)
     {
-        const std::string name = pattern.substr(0, at) + std::to_string(i) + pattern.substr(at + 2);
-        if (!mpq.HasOwn(name)) break;
+        const std::string name = LiquidFrameName(m_liquidTypes, type, i);
+        if (name.empty() || !mpq.HasOwn(name)) break;
         frames.push_back(TextureFor(name, mpq));
     }
     return frames;

@@ -2768,8 +2768,7 @@ void TerrainAdapter::SetTile(const std::string& map, int x, int y, const std::st
     {
         std::optional<Adt> adt;
         if (present)
-            if (std::ifstream f(m_projectDir / "tiles" / stash, std::ios::binary); f)
-                adt = ParseAdt(std::vector<uint8_t>((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>()), m_bigAlpha);
+            if (auto bytes = ReadFileBytes(m_projectDir / "tiles" / stash)) adt = ParseAdt(*bytes, m_bigAlpha);
         if (const auto patched = WdlSetTile(*wdl, x, y, adt ? &*adt : nullptr); !patched.empty())
         {
             const fs::path wdlPath = m_mpq.OverlayPath(base + ".wdl");
@@ -3340,8 +3339,7 @@ size_t TerrainAdapter::Export(const fs::path& outDir, std::string& error, std::v
         for (const auto& [id, image] : minimaps)
         {
             const auto& [map, key] = id;
-            std::ifstream f(image, std::ios::binary);
-            const std::vector<uint8_t> blp((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+            const std::vector<uint8_t> blp = ReadFileBytes(image).value_or(std::vector<uint8_t>{});
             if (blp.empty()) continue;
             const std::string file = "wwe_" + map + "_" + std::to_string(key % 64) + "_" + std::to_string(key / 64) + ".blp";
             if (!writeFile(outDir / "textures" / "Minimap" / file, blp)) return written;

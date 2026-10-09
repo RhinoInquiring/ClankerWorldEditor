@@ -1853,6 +1853,14 @@ std::string Dbc::Str(uint32_t row, uint32_t field) const
     return CString(m_data, 20 + size_t(m_records) * m_recordSize, m_stringSize, U32(row, field));
 }
 
+std::string LiquidFrameName(const Dbc& liquidTypes, uint16_t type, int frame)
+{
+    const auto row = liquidTypes.Find(type);
+    const std::string pattern = row ? liquidTypes.Str(*row, 15) : std::string();   // Texture[0]
+    const size_t at = pattern.find("%d");
+    return at == std::string::npos ? std::string() : pattern.substr(0, at) + std::to_string(frame) + pattern.substr(at + 2);
+}
+
 std::optional<uint32_t> Dbc::Find(uint32_t id) const
 {
     auto it = std::lower_bound(m_index.begin(), m_index.end(), std::pair<uint32_t, uint32_t>{ id, 0 });

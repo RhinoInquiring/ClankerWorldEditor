@@ -144,8 +144,7 @@ AssetReport CopyMissingAssets(const MpqChain& mpq, const std::vector<fs::path>& 
             std::error_code ec;
             if (const fs::path done = outDir / fs::path(rel); fs::is_regular_file(done, ec))
             {
-                std::ifstream f(done, std::ios::binary);
-                queue.push_back({ name, std::vector<uint8_t>((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>()) });
+                queue.push_back({ name, ReadFileBytes(done).value_or(std::vector<uint8_t>{}) });
                 return;
             }
         }
@@ -179,8 +178,7 @@ AssetReport CopyMissingAssets(const MpqChain& mpq, const std::vector<fs::path>& 
 
     for (const fs::path& adt : adtFiles)
     {
-        std::ifstream f(adt, std::ios::binary);
-        const std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        const std::vector<uint8_t> bytes = ReadFileBytes(adt).value_or(std::vector<uint8_t>{});
         for (const std::string& r : AssetReferences(mpq, adt.filename().string(), bytes)) visit(r);
     }
     while (!queue.empty())

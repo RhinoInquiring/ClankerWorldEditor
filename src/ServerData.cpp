@@ -22,12 +22,7 @@ namespace
         return s;
     }
 
-    std::optional<std::vector<uint8_t>> ReadFile(const fs::path& p)
-    {
-        std::ifstream f(p, std::ios::binary);
-        if (!f) return std::nullopt;
-        return std::vector<uint8_t>((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-    }
+    std::optional<std::vector<uint8_t>> ReadFile(const fs::path& p) { return ReadFileBytes(p); }
 
     /// The model names a WMO root's doodads use (MODN: zero-terminated strings).
     std::vector<std::string> WmoDoodadNames(const std::vector<uint8_t>& root)

@@ -15,7 +15,7 @@
 
 class MpqChain;
 
-/// Prepares streamed tiles on a worker thread: reads and parses the ADT, decodes its terrain textures and builds
+/// Prepares streamed tiles on worker threads: reads and parses the ADT, decodes its terrain textures and builds
 /// the meshes (and decodes the textures) of the models standing on it. The UI thread then only uploads to the GPU,
 /// so flying over the map does not stall a frame per tile. The renderers take prepared images and meshes by name.
 class Loader
@@ -34,8 +34,9 @@ public:
     Loader& operator=(const Loader&) = delete;
     ~Loader() { Stop(); }
 
-    void Start(const MpqChain* mpq);
-    /// Stops the worker and drops everything prepared; call before the MPQs close.
+    /// `threads`: workers; 0 picks half the cores, 1 to 4 (the window, ghosts and differences keep the rest).
+    void Start(const MpqChain* mpq, unsigned threads = 0);
+    /// Stops the workers and drops everything prepared; call before the MPQs close.
     void Stop();
 
     /// The tiles of `map` to prepare, most wanted first; replaces the previous list. Tiles ready or in work stay.
@@ -55,11 +56,18 @@ private:
     void Run();
     void PrepareImage(const std::string& name);
     void PrepareModel(const std::string& name, bool wmo);
+    /// True when this thread should prepare `key` now; false when it was prepared before. One another worker is still
+    /// preparing is waited for, so a tile is only ready once all it needs is (no deadlock: a worker waits only while
+    /// it holds a WMO or an M2, and only on an M2 or an image, which never wait on a WMO).
+    bool Claim(const std::string& key);
+    void Finish(const std::string& key);
 
     const MpqChain* m_mpq = nullptr;
-    std::thread m_thread;
+    Dbc m_liquidTypes;   // read in Start: which textures a tile's water animates through
+    std::vector<std::thread> m_threads;
     std::mutex m_lock;
     std::condition_variable m_wake;
+    std::condition_variable m_finished;   // an asset of m_preparing is done
     bool m_stop = false;
 
     std::string m_map;
@@ -69,6 +77,7 @@ private:
     std::set<int> m_working;                 // keys being prepared or ready (not wanted again until taken)
     std::vector<Tile> m_ready;
     std::set<std::string> m_seen;            // asset names already prepared once (the renderers cache them)
+    std::set<std::string> m_preparing;       // of m_seen: still being prepared by a worker
     std::map<std::string, BlpImage> m_images;
     std::map<std::string, ModelMesh> m_meshes;
     std::atomic<size_t> m_pending{ 0 };

@@ -48,6 +48,13 @@ target_include_directories(imgui PUBLIC ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/
 
 add_executable(wow-world-editor WIN32
     src/main.cpp
+    src/Checks.cpp
+    src/ChecksCore.cpp
+    src/ChecksModels.cpp
+    src/ChecksServer.cpp
+    src/ChecksSources.cpp
+    src/ChecksTerrain.cpp
+    src/ChecksVersions.cpp
     src/App.cpp
     src/AppPopulate.cpp
     src/AppCompare.cpp

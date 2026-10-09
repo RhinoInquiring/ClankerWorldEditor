@@ -17,7 +17,8 @@ Direct3D device. Checks that write files use a temporary folder and remove it.
 | `--ground-effects <Data> <adt files...>` | Every ground effect the tiles use exists in the client |
 | `--rewrite-check <Data> <map> <x> <y>` | Rewrites a tile's layers, re-parses and validates it |
 | `--normals-check <Data> <map> <x> <y>` | Recomputed normals against Blizzard's |
-| `--stream-check <Data> <map> <x> <y> [other client]` | Frame times while flying across tiles with background loading |
+| `--loader-check <Data> <map> <x> <y> [tiles] [yd/s]` | Flies across tiles through the background loader with one worker, then with the editor's count: time to load a jump's 5 x 5 tiles, frame times, same tiles and objects |
+| `--stream-check <project> <map> <x> <y> [tiles] [nofallback]` | Opens the project like the window, walks `tiles` tiles east: time per step and read counters |
 
 ## Terrain and objects
 
