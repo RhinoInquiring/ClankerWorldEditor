@@ -390,6 +390,7 @@ bool App::Init(HWND hwnd, ID3D11Device* device, ID3D11DeviceContext* context, bo
         { "Check for problems", "", [this] { RunChecks(); }, hasProject },
         { "Window: NPC viewer", "", [this] { m_showNpc = true; m_npc.focus = true; }, always },
         { "Window: Sources", "", [this] { m_showSources = true; }, hasProject },
+        { "Window: Races", "", [this] { m_showRaces = true; }, hasProject },
         { "Window: Keyboard shortcuts", "Ctrl+/", [this] { m_showShortcuts = true; }, always },
         { "View: toggle far terrain", "", [this] { m_drawOptions.farTerrain = !m_drawOptions.farTerrain; }, always },
         { "View: toggle terrain level of detail", "", [this] { m_drawOptions.lod = !m_drawOptions.lod; }, always },
@@ -548,6 +549,7 @@ void App::CloseProject()
     m_terrain.Unload();
     m_models.Clear();
     m_objSel.clear();
+    m_races = RacesView{};   // its sources' chains are about to close
     m_catalog.Clear();
     m_catalogKey.clear();
     m_catalogItems.clear();
@@ -2729,6 +2731,7 @@ void App::Frame(float dt)
         ImGui::SetNextWindowDockID(inspector->DockId, ImGuiCond_FirstUseEver);
     DrawVersions();
     DrawSources();
+    DrawRaces();
     UpdateNpc();
     DrawNpcViewer();
     DrawShortcuts();
@@ -2905,6 +2908,7 @@ void App::DrawMenuBar()
         ImGui::Separator();
         ImGui::MenuItem("Sources", nullptr, &m_showSources);
         ImGui::MenuItem("NPC viewer", nullptr, &m_showNpc);
+        ImGui::MenuItem("Races", nullptr, &m_showRaces);
         if (ImGui::MenuItem("Reset panel layout")) m_buildLayout = true;
         ImGui::EndMenu();
     }

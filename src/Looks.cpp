@@ -142,6 +142,15 @@ void DisplayLooks::Load()
     load(m_animations, "AnimationData.dbc");
     load(m_factionTemplates, "FactionTemplate.dbc");
     load(m_factions, "Faction.dbc");
+    // A 1.12 client (another client's races, Races window): CharSections keeps variation and colour before the
+    // textures, ChrRaces' name sits later, and CharacterFacialHairStyles' geosets follow three unused columns. The other
+    // columns the looks read are where 3.3.5 has them.
+    const bool classic = m_races.Fields() == 29;
+    m_csVariation = classic ? 4 : CS::Variation;
+    m_csColor = classic ? 5 : CS::Color;
+    m_csTexture = classic ? 6 : CS::Texture;
+    m_crName = classic ? 17 : CR::Name;
+    m_cfhsGeoset = classic ? 6 : CFHS::Geoset;
 }
 
 std::string DisplayLooks::FactionName(uint32_t factionTemplate)
@@ -251,7 +260,7 @@ std::vector<DisplayLooks::Race> DisplayLooks::Races()
     Load();
     std::vector<Race> out;
     for (uint32_t r = 0; r < m_races.Rows(); ++r)
-        out.push_back({ m_races.U32(r, 0), m_races.Str(r, CR::Name) });
+        out.push_back({ m_races.U32(r, 0), m_races.Str(r, m_crName) });
     return out;
 }
 
@@ -276,7 +285,7 @@ DisplayLooks::Choices DisplayLooks::CharacterChoices(uint32_t race, uint32_t sex
     for (uint32_t r = 0; r < m_sections.Rows(); ++r)
     {
         if (m_sections.U32(r, CS::Race) != race || m_sections.U32(r, CS::Sex) != sex) continue;
-        const uint32_t section = m_sections.U32(r, CS::Section), variation = m_sections.U32(r, CS::Variation), color = m_sections.U32(r, CS::Color);
+        const uint32_t section = m_sections.U32(r, CS::Section), variation = m_sections.U32(r, m_csVariation), color = m_sections.U32(r, m_csColor);
         if (section == 0 && variation == 0) add(c.skins, color);
         else if (section == 1 && color == skin) add(c.faces, variation);
         else if (section == 3 && variation == hairStyle) add(c.hairColors, color);
@@ -366,15 +375,41 @@ std::string DisplayLooks::Section(uint32_t race, uint32_t sex, uint32_t section,
 {
     for (uint32_t r = 0; r < m_sections.Rows(); ++r)
         if (m_sections.U32(r, CS::Race) == race && m_sections.U32(r, CS::Sex) == sex && m_sections.U32(r, CS::Section) == section &&
-            m_sections.U32(r, CS::Variation) == variation && m_sections.U32(r, CS::Color) == color)
-            return m_sections.Str(r, CS::Texture + which);
+            m_sections.U32(r, m_csVariation) == variation && m_sections.U32(r, m_csColor) == color)
+            return m_sections.Str(r, m_csTexture + which);
     return {};
+}
+
+std::optional<DisplayLooks::SpawnModel> DisplayLooks::CharacterLook(uint32_t race, uint32_t sex, uint32_t skin, uint32_t face, uint32_t hairStyle,
+                                                                   uint32_t hairColor, uint32_t facial)
+{
+    const auto d = Display(RaceDisplay(race, sex));
+    const auto model = d ? m_modelData.Find(d->model) : std::nullopt;
+    if (!model) return std::nullopt;
+    SpawnModel m;
+    m.look.model = m_modelData.Str(*model, CMD::ModelName);
+    if (m.look.model.empty()) return std::nullopt;
+    m.scale = d->scale > 0.01f && d->scale < 100.0f ? d->scale : 1;
+    ExtraRow e;
+    e.race = race;
+    e.sex = sex;
+    e.skin = skin;
+    e.face = face;
+    e.hairStyle = hairStyle;
+    e.hairColor = hairColor;
+    e.facial = facial;
+    Humanoid(e, m);
+    return m;
 }
 
 void DisplayLooks::Humanoid(uint32_t extraId, SpawnModel& m)
 {
-    const auto x = Extra(extraId);
-    if (!x) return;
+    if (const auto x = Extra(extraId)) Humanoid(*x, m);
+}
+
+void DisplayLooks::Humanoid(const ExtraRow& row, SpawnModel& m)
+{
+    const ExtraRow* x = &row;
     const uint32_t race = x->race, sex = x->sex, skin = x->skin, hairStyle = x->hairStyle, hairColor = x->hairColor, facial = x->facial;
     uint32_t items[11];
     std::copy(std::begin(x->items), std::end(x->items), items);
@@ -397,9 +432,9 @@ void DisplayLooks::Humanoid(uint32_t extraId, SpawnModel& m)
         if (m_facial.U32(r, CFHS::Race) == race && m_facial.U32(r, CFHS::Sex) == sex && m_facial.U32(r, CFHS::Variation) == facial)
         {
             // Geoset[0..2] are groups 1, 3 and 2.
-            group[1] = m_facial.U32(r, CFHS::Geoset);
-            group[3] = m_facial.U32(r, CFHS::Geoset + 1);
-            group[2] = m_facial.U32(r, CFHS::Geoset + 2);
+            group[1] = m_facial.U32(r, m_cfhsGeoset);
+            group[3] = m_facial.U32(r, m_cfhsGeoset + 1);
+            group[2] = m_facial.U32(r, m_cfhsGeoset + 2);
         }
     auto geosetGroup = [&](Slot slot, uint32_t n) -> uint32_t {
         const auto row = items[slot] ? m_items.Find(items[slot]) : std::nullopt;

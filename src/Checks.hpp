@@ -29,6 +29,7 @@
 #include "Lights.hpp"
 #include "Sounds.hpp"
 #include "Roads.hpp"
+#include "Races.hpp"
 #include "ServerData.hpp"
 #include <imgui.h>
 #include <d3d11.h>
@@ -90,6 +91,8 @@ namespace checks
     int GhostCheck();
     int StreamCheck();
     int MinimapCheck();
+    int RaceCheck();
+    int RaceLookCheck();
     int LoaderCheck();
     int RenderCheck();
     int PoisCheck();

@@ -1848,6 +1848,18 @@ float Dbc::F32(uint32_t row, uint32_t field) const
     return f;
 }
 
+uint8_t Dbc::U8At(uint32_t row, uint32_t offset) const
+{
+    return row < m_records && offset < m_recordSize ? m_data[20 + size_t(row) * m_recordSize + offset] : 0;
+}
+
+uint32_t Dbc::U32At(uint32_t row, uint32_t offset) const
+{
+    uint32_t v = 0;
+    if (row < m_records && offset + 4 <= m_recordSize) ReadAt(m_data, 20 + size_t(row) * m_recordSize + offset, v);
+    return v;
+}
+
 std::string Dbc::Str(uint32_t row, uint32_t field) const
 {
     return CString(m_data, 20 + size_t(m_records) * m_recordSize, m_stringSize, U32(row, field));

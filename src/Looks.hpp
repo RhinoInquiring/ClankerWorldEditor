@@ -70,6 +70,10 @@ public:
     /// the hair style), from CharSections, CharHairGeosets and CharacterFacialHairStyles.
     struct Choices { std::vector<uint32_t> skins, faces, hairStyles, hairColors, facialHair; };
     Choices CharacterChoices(uint32_t race, uint32_t sex, uint32_t skin, uint32_t hairStyle);
+    /// A naked character of a race and sex wearing the given choices (CharSections variations / colours, CharHairGeosets
+    /// and CharacterFacialHairStyles variations), as the character creator shows it; null when the race has no model.
+    std::optional<SpawnModel> CharacterLook(uint32_t race, uint32_t sex, uint32_t skin, uint32_t face, uint32_t hairStyle, uint32_t hairColor,
+                                            uint32_t facial);
 
 private:
     void Load();
@@ -81,6 +85,7 @@ private:
     std::optional<ExtraRow> Extra(uint32_t id);
     /// Fills a humanoid's textures, geosets and armour models from CreatureDisplayInfoExtra.
     void Humanoid(uint32_t extraId, SpawnModel& out);
+    void Humanoid(const ExtraRow& row, SpawnModel& out);
     /// The body texture of a humanoid with no baked texture: skin, face, facial hair, scalp, underwear and armour
     /// drawn into their regions, as the client composites it. Returns the cached texture's name (empty: no skin).
     std::string Composite(const ExtraRow& e);
@@ -94,6 +99,7 @@ private:
     std::function<void(const std::string&, const BlpImage&)> m_upload;
     std::set<std::string> m_composed;   // composite names already uploaded
     bool m_loaded = false;
+    uint32_t m_csVariation = 8, m_csColor = 9, m_csTexture = 4, m_crName = 14, m_cfhsGeoset = 3;   // columns of this client's layout
     Dbc m_displayInfo, m_modelData, m_goDisplay, m_extra, m_sections, m_hair, m_facial, m_items, m_races, m_helmVis, m_animations, m_factionTemplates, m_factions;
 };
 

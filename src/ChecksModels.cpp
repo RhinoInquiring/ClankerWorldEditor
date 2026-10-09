@@ -1074,4 +1074,228 @@ namespace checks
         }
         return bad ? 1 : 0;
     }
+
+    /// `--race-check <data dir> [other data dir...]`: every race of each client, read in its own layout (1.12 or 3.3.5):
+    /// identity, classes, the choices per sex, and the textures its CharSections name that the client does not have (stock
+    /// 3.3.5 has some too; the client skips them). Fails when a client's races cannot be read, or a race characters can be
+    /// (CharBaseInfo) has no character model for a sex, or one its client lacks.
+    int RaceCheck()
+    {
+        if (__argc < 3 || !__wargv) return 2;
+        setvbuf(stdout, nullptr, _IONBF, 0);
+        int problems = 0;
+        for (int i = 2; i < __argc; ++i)
+        {
+            const std::string dir = std::filesystem::path(__wargv[i]).string();
+            MpqChain mpq;
+            mpq.Open(dir);
+            RaceCatalog races;
+            std::string error;
+            if (!races.Load(mpq, error)) { printf("%s: %s\n", dir.c_str(), error.c_str()); ++problems; continue; }
+            printf("%s: %s layout, %zu races, %zu CharSections, %zu hair styles, %zu facial hair, %zu race/class pairs, %zu outfits\n",
+                   dir.c_str(), RaceCatalog::LayoutName(races.Format()), races.Races().size(), races.Sections().size(), races.HairGeosets().size(),
+                   races.FacialHairStyles().size(), races.BaseInfo().size(), races.Outfits().size());
+            for (const RaceCatalog::Race& r : races.Races())
+            {
+                const RaceCatalog::Counts m = races.Count(r.id, 0), f = races.Count(r.id, 1);
+                std::string modelProblem;
+                for (uint32_t sex = 0; sex < 2; ++sex)
+                {
+                    const std::string model = races.Model(r.id, sex);
+                    if (model.empty()) modelProblem += sex ? " no female model" : " no male model";
+                    else if (!mpq.HasOwn(model)) modelProblem += " missing " + model;
+                }
+                size_t missing = 0;
+                for (const std::string& file : races.Files(r.id))
+                    if (!mpq.HasOwn(file)) ++missing;
+                std::string classes;
+                for (uint32_t c : races.Classes(r.id)) classes += (classes.empty() ? "" : ",") + std::to_string(c);
+                const bool playable = !classes.empty();
+                printf("  %3u %-22s %-18s %-3s %s  M %zu/%zu/%zu/%zu/%zu  F %zu/%zu/%zu/%zu/%zu  classes %s%s%s%s\n", r.id, r.name.c_str(),
+                       r.fileString.c_str(), r.prefix.c_str(), r.alliance < 0 ? "?" : r.alliance ? "H" : "A", m.skins, m.faces, m.hairStyles,
+                       m.hairColors, m.facialHair, f.skins, f.faces, f.hairStyles, f.hairColors, f.facialHair, classes.empty() ? "-" : classes.c_str(),
+                       missing ? (", " + std::to_string(missing) + " texture(s) missing").c_str() : "", modelProblem.empty() ? "" : " |",
+                       modelProblem.c_str());
+                if (playable && !modelProblem.empty()) ++problems;
+            }
+        }
+        printf("%d problem(s)\n", problems);
+        return problems ? 1 : 0;
+    }
+
+    /// `--race-look <data dir> <race> <sex> <out.png>`: a race's character as the Races window previews it (DisplayLooks::
+    /// CharacterLook with the first of each choice): its model must load, every texture it wears must be readable, and the
+    /// composited body skin is saved to the PNG, and the head drawn from four sides (software device) to <out>.model.png.
+    /// With `all` after the PNG, every skin colour of the race and sex is tried.
+    int RaceLookCheck()
+    {
+        if (__argc < 6 || !__wargv) return 2;
+        setvbuf(stdout, nullptr, _IONBF, 0);
+        auto arg = [](int i) { return std::filesystem::path(__wargv[i]).string(); };
+        MpqChain mpq;
+        mpq.Open(arg(2));
+        const uint32_t race = uint32_t(_wtoi(__wargv[3])), sex = uint32_t(_wtoi(__wargv[4]));
+        const bool all = __argc > 6 && arg(6) == "all";
+        std::map<std::string, BlpImage> composed;
+        DisplayLooks looks(mpq);
+        looks.SetUpload([&](const std::string& name, const BlpImage& image) { composed[name] = image; });
+        DisplayLooks::Choices c = looks.CharacterChoices(race, sex, 0, 0);
+        if (c.skins.empty()) { printf("race %u sex %u has no skin colours\n", race, sex); return 1; }
+        int problems = 0;
+        std::optional<BlpImage> first;
+        std::optional<DisplayLooks::SpawnModel> firstLook;
+        for (size_t k = 0; k < (all ? c.skins.size() : 1); ++k)
+        {
+            const uint32_t skin = c.skins[k];
+            const DisplayLooks::Choices cs = looks.CharacterChoices(race, sex, skin, c.hairStyles.empty() ? 0 : c.hairStyles.front());
+            auto pick = [](const std::vector<uint32_t>& list) { return list.empty() ? 0u : list.front(); };
+            const auto look = looks.CharacterLook(race, sex, skin, pick(cs.faces), pick(cs.hairStyles), pick(cs.hairColors), pick(cs.facialHair));
+            if (!look) { printf("race %u sex %u: no character model\n", race, sex); return 1; }
+            const auto mesh = LoadM2(M2Name(look->look.model), [&](const std::string& p) { return mpq.Read(p); });
+            if (!mesh) { printf("model %s does not load\n", look->look.model.c_str()); ++problems; }
+            size_t unreadable = 0;
+            for (const auto& [type, name] : look->look.textures)
+                if (!composed.count(name) && !mpq.HasOwn(name)) { printf("  skin %u: texture type %u %s is not in the client\n", skin, type, name.c_str()); ++unreadable; }
+            const auto body = look->look.textures.find(1);
+            const auto image = body == look->look.textures.end() ? composed.end() : composed.find(body->second);
+            if (image == composed.end()) { printf("  skin %u: no composited body\n", skin); ++problems; }
+            else if (!first) { first = image->second; firstLook = look; }
+            printf("%s skin %u: %s, %zu batches, %zu texture(s) (%zu not in the client), %zu geosets\n", unreadable || !mesh ? "FAIL" : "ok  ", skin,
+                   look->look.model.c_str(), mesh ? mesh->batches.size() : 0, look->look.textures.size(), unreadable, look->look.geosets.size());
+            problems += int(unreadable);
+        }
+        if (first)
+        {
+            std::vector<uint8_t> bgra = first->mips[0];
+            for (size_t i = 0; i + 3 < bgra.size(); i += 4)
+            {
+                std::swap(bgra[i], bgra[i + 2]);
+                bgra[i + 3] = 255;
+            }
+            CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+            if (!SavePng(__wargv[5], first->width, first->height, std::move(bgra))) { printf("cannot write %s\n", arg(5).c_str()); ++problems; }
+        }
+        if (firstLook)
+        {
+            // The head from four sides, as the window's preview draws it (DrawParts), on a software device.
+            ComPtr<ID3D11Device> device;
+            ComPtr<ID3D11DeviceContext> context;
+            if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &device, nullptr, &context))) return 1;
+            Renderer renderer;
+            ModelRenderer models;
+            std::string error;
+            if (!renderer.Init(device.Get(), context.Get(), error) || !models.Init(device.Get(), context.Get(), renderer, error)) { printf("%s\n", error.c_str()); return 1; }
+            for (const auto& [name, image] : composed) renderer.CacheTexture(name, image);
+            const auto info = models.Info(firstLook->look.model, mpq);
+            if (!info) { printf("model does not draw\n"); return 1; }
+            std::string has, shown;
+            for (uint16_t g : info->geosets) has += " " + std::to_string(g);
+            for (uint16_t g : firstLook->look.geosets) shown += " " + std::to_string(g);
+            printf("submeshes in the model:%s\nsubmeshes shown:%s\n", has.c_str(), shown.c_str());
+            for (const auto& [type, name] : firstLook->look.textures) printf("texture type %u: %s\n", type, name.c_str());
+            if (const auto mesh = LoadM2(M2Name(firstLook->look.model), [&](const std::string& p) { return mpq.Read(p); }))
+                for (const auto& b : mesh->batches)
+                    if (b.geoset < 100)
+                        printf("  batch: submesh %u, texture type %u%s%s, blend %d, weight %d, colour %d, %u indices, opacity %.2f\n", b.geoset,
+                               b.textureType, b.texture.empty() ? "" : " ", b.texture.c_str(), int(b.blend), b.weight, b.color, b.indexCount,
+                               info->skeleton ? BatchAlpha(*info->skeleton, b.weight, b.color, 0) : 1.0f);
+            if (info->skeleton && !info->skeleton->weights.empty())
+            {
+                const auto& w = info->skeleton->weights[0];
+                printf("transparency track 0: global sequence %d, %zu key(s)", w.globalSequence, w.values.size());
+                for (size_t i = 0; i < w.values.size() && i < 8; ++i) printf(" %u:%.2f", w.times[i], w.values[i]);
+                printf("; sequences %zu, duration %u\n", info->skeleton->sequences.size(), info->skeleton->duration);
+            }
+            if (const auto& body = composed.find(firstLook->look.textures[1]); body != composed.end())
+            {
+                size_t transparent = 0;
+                const auto& px = body->second.mips[0];
+                for (size_t i = 3; i < px.size(); i += 4) transparent += px[i] < 128;
+                printf("composited body: %ux%u, %.0f%% of its texels alpha < 128\n", body->second.width, body->second.height,
+                       100.0 * double(transparent) / double(std::max<size_t>(1, px.size() / 4)));
+            }
+            constexpr UINT kSide = 256;
+            D3D11_TEXTURE2D_DESC d{};
+            d.Width = d.Height = kSide;
+            d.MipLevels = d.ArraySize = 1;
+            d.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+            d.SampleDesc.Count = 1;
+            d.BindFlags = D3D11_BIND_RENDER_TARGET;
+            ComPtr<ID3D11Texture2D> color, depth, staging;
+            ComPtr<ID3D11RenderTargetView> rtv;
+            ComPtr<ID3D11DepthStencilView> dsv;
+            device->CreateTexture2D(&d, nullptr, &color);
+            device->CreateRenderTargetView(color.Get(), nullptr, &rtv);
+            d.Usage = D3D11_USAGE_STAGING;
+            d.BindFlags = 0;
+            d.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+            device->CreateTexture2D(&d, nullptr, &staging);
+            d.Usage = D3D11_USAGE_DEFAULT;
+            d.CPUAccessFlags = 0;
+            d.Format = DXGI_FORMAT_D32_FLOAT;
+            d.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+            device->CreateTexture2D(&d, nullptr, &depth);
+            device->CreateDepthStencilView(depth.Get(), nullptr, &dsv);
+            // Framed on the body's own vertices (submesh 0): some models' header box is far larger than the character.
+            XMFLOAT3 lo = info->boundsMin, hi = info->boundsMax;
+            if (const auto mesh = LoadM2(M2Name(firstLook->look.model), [&](const std::string& p) { return mpq.Read(p); }))
+            {
+                XMFLOAT3 a{ 1e9f, 1e9f, 1e9f }, b{ -1e9f, -1e9f, -1e9f };
+                for (const auto& batch : mesh->batches)
+                    if (batch.geoset == 0)
+                        for (uint32_t i = batch.indexStart; i < batch.indexStart + batch.indexCount && i < mesh->indices.size(); ++i)
+                        {
+                            const XMFLOAT3& p = mesh->vertices[mesh->indices[i]].pos;
+                            a = { std::min(a.x, p.x), std::min(a.y, p.y), std::min(a.z, p.z) };
+                            b = { std::max(b.x, p.x), std::max(b.y, p.y), std::max(b.z, p.z) };
+                        }
+                if (a.x < b.x) { printf("body vertices: y %.2f .. %.2f (model box y %.2f .. %.2f)\n", a.y, b.y, lo.y, hi.y); lo = a; hi = b; }
+            }
+            const float height = hi.y - lo.y;
+            const XMVECTOR head = XMVectorSet((lo.x + hi.x) * 0.5f, lo.y + height * 0.86f, (lo.z + hi.z) * 0.5f, 0);
+            // Posed standing, as the window shows it.
+            std::shared_ptr<const ModelSkeleton> pose;
+            if (const auto& skel = info->skeleton)
+                for (size_t i = 0; i < skel->sequences.size(); ++i)
+                    if (skel->sequences[i].id == 0)
+                    {
+                        pose = LoadSkeleton(M2Name(firstLook->look.model), [&](const std::string& p) { return mpq.Read(p); }, int(i));
+                        break;
+                    }
+            std::vector<ModelRenderer::Part> parts{ { firstLook->look, {}, pose.get(), 0 } };
+            XMStoreFloat4x4(&parts[0].world, XMMatrixIdentity());
+            std::vector<uint8_t> strip(size_t(kSide) * 4 * kSide * 4, 0);
+            for (UINT view = 0; view < 4; ++view)
+            {
+                const float yaw = XM_PIDIV2 * float(view);
+                const XMVECTOR eye = XMVectorAdd(head, XMVectorScale(XMVectorSet(std::cos(yaw), 0.1f, std::sin(yaw), 0), height * 0.4f));
+                const XMMATRIX viewProj = XMMatrixLookAtRH(eye, head, XMVectorSet(0, 1, 0, 0)) *
+                                          XMMatrixPerspectiveFovRH(XMConvertToRadians(40.0f), 1.0f, height * 0.01f, height * 10.0f);
+                const float bg[4] = { 0.16f, 0.17f, 0.20f, 1 };
+                const D3D11_VIEWPORT vp{ 0, 0, float(kSide), float(kSide), 0, 1 };
+                context->OMSetRenderTargets(1, rtv.GetAddressOf(), dsv.Get());
+                context->RSSetViewports(1, &vp);
+                context->ClearRenderTargetView(rtv.Get(), bg);
+                context->ClearDepthStencilView(dsv.Get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
+                models.DrawParts(parts, viewProj, mpq);
+                context->CopyResource(staging.Get(), color.Get());
+                D3D11_MAPPED_SUBRESOURCE m{};
+                if (SUCCEEDED(context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &m)))
+                {
+                    for (UINT y = 0; y < kSide; ++y)
+                        for (UINT x = 0; x < kSide; ++x)
+                        {
+                            const uint8_t* p = static_cast<const uint8_t*>(m.pData) + y * m.RowPitch + x * 4;
+                            uint8_t* q = strip.data() + (size_t(y) * kSide * 4 + view * kSide + x) * 4;
+                            q[0] = p[2]; q[1] = p[1]; q[2] = p[0]; q[3] = 255;
+                        }
+                    context->Unmap(staging.Get(), 0);
+                }
+            }
+            CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+            if (!SavePng(std::wstring(__wargv[5]) + L".model.png", kSide * 4, kSide, std::move(strip))) ++problems;
+        }
+        printf("%d problem(s)\n", problems);
+        return problems ? 1 : 0;
+    }
 }

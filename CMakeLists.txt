@@ -69,6 +69,7 @@ add_executable(wow-world-editor WIN32
     src/AppDialogue.cpp
     src/AppPaths.cpp
     src/AppPois.cpp
+    src/AppRaces.cpp
     src/AppServer.cpp
     src/AppSources.cpp
     src/AppWorldMap.cpp
@@ -102,6 +103,7 @@ add_executable(wow-world-editor WIN32
     src/Tables.cpp
     src/Paths.cpp
     src/Pois.cpp
+    src/Races.cpp
     src/Terrain.cpp
     src/Triggers.cpp)
 target_compile_definitions(wow-world-editor PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN CASCLIB_NO_AUTO_LINK_LIBRARY)

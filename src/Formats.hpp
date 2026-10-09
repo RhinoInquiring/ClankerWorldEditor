@@ -169,6 +169,10 @@ public:
     uint32_t U32(uint32_t row, uint32_t field) const;
     float F32(uint32_t row, uint32_t field) const;
     std::string Str(uint32_t row, uint32_t field) const;
+    /// Packed tables (CharBaseInfo, CharStartOutfit): a byte, or 32 bits, at a byte offset into the record.
+    uint8_t U8At(uint32_t row, uint32_t offset) const;
+    uint32_t U32At(uint32_t row, uint32_t offset) const;
+    uint32_t RecordSize() const { return m_recordSize; }
     /// Row index of an id, if present.
     std::optional<uint32_t> Find(uint32_t id) const;
     uint32_t Fields() const { return m_fields; }

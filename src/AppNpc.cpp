@@ -193,13 +193,7 @@ void App::SetNpcDisplay(uint32_t displayId, float scale)
     }
     if (v.autoCamera)
     {
-        const float s = v.look->scale;
-        const XMFLOAT3 &lo = v.info->boundsMin, &hi = v.info->boundsMax;
-        v.center[0] = (lo.x + hi.x) * 0.5f * s;
-        v.center[1] = (lo.y + hi.y) * 0.5f * s;
-        v.center[2] = (lo.z + hi.z) * 0.5f * s;
-        const float dx = hi.x - lo.x, dy = hi.y - lo.y, dz = hi.z - lo.z;
-        v.distance = std::max(0.5f * std::sqrt(dx * dx + dy * dy + dz * dz) * s * 2.6f, 0.5f);
+        v.scene.Frame(v.info->boundsMin, v.info->boundsMax, v.look->scale);
     }
 }
 
@@ -211,9 +205,18 @@ void App::SetNpcSequence(int sequence)
     v.pose = v.look ? LoadSkeleton(M2Name(v.look->look.model), [this](const std::string& path) { return m_mpq.Read(path); }, sequence) : nullptr;
 }
 
-void App::DrawNpcPreview(const ImVec2& size)
+void App::ScenePreview::Frame(const XMFLOAT3& lo, const XMFLOAT3& hi, float scale)
 {
-    NpcView& v = m_npc;
+    center[0] = (lo.x + hi.x) * 0.5f * scale;
+    center[1] = (lo.y + hi.y) * 0.5f * scale;
+    center[2] = (lo.z + hi.z) * 0.5f * scale;
+    const float dx = hi.x - lo.x, dy = hi.y - lo.y, dz = hi.z - lo.z;
+    distance = std::max(0.5f * std::sqrt(dx * dx + dy * dy + dz * dz) * scale * 2.6f, 0.5f);
+}
+
+void App::DrawScene(ScenePreview& v, const ImVec2& size, ModelRenderer& models, const MpqChain& mpq, const std::vector<ModelRenderer::Part>& parts,
+                    const char* empty)
+{
     const UINT w = UINT(std::max(size.x, 8.0f)), h = UINT(std::max(size.y, 8.0f));
     if (w != v.width || h != v.height || !v.rtv)
     {
@@ -245,6 +248,62 @@ void App::DrawNpcPreview(const ImVec2& size)
     if (!v.rtv || !v.dsv) return;
 
     const ImGuiIO& io = ImGui::GetIO();
+    const XMVECTOR center = XMVectorSet(v.center[0], v.center[1], v.center[2], 0);
+    const XMVECTOR eye = XMVectorAdd(center, XMVectorScale(XMVectorSet(std::cos(v.pitch) * std::cos(v.yaw), std::sin(v.pitch),
+                                                                       std::cos(v.pitch) * std::sin(v.yaw), 0), v.distance));
+    const XMMATRIX view = XMMatrixLookAtRH(eye, center, XMVectorSet(0, 1, 0, 0));
+    const XMMATRIX viewProj = view * XMMatrixPerspectiveFovRH(XMConvertToRadians(40.0f), float(w) / float(h), v.distance * 0.01f, v.distance * 50.0f);
+
+    Microsoft::WRL::ComPtr<ID3D11RenderTargetView> oldRtv;
+    Microsoft::WRL::ComPtr<ID3D11DepthStencilView> oldDsv;
+    m_context->OMGetRenderTargets(1, &oldRtv, &oldDsv);
+    UINT viewports = 1;
+    D3D11_VIEWPORT oldVp{};
+    m_context->RSGetViewports(&viewports, &oldVp);
+    const float bg[4] = { v.background[0], v.background[1], v.background[2], 1 };
+    const D3D11_VIEWPORT vp{ 0, 0, float(w), float(h), 0, 1 };
+    m_context->OMSetRenderTargets(1, v.rtv.GetAddressOf(), v.dsv.Get());
+    m_context->RSSetViewports(1, &vp);
+    m_context->ClearRenderTargetView(v.rtv.Get(), bg);
+    m_context->ClearDepthStencilView(v.dsv.Get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
+    models.DrawParts(parts, viewProj, mpq);
+    m_context->OMSetRenderTargets(1, oldRtv.GetAddressOf(), oldDsv.Get());
+    if (viewports) m_context->RSSetViewports(1, &oldVp);
+
+    // Shown without blending, like the main viewport: the alpha channel holds texture masks, not coverage.
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddCallback([](const ImDrawList*, const ImDrawCmd* cmd) {
+        static_cast<ID3D11DeviceContext*>(cmd->UserCallbackData)->OMSetBlendState(nullptr, nullptr, 0xffffffff);
+    }, m_context);
+    dl->AddImage(ImTextureID(intptr_t(v.srv.Get())), origin, { origin.x + size.x, origin.y + size.y });
+    dl->AddCallback(ImDrawCallback_ResetRenderState, nullptr);
+
+    // Orbit camera: left drag turns, right drag pans, the wheel zooms.
+    ImGui::InvisibleButton("##scene", size, ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight);
+    if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 0))
+    {
+        v.yaw += io.MouseDelta.x * 0.01f;
+        v.pitch = std::clamp(v.pitch + io.MouseDelta.y * 0.01f, -1.5f, 1.5f);
+    }
+    if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Right, 0))
+    {
+        XMFLOAT3 right, up;
+        XMStoreFloat3(&right, XMVector3Normalize(XMVector3Cross(XMVectorSubtract(center, eye), XMVectorSet(0, 1, 0, 0))));
+        XMStoreFloat3(&up, XMVector3Normalize(XMVector3Cross(XMLoadFloat3(&right), XMVectorSubtract(center, eye))));
+        const float k = v.distance * 0.0015f;
+        v.center[0] -= (right.x * io.MouseDelta.x - up.x * io.MouseDelta.y) * k;
+        v.center[1] -= (right.y * io.MouseDelta.x - up.y * io.MouseDelta.y) * k;
+        v.center[2] -= (right.z * io.MouseDelta.x - up.z * io.MouseDelta.y) * k;
+    }
+    if (ImGui::IsItemHovered() && io.MouseWheel != 0) v.distance = std::clamp(v.distance * std::pow(0.88f, io.MouseWheel), 0.2f, 2000.0f);
+    if (parts.empty() && empty) dl->AddText({ origin.x + 12, origin.y + 10 }, IM_COL32(200, 200, 200, 255), empty);
+}
+
+void App::DrawNpcPreview(const ImVec2& size)
+{
+    NpcView& v = m_npc;
+    const ImGuiIO& io = ImGui::GetIO();
     if (v.pose && v.pose->duration && !v.paused) v.timeMs = std::fmod(v.timeMs + io.DeltaTime * 1000.0f * v.speed, float(v.pose->duration));
 
     // The scene: the body posed by the chosen animation, its items on the posed attachment points.
@@ -273,58 +332,7 @@ void App::DrawNpcPreview(const ImVec2& size)
                     parts.push_back(std::move(p));
                 }
     }
-    const XMVECTOR center = XMVectorSet(v.center[0], v.center[1], v.center[2], 0);
-    const XMVECTOR eye = XMVectorAdd(center, XMVectorScale(XMVectorSet(std::cos(v.pitch) * std::cos(v.yaw), std::sin(v.pitch),
-                                                                       std::cos(v.pitch) * std::sin(v.yaw), 0), v.distance));
-    const XMMATRIX view = XMMatrixLookAtRH(eye, center, XMVectorSet(0, 1, 0, 0));
-    const XMMATRIX viewProj = view * XMMatrixPerspectiveFovRH(XMConvertToRadians(40.0f), float(w) / float(h), v.distance * 0.01f, v.distance * 50.0f);
-
-    Microsoft::WRL::ComPtr<ID3D11RenderTargetView> oldRtv;
-    Microsoft::WRL::ComPtr<ID3D11DepthStencilView> oldDsv;
-    m_context->OMGetRenderTargets(1, &oldRtv, &oldDsv);
-    UINT viewports = 1;
-    D3D11_VIEWPORT oldVp{};
-    m_context->RSGetViewports(&viewports, &oldVp);
-    const float bg[4] = { v.background[0], v.background[1], v.background[2], 1 };
-    const D3D11_VIEWPORT vp{ 0, 0, float(w), float(h), 0, 1 };
-    m_context->OMSetRenderTargets(1, v.rtv.GetAddressOf(), v.dsv.Get());
-    m_context->RSSetViewports(1, &vp);
-    m_context->ClearRenderTargetView(v.rtv.Get(), bg);
-    m_context->ClearDepthStencilView(v.dsv.Get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
-    m_models.DrawParts(parts, viewProj, m_mpq);
-    m_context->OMSetRenderTargets(1, oldRtv.GetAddressOf(), oldDsv.Get());
-    if (viewports) m_context->RSSetViewports(1, &oldVp);
-
-    // Shown without blending, like the main viewport: the alpha channel holds texture masks, not coverage.
-    const ImVec2 origin = ImGui::GetCursorScreenPos();
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-    dl->AddCallback([](const ImDrawList*, const ImDrawCmd* cmd) {
-        static_cast<ID3D11DeviceContext*>(cmd->UserCallbackData)->OMSetBlendState(nullptr, nullptr, 0xffffffff);
-    }, m_context);
-    dl->AddImage(ImTextureID(intptr_t(v.srv.Get())), origin, { origin.x + size.x, origin.y + size.y });
-    dl->AddCallback(ImDrawCallback_ResetRenderState, nullptr);
-
-    // Orbit camera: left drag turns, right drag pans, the wheel zooms.
-    ImGui::InvisibleButton("##npcscene", size, ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight);
-    if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 0))
-    {
-        v.yaw += io.MouseDelta.x * 0.01f;
-        v.pitch = std::clamp(v.pitch + io.MouseDelta.y * 0.01f, -1.5f, 1.5f);
-    }
-    if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Right, 0))
-    {
-        XMFLOAT3 right, up;
-        XMStoreFloat3(&right, XMVector3Normalize(XMVector3Cross(XMVectorSubtract(center, eye), XMVectorSet(0, 1, 0, 0))));
-        XMStoreFloat3(&up, XMVector3Normalize(XMVector3Cross(XMLoadFloat3(&right), XMVectorSubtract(center, eye))));
-        const float k = v.distance * 0.0015f;
-        v.center[0] -= (right.x * io.MouseDelta.x - up.x * io.MouseDelta.y) * k;
-        v.center[1] -= (right.y * io.MouseDelta.x - up.y * io.MouseDelta.y) * k;
-        v.center[2] -= (right.z * io.MouseDelta.x - up.z * io.MouseDelta.y) * k;
-    }
-    if (ImGui::IsItemHovered() && io.MouseWheel != 0) v.distance = std::clamp(v.distance * std::pow(0.88f, io.MouseWheel), 0.2f, 2000.0f);
-    if (!v.look)
-        dl->AddText({ origin.x + 12, origin.y + 10 }, IM_COL32(200, 200, 200, 255),
-                    v.entry ? "This template has no model the client can show." : "Pick a creature on the left.");
+    DrawScene(v.scene, size, m_models, m_mpq, parts, v.entry ? "This template has no model the client can show." : "Pick a creature on the left.");
 }
 
 void App::DrawNpcViewer()
@@ -520,7 +528,7 @@ void App::DrawNpcViewTab()
             SetNpcDisplay(v.displayId, v.displayScale);
             v.autoCamera = keep;
         }
-        ImGui::ColorEdit3("Background", v.background, ImGuiColorEditFlags_NoInputs);
+        ImGui::ColorEdit3("Background", v.scene.background, ImGuiColorEditFlags_NoInputs);
         ImGui::TextColored(kQuiet, "Left drag turns, right drag pans, wheel zooms.");
     }
     if (ImGui::CollapsingHeader("Models", ImGuiTreeNodeFlags_DefaultOpen))

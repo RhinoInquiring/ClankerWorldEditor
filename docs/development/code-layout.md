@@ -45,6 +45,7 @@ format code never touches the GPU; the `App*` files are the UI.
 | --- | --- |
 | `src/Renderer.*` | Terrain (blended layers, LOD, far terrain), water, overlay lines, solids, textures |
 | `src/ModelRenderer.*` | M2 and WMO instances, picking, thumbnails, attachments |
+| `src/Races.*` | A client's races and their looks (ChrRaces, CharSections, CharHairGeosets, CharacterFacialHairStyles, CharBaseInfo, CharStartOutfit) read in its own layout, 1.12 or 3.3.5 |
 | `src/Looks.*` | Display ids to models: creature skins, humanoid NPCs with equipment (skins composited when unbaked), gameobjects; character customisation choices |
 | `src/Minimap.*` | Top-down orthographic render (minimaps, world maps, thumbnails) and the minimap look |
 | `src/Loader.*` | Background preparation of tiles, textures and meshes |
@@ -65,6 +66,7 @@ format code never touches the GPU; the `App*` files are the UI.
 | `src/AppSources.cpp` | Sources window |
 | `src/AppPopulate.cpp` | Creatures and Gameobjects tools, unit catalog |
 | `src/AppDialogue.cpp` | NPC viewer Dialogue tab: gossip menus, texts, options, conditions, barks |
+| `src/AppRaces.cpp` | Races window: every source's races, details, look preview |
 | `src/AppNpc.cpp` | NPC viewer: template list, posed preview, animations, skins, equipment, geosets, textures |
 | `src/AppPaths.cpp` | Path editing |
 | `src/AppZones.cpp` | Zones tool, buildings' room names |

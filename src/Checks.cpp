@@ -120,8 +120,11 @@ int RunCheck()
         { L"--rewrite-check", 0, checks::RewriteCheck },
         { L"--selftest", 0, [] {
              return FormatsSelfTest() && ChangesSelfTest() && TerrainSelfTest() && BlendSelfTest() && CatalogSelfTest() && BlueprintSelfTest() &&
-                    DownportSelfTest() && TriggersSelfTest() && TransformSelfTest() && RoadSelfTest() ? 0 : 1;
+                    DownportSelfTest() && TriggersSelfTest() && TransformSelfTest() && RoadSelfTest() &&
+                    RacesSelfTest() ? 0 : 1;
          } },
+        { L"--race-check", 3, checks::RaceCheck },
+        { L"--race-look", 6, checks::RaceLookCheck },
         { L"--check", 0, checks::Check },
     };
     if (__argc < 2 || !__wargv) return -1;

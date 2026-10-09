@@ -23,6 +23,7 @@
 #include "Sounds.hpp"
 #include "ServerData.hpp"
 #include "Pois.hpp"
+#include "Races.hpp"
 #include "Triggers.hpp"
 
 #include <d3d11.h>
@@ -736,6 +737,24 @@ private:
     /// The template list of a kind, read from the world database on first use (empty without one).
     const std::vector<SpawnAdapter::Template>& UnitTemplates(SpawnKind kind);
 
+    /// A model scene drawn into a texture of its own and turned with an orbit camera (NPC viewer, Races window).
+    struct ScenePreview
+    {
+        float yaw = 0.6f, pitch = 0.25f, distance = 6, center[3] = {};
+        float background[3] = { 0.16f, 0.17f, 0.20f };
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> color, depth;
+        Microsoft::WRL::ComPtr<ID3D11RenderTargetView> rtv;
+        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
+        Microsoft::WRL::ComPtr<ID3D11DepthStencilView> dsv;
+        UINT width = 0, height = 0;
+        /// Points the camera at a model's box, `scale` times its size.
+        void Frame(const DirectX::XMFLOAT3& lo, const DirectX::XMFLOAT3& hi, float scale);
+    };
+    /// Draws `parts` (from `models`, files from `mpq`) into `scene` at `size`, shown at the cursor: left drag turns, right
+    /// drag pans, the wheel zooms. `empty` is written over it when `parts` is empty.
+    void DrawScene(ScenePreview& scene, const ImVec2& size, ModelRenderer& models, const MpqChain& mpq, const std::vector<ModelRenderer::Part>& parts,
+                   const char* empty);
+
     // NPC viewer (AppNpc.cpp): one creature template in a preview of its own, after wow.export's Creatures tab:
     // animations, skins, equipment, geosets, textures.
     struct NpcView
@@ -758,9 +777,8 @@ private:
         std::shared_ptr<const ModelSkeleton> pose;
         float timeMs = 0, speed = 1;
         bool paused = false, autoCamera = true;
-        float yaw = 0.6f, pitch = 0.25f, distance = 6, center[3] = {};
-        float background[3] = { 0.16f, 0.17f, 0.20f };
-        bool humanoid = false;                           // a CreatureDisplayInfoExtra display (character model)
+        ScenePreview scene;
+        bool humanoid = false;                          // a CreatureDisplayInfoExtra display (character model)
         bool focus = false;                              // bring the window forward next frame
         std::string filter, listedFor = "\x01";          // template list filter; the filter `listed` was built for
         std::vector<size_t> listed;                      // indices into UnitTemplates(Creature) passing the filter
@@ -798,13 +816,35 @@ private:
             std::vector<nlohmann::json> barks;
             bool barksLoaded = false;
         } dialogue;
-        Microsoft::WRL::ComPtr<ID3D11Texture2D> color, depth;
-        Microsoft::WRL::ComPtr<ID3D11RenderTargetView> rtv;
-        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
-        Microsoft::WRL::ComPtr<ID3D11DepthStencilView> dsv;
-        UINT width = 0, height = 0;
     } m_npc;
     bool m_showNpc = false;
+
+    // Races window (AppRaces.cpp): the races of every source (the project's client and the compare sources), what
+    // they are and what their characters can look like, with a preview.
+    struct RacesView
+    {
+        struct Source { std::string name; const MpqChain* mpq = nullptr; bool read = false; RaceCatalog races; std::string error; };
+        std::vector<Source> sources;                     // as m_ghosts.Sources(), each read when first shown
+        size_t source = 0;
+        uint32_t race = 0, sex = 0;                      // selected race (0 none)
+        uint32_t skin = 0, face = 0, hairStyle = 0, hairColor = 0, facial = 0;
+        std::string filter;
+        size_t missingTextures = 0;                      // of the selected race, in its own client
+        // The preview has renderers of its own: a source's files never mix with another's of the same name.
+        const MpqChain* previewMpq = nullptr;
+        std::unique_ptr<Renderer> renderer;
+        std::unique_ptr<ModelRenderer> models;
+        std::unique_ptr<DisplayLooks> looks;
+        std::optional<DisplayLooks::SpawnModel> look;
+        std::shared_ptr<const ModelSkeleton> pose;
+        float timeMs = 0;
+        bool stale = true;                               // the look needs building again
+        ScenePreview scene;
+    } m_races;
+    bool m_showRaces = false;
+    void DrawRaces();
+    /// Builds the preview's look of the selected race and choices (and its renderers, for another source).
+    void RefreshRacePreview(bool frame);
     void DrawNpcViewer();
     /// Makes a creature template the one the NPC tabs edit (reads its rows); `show` also opens the viewer window.
     void OpenNpc(uint32_t entry, bool show = true);
