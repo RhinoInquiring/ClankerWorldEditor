@@ -28,8 +28,8 @@ public:
     void Revert(const Change& change) override { Set(change, false); }
     const std::string& Name() const { return m_name; }
 
-    /// Drops the client's rows (another client opened); read again on next use.
-    void Reset() { m_read = false; m_client.clear(); m_bytes.clear(); ++m_version; }
+    /// Drops the client's rows and the project's (project closed); the client's are read again on next use.
+    void Reset() { m_read = false; m_client.clear(); m_bytes.clear(); m_project.clear(); ++m_version; }
 
     /// The current row (the project's if it touched the id, else the client's); null when there is none.
     const nlohmann::json& Row(uint32_t id) const;

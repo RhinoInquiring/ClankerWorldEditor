@@ -1271,6 +1271,10 @@ namespace checks
         check(areas.Count() == 0 && !areas.Find(id) && areas.Find(87)->name == "Goldshire", "undo restores the client's rows");
         check(areas.Export({ out / "client", out / "server" }, out / "dbc", error) && !std::filesystem::exists(out / "client" / "AreaTable.dbc"),
               "export with no rows removes the old files");
+        areas.Commit(id, row, "add again");
+        store.Clear();   // what CloseProject does
+        areas.Reset();
+        check(areas.Count() == 0 && !areas.Find(id) && areas.Find(87)->name == "Goldshire", "close drops the project's rows");
 
         // WMOAreaTable: the WMOs of Northshire (Azeroth 32_48); Blizzard's own rows must name groups the files have.
         printf("-- WMOAreaTable\n");

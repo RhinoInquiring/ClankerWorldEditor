@@ -82,6 +82,8 @@ public:
     /// Shows `road` in place of its saved version (nullptr: back to the saved one).
     void Preview(const Road* road);
     bool Previewing() const { return m_preview.has_value(); }
+    /// Forgets every road (project closed).
+    void Clear() { m_roads.clear(); m_preview.reset(); ++m_version; }
 
     /// Chunk cells (grid x, z: map-wide, kChunkSize apart) of a map whose look changed: only where the road's line or
     /// settings differ, so moving one point of a long road redraws the stretch around it.

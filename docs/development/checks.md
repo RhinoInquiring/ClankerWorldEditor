@@ -77,7 +77,7 @@ Direct3D device. Checks that write files use a temporary folder and remove it.
 | `--server-check <server folder> [soap account] [password]` | Reads worldserver.conf, queries the database, runs `server info` |
 | `--spawn-check <server folder>` | Spawn and path adapters: place, move, group edits, undo, export, id ranges (leaves the database as it was) |
 | `--unit-catalog-check <server folder> <Data>` | Every creature and gameobject template and its model |
-| `--area-check <Data>` | AreaTable, WMOAreaTable and world map adapters on the real DBCs |
+| `--area-check <Data>` | AreaTable, WMOAreaTable and world map adapters on the real DBCs; closing a project drops its rows |
 | `--triggers-check <Data>` | AreaTrigger.dbc and Map.dbc adapters on the real DBCs: layout, shapes, export changes only the edited fields |
 | `--poi-check <Data> [<AC server dir>]` | AreaPOI.dbc adapter on the real DBC (row stats, export changes only the edited fields); with a server, game_tele and points_of_interest rows written, read back, undone |
 | `--poi-read <Data> <map folder>` | The landmarks a client of any build (1.x, 2.x, 3.3.5) has on a map, as copies from that version pick them up |

@@ -574,6 +574,7 @@ void App::CloseProject()
     m_versions.clear();
     m_versionsKey.clear();
     m_store.Clear();
+    m_roads.Clear();
     m_loader.Stop();   // before the archives it reads from close
     m_renderer.ClearFar();
     m_mpq.SetOverlay({});
