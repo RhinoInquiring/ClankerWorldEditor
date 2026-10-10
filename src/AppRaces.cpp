@@ -509,14 +509,20 @@ void App::DrawRaces()
         {
             std::string error;
             auto parts = ImportRaceChanges(src.races, src.name, r->id, v.importTarget, v.project, m_raceRows, m_displayRows, m_modelRows, *m_project, error,
-                                           v.import);
+                                           v.import, src.mpq, &m_mpq);
             if (parts.empty()) Log("Import %s: %s", Plain(r->name).c_str(), error.c_str());
             else
             {
-                const size_t rows = parts.front().data["after"]["CharSections"].size();
+                const nlohmann::json& after = parts.front().data["after"];
+                const size_t rows = after["CharSections"].size(), files = after.value("files", nlohmann::json::array()).size();
+                size_t renamed = 0;
+                for (const nlohmann::json& f : after.value("files", nlohmann::json::array()))
+                    renamed += f.value("path", std::string()) != f.value("from", std::string());
+                const size_t missing = after.value("missingFiles", size_t(0));
                 commit(std::move(parts), "import race " + Plain(r->name));
-                Log("Imported %s from %s as race %u (%zu CharSections rows). Its models and textures go into the patch on export.",
-                    Plain(r->name).c_str(), src.name.c_str(), v.importTarget, rows);
+                Log("Imported %s from %s as race %u: %zu CharSections rows, %zu file(s) for the patch (%zu renamed: the client has other files of "
+                    "those names)%s.", Plain(r->name).c_str(), src.name.c_str(), v.importTarget, rows, files, renamed,
+                    missing ? (", " + std::to_string(missing) + " named but not in " + src.name).c_str() : "");
                 const uint32_t imported = v.importTarget;
                 v.source = 0;
                 v.importTarget = 0;
@@ -562,7 +568,19 @@ void App::DrawRaceEditor(const RaceCatalog::Race& race)
     };
     ImGui::SeparatorText("Edit");
     const nlohmann::json from = p.value("source", nlohmann::json::object());
-    if (!from.empty()) ImGui::TextColored(kQuiet, "Imported from %s, race %u there.", from.value("client", std::string("?")).c_str(), from.value("race", 0u));
+    if (!from.empty())
+    {
+        ImGui::TextColored(kQuiet, "Imported from %s, race %u there.", from.value("client", std::string("?")).c_str(), from.value("race", 0u));
+        if (!p.contains("files"))
+            ImGui::TextColored(kWarn, "Imported before its files were listed: remove it and import it again so export brings its models and textures.");
+        else
+        {
+            size_t renamed = 0;
+            for (const nlohmann::json& f : p["files"]) renamed += f.value("path", std::string()) != f.value("from", std::string());
+            ImGui::TextColored(kQuiet, "Export copies %zu file(s) from %s into the patch, %zu of them renamed (Character\\Race%u\\...) because the "
+                               "client has other files of those names.", p["files"].size(), from.value("client", std::string("?")).c_str(), renamed, race.id);
+        }
+    }
     else if (!package) ImGui::TextColored(kQuiet, "The client's race: applying an edit makes it the project's.");
     else ImGui::TextColored(kQuiet, "The client's race, changed by the project.");
     ImGui::BeginDisabled(!v.editDirty);

@@ -1,5 +1,6 @@
 #include "Races.hpp"
 
+#include "Assets.hpp"
 #include "Models.hpp"
 #include "Mpq.hpp"
 #include "Project.hpp"
@@ -7,6 +8,8 @@
 #include <algorithm>
 #include <cctype>
 #include <cstring>
+#include <fstream>
+#include <tuple>
 
 namespace
 {
@@ -469,6 +472,18 @@ void RaceCatalog::Apply(uint32_t race, const nlohmann::json& package)
     for (const nlohmann::json& j : ChangeStore::List(package, "CharStartOutfit")) m_outfits.push_back(OutfitFrom(j));
 }
 
+std::vector<nlohmann::json> RaceCatalog::TableRows(const std::string& table) const
+{
+    std::vector<nlohmann::json> out;
+    if (table == "ChrRaces") for (const Race& r : m_races) out.push_back(r.row);
+    if (table == "CharSections") for (const Section& s : m_sections) out.push_back(SectionJson(s));
+    if (table == "CharHairGeosets") for (const HairGeoset& h : m_hair) out.push_back(HairJson(h));
+    if (table == "CharacterFacialHairStyles") for (const FacialHair& f : m_facial) out.push_back(FacialJson(f));
+    if (table == "CharBaseInfo") for (const auto& [r, c] : m_baseInfo) out.push_back({ { "RaceID", r }, { "ClassID", c } });
+    if (table == "CharStartOutfit") for (const Outfit& o : m_outfits) out.push_back(OutfitJson(o));
+    return out;
+}
+
 std::set<uint32_t> RaceCatalog::Ids(const std::string& table) const
 {
     std::set<uint32_t> out;
@@ -503,7 +518,8 @@ void RaceAdapter::Set(const Change& change, bool after)
 
 std::vector<Change> ImportRaceChanges(const RaceCatalog& source, const std::string& sourceName, uint32_t sourceRace, uint32_t target,
                                       const RaceCatalog& project, const RaceAdapter& races, const DbcTable& displays, const DbcTable& models,
-                                      const Project& ranges, std::string& error, const RaceImportOptions& options)
+                                      const Project& ranges, std::string& error, const RaceImportOptions& options,
+                                      const MpqChain* sourceFiles, const MpqChain* projectFiles)
 {
     nlohmann::json p = source.Package(sourceRace);
     if (!p.is_object()) { error = "the source has no race " + std::to_string(sourceRace); return {}; }
@@ -538,6 +554,83 @@ std::vector<Change> ImportRaceChanges(const RaceCatalog& source, const std::stri
     for (nlohmann::json& row : p["CharStartOutfit"])
         if (!(row["ID"] = next("CharStartOutfit", "charstartoutfit.id", [&](uint32_t id) { return outfitIds.count(id) != 0; })).get<uint32_t>()) return {};
 
+    // The race's files: what export copies from the source, and what is renamed because the project's client has a file
+    // of that name with other bytes (the client's own must stay what they are: its NPCs use them).
+    nlohmann::json files = nlohmann::json::array();
+    std::map<std::string, std::string> modelRename;   // lower-case model name (as its row gives it) -> its name in the project
+    size_t missing = 0;
+    if (sourceFiles && projectFiles)
+    {
+        const std::string tag = "Character\\Race" + std::to_string(target) + "\\";
+        auto renameOf = [&](const std::string& f) { return tag + (Lower(f).rfind("character\\", 0) == 0 ? f.substr(10) : f); };
+        enum class State { Same, Copy, Clash, Missing };
+        auto state = [&](const std::string& f) {
+            if (!sourceFiles->HasOwn(f)) return State::Missing;
+            if (!projectFiles->HasOwn(f)) return State::Copy;
+            const auto a = sourceFiles->Read(f), b = projectFiles->Read(f);
+            if (!a || !b || *a != *b) return State::Clash;
+            return projectFiles->HasInstalled(f) ? State::Same : State::Copy;
+        };
+        std::set<std::string> listed;   // lower-case targets
+        auto add = [&](const std::string& path, const std::string& from, const nlohmann::json& textures = nlohmann::json()) {
+            if (!listed.insert(Lower(path)).second) return;
+            nlohmann::json e = { { "path", path }, { "from", from } };
+            if (textures.is_object() && !textures.empty()) e["textures"] = textures;
+            files.push_back(std::move(e));
+        };
+        // Each model with its skins, .anim files and fixed textures: renamed as one when any of them clashes.
+        for (const char* key : { "MaleDisplayID", "FemaleDisplayID" })
+        {
+            const nlohmann::json display = source.DisplayRow(p["ChrRaces"].value(key, 0u));
+            const nlohmann::json model = display.is_object() ? source.ModelRow(display.value("ModelID", 0u)) : nlohmann::json();
+            const std::string modelName = model.is_object() ? S(model, "ModelName") : std::string();
+            const std::string m2 = M2Name(modelName);
+            if (m2.empty() || modelRename.count(Lower(modelName))) continue;
+            const auto bytes = sourceFiles->Read(m2);
+            if (!bytes) { ++missing; continue; }
+            std::vector<std::string> group{ m2 }, textures;
+            for (const std::string& ref : AssetReferences(*sourceFiles, m2, *bytes))
+                (Lower(ref).ends_with(".blp") ? textures : group).push_back(ref);
+            std::vector<State> groupStates;
+            bool clash = false;
+            for (const std::string& f : group) { groupStates.push_back(state(f)); clash = clash || groupStates.back() == State::Clash; }
+            nlohmann::json textureRenames = nlohmann::json::object();
+            for (const std::string& t : textures)
+            {
+                const State s = state(t);
+                if (s == State::Clash) { textureRenames[t] = renameOf(t); add(renameOf(t), t); }
+                else if (s == State::Copy) add(t, t);
+                else if (s == State::Missing) ++missing;
+            }
+            clash = clash || !textureRenames.empty();
+            for (size_t i = 0; i < group.size(); ++i)
+            {
+                if (groupStates[i] == State::Missing) { missing += i == 0; continue; }   // a model has up to 4 skins: only the model counts
+                if (clash) add(renameOf(group[i]), group[i], i == 0 ? textureRenames : nlohmann::json());
+                else if (groupStates[i] == State::Copy) add(group[i], group[i]);
+            }
+            modelRename[Lower(modelName)] = clash ? renameOf(modelName) : modelName;
+        }
+        // CharSections textures: a clashing one is renamed in every row naming it.
+        std::map<std::string, std::string> textureName;   // lower-case -> name in the project
+        for (nlohmann::json& row : p["CharSections"])
+            for (int i = 0; i < 3; ++i)
+            {
+                const std::string column = "TextureName[" + std::to_string(i) + "]", t = S(row, column);
+                if (t.empty()) continue;
+                auto it = textureName.find(Lower(t));
+                if (it == textureName.end())
+                {
+                    const State s = state(t);
+                    const std::string name = s == State::Clash ? renameOf(t) : t;
+                    if (s == State::Clash || s == State::Copy) add(name, t);
+                    else if (s == State::Missing) ++missing;
+                    it = textureName.emplace(Lower(t), name).first;
+                }
+                row[column] = it->second;
+            }
+    }
+
     // The two character displays, each with its model: a model the project's client lists keeps its row.
     std::vector<Change> rows;
     nlohmann::json added = { { "CreatureDisplayInfo", nlohmann::json::array() }, { "CreatureModelData", nlohmann::json::array() } };
@@ -549,8 +642,9 @@ std::vector<Change> ImportRaceChanges(const RaceCatalog& source, const std::stri
         if (auto done = displayFor.find(from); done != displayFor.end()) { p["ChrRaces"][key] = done->second; continue; }
         nlohmann::json display = source.DisplayRow(from);
         if (!display.is_object()) { error = "the source has no CreatureDisplayInfo row " + std::to_string(from) + " for its race"; return {}; }
-        const nlohmann::json model = source.ModelRow(display.value("ModelID", 0u));
+        nlohmann::json model = source.ModelRow(display.value("ModelID", 0u));
         if (!model.is_object()) { error = "the source has no CreatureModelData row for display " + std::to_string(from); return {}; }
+        if (auto r = modelRename.find(Lower(S(model, "ModelName"))); r != modelRename.end()) model["ModelName"] = r->second;   // renamed: a row of its own
         uint32_t modelId = project.ModelId(model.value("ModelName", ""));
         if (!modelId)
             for (const auto& [id, row] : models.Rows())   // one the project added already (another race of the same source)
@@ -586,9 +680,107 @@ std::vector<Change> ImportRaceChanges(const RaceCatalog& source, const std::stri
     }
     p["source"] = { { "client", sourceName }, { "race", sourceRace } };
     p["added"] = added;
+    if (sourceFiles && projectFiles)
+    {
+        p["files"] = files;
+        p["missingFiles"] = missing;
+    }
     std::vector<Change> out{ races.MakeChange(target, p, "import race") };
     out.insert(out.end(), rows.begin(), rows.end());
     return out;
+}
+
+std::vector<uint8_t> RenameM2Textures(std::vector<uint8_t> m2, const std::map<std::string, std::string>& names)
+{
+    std::map<std::string, std::string> lower;
+    for (const auto& [from, to] : names) lower[Lower(from)] = to;
+    uint32_t count = 0, offset = 0;   // MD20 header: textures M2Array at 0x50, 16-byte entries {type, flags, name length, name offset}
+    if (m2.size() < 0x58) return m2;
+    std::memcpy(&count, m2.data() + 0x50, 4);
+    std::memcpy(&offset, m2.data() + 0x54, 4);
+    for (uint32_t i = 0; i < count && size_t(offset) + (i + 1) * 16 <= m2.size(); ++i)
+    {
+        uint32_t len = 0, at = 0;
+        std::memcpy(&len, m2.data() + offset + i * 16 + 8, 4);
+        std::memcpy(&at, m2.data() + offset + i * 16 + 12, 4);
+        if (!len || size_t(at) + len > m2.size()) continue;
+        const std::string name(reinterpret_cast<const char*>(m2.data() + at), strnlen(reinterpret_cast<const char*>(m2.data() + at), len));
+        const auto it = lower.find(Lower(name));
+        if (it == lower.end()) continue;
+        const uint32_t newAt = uint32_t(m2.size()), newLen = uint32_t(it->second.size() + 1);
+        m2.insert(m2.end(), it->second.begin(), it->second.end());
+        m2.push_back(0);
+        std::memcpy(m2.data() + offset + i * 16 + 8, &newLen, 4);
+        std::memcpy(m2.data() + offset + i * 16 + 12, &newAt, 4);
+    }
+    return m2;
+}
+
+bool ExportRaces(const RaceCatalog& project, const std::map<uint32_t, nlohmann::json>& packages,
+                 const std::function<const MpqChain*(const std::string& client)>& source, const std::vector<std::filesystem::path>& dbcDirs,
+                 const std::filesystem::path& clientOut, std::vector<std::string>& notes, std::string& error)
+{
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    if (packages.empty())   // nothing of ours: no race tables left over from an earlier export either
+    {
+        for (const fs::path& dir : dbcDirs)
+            for (const char* table : RaceCatalog::kTables) fs::remove(dir / (std::string(table) + ".dbc"), ec);
+        return true;
+    }
+    const Layouts& l = Wrath();
+    const std::map<std::string, const DbcLayout*> layouts = { { "ChrRaces", &l.races }, { "CharSections", &l.sections }, { "CharHairGeosets", &l.hair },
+                                                              { "CharacterFacialHairStyles", &l.facial }, { "CharBaseInfo", &l.baseInfo },
+                                                              { "CharStartOutfit", &l.outfits } };
+    for (const char* table : RaceCatalog::kTables)
+    {
+        std::vector<nlohmann::json> rows = project.TableRows(table);
+        if (std::string(table) == "CharSections")   // the client's cache takes each race / sex / section / variation as one run
+            std::stable_sort(rows.begin(), rows.end(), [](const nlohmann::json& a, const nlohmann::json& b) {
+                auto key = [](const nlohmann::json& r) { return std::tuple(U(r, "RaceID"), U(r, "SexID"), U(r, "BaseSection"), U(r, "VariationIndex"), U(r, "ColorIndex")); };
+                return key(a) < key(b);
+            });
+        const std::vector<uint8_t> bytes = WriteDbcRows(rows, *layouts.at(table));
+        for (const fs::path& dir : dbcDirs)
+        {
+            fs::create_directories(dir, ec);
+            std::ofstream f(dir / (std::string(table) + ".dbc"), std::ios::binary);
+            f.write(reinterpret_cast<const char*>(bytes.data()), std::streamsize(bytes.size()));
+            if (!f) { error = "Cannot write " + (dir / (std::string(table) + ".dbc")).string(); return false; }
+        }
+    }
+    // Each race's files, from the client it came from.
+    for (const auto& [race, p] : packages)
+    {
+        const std::string client = p.value("source", nlohmann::json::object()).value("client", std::string());
+        const nlohmann::json& files = ChangeStore::List(p, "files");
+        if (!client.empty() && !p.contains("files"))
+            notes.push_back("race " + std::to_string(race) + ": imported before its files were listed: remove it and import it again so its models and textures come along");
+        if (files.empty()) continue;
+        const MpqChain* from = source(client);
+        if (!from) { notes.push_back("race " + std::to_string(race) + ": its client \"" + client + "\" is not a source now: its " + std::to_string(files.size()) + " file(s) were not copied"); continue; }
+        size_t lost = 0;
+        for (const nlohmann::json& f : files)
+        {
+            auto bytes = from->Read(S(f, "from"));
+            if (!bytes) { ++lost; continue; }
+            if (f.contains("textures"))
+            {
+                std::map<std::string, std::string> names;
+                for (const auto& [a, b] : f["textures"].items()) names[a] = b.get<std::string>();
+                *bytes = RenameM2Textures(std::move(*bytes), names);
+            }
+            std::string rel = S(f, "path");
+            std::replace(rel.begin(), rel.end(), '\\', '/');
+            const fs::path target = clientOut / fs::path(rel);
+            fs::create_directories(target.parent_path(), ec);
+            std::ofstream out(target, std::ios::binary);
+            out.write(reinterpret_cast<const char*>(bytes->data()), std::streamsize(bytes->size()));
+            if (!out) { error = "Cannot write " + target.string(); return false; }
+        }
+        if (lost) notes.push_back("race " + std::to_string(race) + ": " + std::to_string(lost) + " file(s) could not be read from " + client);
+    }
+    return true;
 }
 
 std::vector<Change> RemoveRaceChanges(uint32_t race, const RaceAdapter& races, const DbcTable& displays, const DbcTable& models)

@@ -1299,6 +1299,39 @@ namespace checks
         return problems ? 1 : 0;
     }
 
+    // A project as the window has it: the race packages and the display and model tables, in one change store.
+    struct RaceProjectTables
+    {
+        ChangeStore store;
+        RaceAdapter races;
+        DbcTable displays, models;
+        explicit RaceProjectTables(MpqChain& mpq) : displays(mpq, store, "CreatureDisplayInfo", CreatureDisplayInfoFields(), 16),
+                                         models(mpq, store, "CreatureModelData", CreatureModelDataFields(), 28)
+        {
+            store.Register(races);
+            store.Register(displays);
+            store.Register(models);
+        }
+        void Apply(const std::vector<Change>& parts)
+        {
+            for (const Change& c : parts)
+                if (c.domain == races.Domain()) races.Apply(c);
+                else if (c.domain == displays.Domain()) displays.Apply(c);
+                else models.Apply(c);
+        }
+        RaceCatalog Project(const RaceCatalog& client) const
+        {
+            RaceCatalog p = client;
+            p.SetModelLookup([this](uint32_t display) -> std::string {
+                const nlohmann::json* d = displays.Edited(display);
+                const nlohmann::json& m = d && d->is_object() ? models.Row(d->value("ModelID", 0u)) : nlohmann::json();
+                return m.is_object() ? m.value("ModelName", "") : std::string();
+            });
+            for (const auto& [id, package] : races.Packages()) p.Apply(id, package);
+            return p;
+        }
+    };
+
     /// `--race-import-check <data dir> <source data dir> <source race> [target race]`: imports a race of another client
     /// into a project on the first, as the Races window does, and checks the result: every row carries the new race id,
     /// every id of its own is new and inside the project's ranges, its displays point at models with the source's model
@@ -1330,39 +1363,7 @@ namespace checks
         if (!from || !target) { printf("no race %u in the source, or no free race id\n", sourceRace); return 1; }
         printf("importing %s (race %u, %s layout) as race %u\n", from->name.c_str(), sourceRace, RaceCatalog::LayoutName(sourceRaces.Format()), target);
 
-        // A project as the window has it: the race packages and the display and model tables, in one change store.
-        struct Tables
-        {
-            ChangeStore store;
-            RaceAdapter races;
-            DbcTable displays, models;
-            explicit Tables(MpqChain& mpq) : displays(mpq, store, "CreatureDisplayInfo", CreatureDisplayInfoFields(), 16),
-                                             models(mpq, store, "CreatureModelData", CreatureModelDataFields(), 28)
-            {
-                store.Register(races);
-                store.Register(displays);
-                store.Register(models);
-            }
-            void Apply(const std::vector<Change>& parts)
-            {
-                for (const Change& c : parts)
-                    if (c.domain == races.Domain()) races.Apply(c);
-                    else if (c.domain == displays.Domain()) displays.Apply(c);
-                    else models.Apply(c);
-            }
-            RaceCatalog Project(const RaceCatalog& client) const
-            {
-                RaceCatalog p = client;
-                p.SetModelLookup([this](uint32_t display) -> std::string {
-                    const nlohmann::json* d = displays.Edited(display);
-                    const nlohmann::json& m = d && d->is_object() ? models.Row(d->value("ModelID", 0u)) : nlohmann::json();
-                    return m.is_object() ? m.value("ModelName", "") : std::string();
-                });
-                for (const auto& [id, package] : races.Packages()) p.Apply(id, package);
-                return p;
-            }
-        };
-        Tables t(base);
+        RaceProjectTables t(base);
         auto parts = ImportRaceChanges(sourceRaces, "source", sourceRace, target, baseRaces, t.races, t.displays, t.models, project, error);
         if (parts.empty()) { printf("import: %s\n", error.c_str()); return 1; }
         t.Apply(parts);
@@ -1425,7 +1426,7 @@ namespace checks
         fs::remove_all(dir, ec);
         expect(t.store.Save(dir, error), "changes saved " + error);
         {
-            Tables again(base);
+            RaceProjectTables again(base);
             expect(again.store.Load(dir, error), "changes loaded " + error);
             const nlohmann::json* q = again.races.Package(target);
             expect(q && *q == *p && again.displays.Count() == t.displays.Count() && again.models.Count() == t.models.Count(), "reloaded: the same package and rows");
@@ -1450,7 +1451,7 @@ namespace checks
         // The import's choices: the other team, Orc's faction template, Warrior and Mage kept, Paladin added with Human's
         // starting outfits, every other class dropped.
         {
-            Tables o(base);
+            RaceProjectTables o(base);
             RaceImportOptions options;
             options.alliance = from->alliance == 1 ? 0 : 1;
             options.faction = 2;
@@ -1591,6 +1592,124 @@ namespace checks
             expect(edited.Count(race, 0).skins == races.Count(race, 0).skins - 1 && edited.Count(race, 1).skins == races.Count(race, 1).skins,
                    "the project's races count one male skin colour fewer, the female ones unchanged");
         }
+        printf("%d problem(s)\n", problems);
+        return problems ? 1 : 0;
+    }
+
+    /// `--race-export-check <data dir> <source data dir> <source race>`: imports a race as the Races window does (its files
+    /// listed, clashing ones renamed), exports it into a temp folder as Export does, and opens the client with that folder
+    /// over it: the race reads back with the same choices, its model loads, its character composites from files the
+    /// client and the export hold, the other races are as they were, CharSections is sorted, the server gets the same tables.
+    int RaceExportCheck()
+    {
+        if (__argc < 5 || !__wargv) return 2;
+        setvbuf(stdout, nullptr, _IONBF, 0);
+        namespace fs = std::filesystem;
+        auto arg = [](int i) { return fs::path(__wargv[i]).string(); };
+        int problems = 0;
+        auto expect = [&](bool ok, const std::string& what) { printf("%s %s\n", ok ? "ok  " : "FAIL", what.c_str()); problems += !ok; };
+        auto lower = [](std::string x) { for (char& c : x) c = char(std::tolower((unsigned char)c)); return x; };
+
+        MpqChain base, source;
+        base.Open(arg(2));
+        source.Open(arg(3));
+        const uint32_t sourceRace = uint32_t(_wtoi(__wargv[4]));
+        RaceCatalog baseRaces, sourceRaces;
+        std::string error;
+        if (!baseRaces.Load(base, error) || !sourceRaces.Load(source, error)) { printf("%s\n", error.c_str()); return 1; }
+        const Project project;
+        uint32_t target = 0;
+        for (uint32_t id = project.Range("race.id").first; !target && id <= project.Range("race.id").last; ++id)
+            if (!baseRaces.Find(id)) target = id;
+        RaceProjectTables t(base);
+        const auto t0 = std::chrono::steady_clock::now();
+        auto parts = ImportRaceChanges(sourceRaces, "source", sourceRace, target, baseRaces, t.races, t.displays, t.models, project, error, {}, &source, &base);
+        if (parts.empty()) { printf("import: %s\n", error.c_str()); return 1; }
+        t.Apply(parts);
+        t.store.Commit(parts, "import race");
+        const nlohmann::json p = *t.races.Package(target);
+        size_t renamed = 0;
+        for (const nlohmann::json& f : p.at("files")) renamed += f.value("path", std::string()) != f.value("from", std::string());
+        printf("import as race %u: %zu file(s) to copy, %zu renamed, %zu named but missing in the source, %.0f ms\n", target, p.at("files").size(), renamed,
+               p.value("missingFiles", size_t(0)), std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+
+        // Export as App::Export does: the display and model rows, then the race tables and files.
+        const fs::path dir = fs::temp_directory_path() / "wow-world-editor-raceexport", client = dir / "client", server = dir / "server" / "dbc";
+        std::error_code ec;
+        fs::remove_all(dir, ec);
+        expect(t.displays.Export({ client / "DBFilesClient", server }, dir / "dbc", error) && t.models.Export({ client / "DBFilesClient", server }, dir / "dbc", error),
+               "display and model rows exported " + error);
+        RaceCatalog projectRaces = baseRaces;
+        for (const auto& [id, package] : t.races.Packages()) projectRaces.Apply(id, package);
+        std::vector<std::string> notes;
+        expect(ExportRaces(projectRaces, t.races.Packages(), [&](const std::string& c) { return c == "source" ? &source : nullptr; },
+                           { client / "DBFilesClient", server }, client, notes, error),
+               "race tables and files exported " + error);
+        for (const std::string& n : notes) printf("     note: %s\n", n.c_str());
+        size_t present = 0;
+        for (const nlohmann::json& f : p.at("files"))
+        {
+            std::string rel = f.value("path", std::string());
+            std::replace(rel.begin(), rel.end(), '\\', '/');
+            present += fs::is_regular_file(client / fs::path(rel), ec);
+        }
+        expect(present == p.at("files").size(), std::to_string(present) + " of " + std::to_string(p.at("files").size()) + " listed file(s) in the export");
+        bool sameServer = true;
+        for (const char* table : RaceCatalog::kTables)
+        {
+            const auto a = ReadFileBytes(client / "DBFilesClient" / (std::string(table) + ".dbc")), b = ReadFileBytes(server / (std::string(table) + ".dbc"));
+            sameServer = sameServer && a && b && *a == *b;
+        }
+        expect(sameServer, "the server's dbc folder gets the same six tables");
+
+        // The client with the export over it, as players will have it.
+        MpqChain played;
+        played.Open(std::vector<MpqLayer>{ { MpqLayer::Kind::MpqFolder, arg(2) }, { MpqLayer::Kind::Folder, client.string() } });
+        RaceCatalog back;
+        expect(back.Load(played, error), "the exported tables read " + error);
+        const RaceCatalog::Race* r = back.Find(target);
+        expect(r && back.Races().size() == baseRaces.Races().size() + 1, "race " + std::to_string(target) + " is there, beside the client's " +
+                                                                           std::to_string(baseRaces.Races().size()) + " races");
+        for (uint32_t sex = 0; sex < 2; ++sex)
+        {
+            const RaceCatalog::Counts a = sourceRaces.Count(sourceRace, sex), b = back.Count(target, sex);
+            expect(a.skins == b.skins && a.faces == b.faces && a.hairStyles == b.hairStyles && a.hairColors == b.hairColors && a.facialHair == b.facialHair,
+                   std::string(sex ? "female" : "male") + " choices as in the source");
+            const std::string model = back.Model(target, sex);
+            const auto mesh = model.empty() ? std::nullopt : LoadM2(model, [&](const std::string& f) { return played.Read(f); });
+            expect(mesh.has_value(), std::string(sex ? "female" : "male") + " model " + model + " loads" +
+                                         (lower(model).rfind("character\\race", 0) == 0 ? " (renamed: the client has another file of its name)" : ""));
+        }
+        bool others = true;
+        for (const RaceCatalog::Race& race : baseRaces.Races()) others = others && back.Package(race.id) == baseRaces.Package(race.id);
+        expect(others, "every other race reads back as the client has it");
+        {
+            Dbc sections;
+            sections.Load(ReadFileBytes(client / "DBFilesClient" / "CharSections.dbc").value_or(std::vector<uint8_t>{}));
+            bool sorted = true;
+            std::tuple<uint32_t, uint32_t, uint32_t, uint32_t, uint32_t> last{};
+            for (uint32_t row = 0; row < sections.Rows(); ++row)
+            {
+                const auto key = std::tuple(sections.U32(row, 1), sections.U32(row, 2), sections.U32(row, 3), sections.U32(row, 8), sections.U32(row, 9));
+                sorted = sorted && !(key < last);
+                last = key;
+            }
+            expect(sorted && sections.Rows() == back.Sections().size(), "CharSections sorted by race, sex, section, variation, colour (" + std::to_string(sections.Rows()) + " rows)");
+        }
+        // Its character as the creator shows it: every texture it wears is in the client or the export.
+        {
+            std::map<std::string, BlpImage> composed;
+            DisplayLooks looks(played);
+            looks.SetUpload([&](const std::string& name, const BlpImage& image) { composed[name] = image; });
+            const DisplayLooks::Choices c = looks.CharacterChoices(target, 0, 0, 0);
+            auto first = [](const std::vector<uint32_t>& v) { return v.empty() ? 0u : v.front(); };
+            const auto look = looks.CharacterLook(target, 0, first(c.skins), first(c.faces), first(c.hairStyles), first(c.hairColors), first(c.facialHair));
+            bool ok = look && look->look.textures.count(1) && composed.count(look->look.textures.at(1));
+            for (const auto& [type, name] : look ? look->look.textures : std::map<uint32_t, std::string>{})
+                ok = ok && (composed.count(name) || played.HasOwn(name));
+            expect(ok, "its male character composites from the client and the export");
+        }
+        fs::remove_all(dir, ec);
         printf("%d problem(s)\n", problems);
         return problems ? 1 : 0;
     }

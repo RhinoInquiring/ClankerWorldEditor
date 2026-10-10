@@ -682,6 +682,34 @@ void App::Export(bool playTest)
             Log("%s: %zu row(s) in DBFilesClient/%s.dbc, out/server/dbc and out/dbc/%s.json (mod-dbc-patch); client and worldserver read DBCs "
                 "only at start, so restart them.", table->Name().c_str(), table->Count(), table->Name().c_str(), table->Name().c_str());
     }
+    // Races: the race tables (client and server) and the files the project's races bring from their clients. Run with no
+    // race too: it takes away race tables an earlier export left in out/server/dbc.
+    {
+        RaceCatalog races;
+        std::string raceError;
+        if (races.Load(m_mpq, raceError))
+        {
+            for (const auto& [id, package] : m_raceRows.Packages()) races.Apply(id, package);
+            std::vector<std::string> notes;
+            auto sourceNamed = [this](const std::string& client) -> const MpqChain* {
+                for (const Ghosts::Source& s : m_ghosts.Sources())
+                    if (s.name == client) return s.mpq;
+                return nullptr;
+            };
+            if (!ExportRaces(races, m_raceRows.Packages(), sourceNamed, { out / "DBFilesClient", m_project->dir / "out" / "server" / "dbc" }, out, notes, error))
+                Log("Races: %s", error.c_str());
+            else if (!m_raceRows.Packages().empty())
+                Log("Races: %zu race(s) of the project in DBFilesClient and out/server/dbc (ChrRaces, CharSections, CharHairGeosets, "
+                    "CharacterFacialHairStyles, CharBaseInfo, CharStartOutfit: whole tables, mod-dbc-patch cannot express them); restart the "
+                    "client and the worldserver.", m_raceRows.Packages().size());
+            for (const std::string& n : notes)
+            {
+                Log("Races: %s", n.c_str());
+                m_problems.push_back({ Problem::Severity::Warning, "Races", n });
+            }
+        }
+        else if (!m_raceRows.Packages().empty()) Log("Races: %s", raceError.c_str());
+    }
     // Generated pictures (world maps) go in as they are.
     size_t generated = 0;
     std::error_code assetsEc;

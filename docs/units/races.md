@@ -70,8 +70,25 @@ Server tab writes the rows; export puts the race into the server's DBCs.
 Rows of shared masks (0 = every race, or several races) stay as they are. A race past 32 has no bit in a 32-bit
 mask, so no skills or spells of its own.
 
-The ranges are in project settings. A race id past 32 needs the client's 64-race extension and a server that takes
-it. The race's models and textures, and its tables in the patch, come with export (not done yet).
+The import also lists the race's files: its two models with their skins, `.anim` files and fixed textures, and every
+`CharSections` texture, read from the source. A file the project's client lacks goes into the patch under its own name.
+A file the client has with other bytes (Turtle's goblin models, for one, share stock's names) is renamed into
+`Character\Race<id>\...`, and every reference follows: the `CharSections` rows, a model row of its own, the fixed texture
+names inside a copied model. A file the client has as it is needs nothing. The ranges are in project settings. A race
+id past 32 needs the client's 64-race extension.
+
+## Export
+
+Export (and Build patch) writes, with the race's display and model rows:
+
+| Where | What |
+| --- | --- |
+| `DBFilesClient` (the patch) and `out/server/dbc` | `ChrRaces`, `CharSections`, `CharHairGeosets`, `CharacterFacialHairStyles`, `CharBaseInfo`, `CharStartOutfit`: whole tables, every race's rows with the project's races over the client's. `CharSections` is sorted by race, sex, section, variation and colour, as the client's cache needs. mod-dbc-patch cannot express these tables (two have no id), so there is no `out/dbc` JSON for them. |
+| The patch | Every file the races listed, read from the client each came from (it must be a source when exporting) |
+| `out/server/*.sql` | The Server tab's rows (`playercreateinfo` and the rest), with their `_revert.sql` |
+
+Copy `out/server/dbc` to the server's `dbc` folder and restart the worldserver and the client: both read DBCs only at
+start. A race imported before files were listed says so in the editor and in Problems: remove it and import it again.
 
 Notes:
 

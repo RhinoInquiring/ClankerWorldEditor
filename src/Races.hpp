@@ -8,6 +8,7 @@
 #include <nlohmann/json.hpp>
 
 #include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <map>
 #include <optional>
@@ -94,6 +95,10 @@ public:
     uint32_t ModelId(const std::string& model) const;
     /// Ids the rows of a table use ("CharSections", "CharHairGeosets", "CharStartOutfit").
     std::set<uint32_t> Ids(const std::string& table) const;
+    /// Every row of a race table (any of RaceCatalog::kTables) by 3.3.5 column names, every race's.
+    std::vector<nlohmann::json> TableRows(const std::string& table) const;
+    /// The race tables, in the order export writes them.
+    static constexpr const char* kTables[] = { "ChrRaces", "CharSections", "CharHairGeosets", "CharacterFacialHairStyles", "CharBaseInfo", "CharStartOutfit" };
     /// The name of the faction a FactionTemplate id belongs to in this client ("PLAYER, Human"); empty when it has none.
     std::string FactionName(uint32_t factionTemplate) const;
     /// Languages.dbc: every language (id, name) of this client, and one's name (empty when it has none).
@@ -156,9 +161,28 @@ struct RaceImportOptions
 /// or the race has no row.
 std::vector<Change> ImportRaceChanges(const RaceCatalog& source, const std::string& sourceName, uint32_t sourceRace, uint32_t target,
                                       const RaceCatalog& project, const RaceAdapter& races, const DbcTable& displays, const DbcTable& models,
-                                      const Project& ranges, std::string& error, const RaceImportOptions& options = {});
+                                      const Project& ranges, std::string& error, const RaceImportOptions& options = {},
+                                      const MpqChain* sourceFiles = nullptr, const MpqChain* projectFiles = nullptr);
+/// With `sourceFiles` and `projectFiles` (the source client's and the project's files) the import also lists what the
+/// race's characters use: its models with their skins, .anim files and fixed textures, and every CharSections texture.
+/// The package's "files" ([{"path", "from", "textures": {old: new}}]) are what export copies from the source: files the
+/// project's client lacks, under their own names, and files it has with other bytes, renamed into Character\Race<id>\...
+/// so the client's own stay as they are; every reference follows a rename (CharSections textures, a model's own row,
+/// fixed texture names inside a copied model). A file the client has as it is, players have: nothing to copy.
+
 /// The changes removing a project race the project added: its package and the display and model rows its import added.
 std::vector<Change> RemoveRaceChanges(uint32_t race, const RaceAdapter& races, const DbcTable& displays, const DbcTable& models);
+
+/// A model with fixed texture names replaced (old -> new, case-insensitive; names appended to the file).
+std::vector<uint8_t> RenameM2Textures(std::vector<uint8_t> m2, const std::map<std::string, std::string>& names);
+
+/// Writes the race tables of `project` (every race's rows, the project's packages applied; CharSections sorted by race,
+/// sex, section, variation and colour, as the client's cache needs) into each of `dbcDirs`, and copies every package's
+/// files from its source client (`source` finds a client by name; null when it is not attached) under `clientOut`. With
+/// no package, removes race tables an earlier export left. `notes` gets what export could not do. False on a write error.
+bool ExportRaces(const RaceCatalog& project, const std::map<uint32_t, nlohmann::json>& packages,
+                 const std::function<const MpqChain*(const std::string& client)>& source, const std::vector<std::filesystem::path>& dbcDirs,
+                 const std::filesystem::path& clientOut, std::vector<std::string>& notes, std::string& error);
 
 /// What a character chooses in the creator, each with its own values per sex.
 enum class RaceChoice { Skin, Face, HairStyle, HairColor, FacialHair };
