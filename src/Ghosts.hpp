@@ -63,9 +63,10 @@ public:
         std::vector<std::pair<int, int>> loaded, unloaded;   // (layer id, tile key)
     };
 
-    /// Starts over with the project's files as source 0 and the attached sources (name, layers).
+    /// Starts over with the project's files as source 0 and the attached sources (name, layers). Sources opened from now on
+    /// leave out the archives in `skip` (the project's installed patch: its own output, not another client's files).
     void Reset(const MpqChain* project, const std::string& projectName, const std::vector<std::pair<std::string, std::vector<MpqLayer>>>& attached,
-               std::vector<std::string>& errors);
+               std::vector<std::string>& errors, std::vector<std::filesystem::path> skip = {});
     bool AddSource(const std::string& name, const std::vector<MpqLayer>& layers, std::string& error);
     void RemoveSource(size_t index);
     const std::vector<Source>& Sources() const { return m_sources; }
@@ -103,6 +104,7 @@ private:
     std::optional<std::vector<uint8_t>> ReadVersion(size_t source, int archive, const std::string& path, bool layerWide = false) const;
 
     std::vector<Source> m_sources;
+    std::vector<std::filesystem::path> m_skip;   // archives no source opens (Reset)
     std::vector<Layer> m_layers;
     int m_nextLayerId = 1;
     uint64_t m_generation = 0;   // bumps when tiles are dropped wholesale; older worker results are stale

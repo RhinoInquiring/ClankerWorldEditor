@@ -131,7 +131,7 @@ namespace checks
             std::vector<std::pair<std::string, std::vector<MpqLayer>>> compare;
             for (const Project::Source& s : project->compare) compare.push_back({ s.name, s.layers });
             std::vector<std::string> errors;
-            ghosts.Reset(&mpq, project->name, compare, errors);
+            ghosts.Reset(&mpq, project->name, compare, errors, { project->PatchInstallPath() });
             std::vector<const MpqChain*> chains;
             for (size_t i = 1; i < ghosts.Sources().size(); ++i) chains.push_back(ghosts.Sources()[i].mpq);
             mpq.SetFallbacks(chains);

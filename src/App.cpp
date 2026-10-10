@@ -508,7 +508,7 @@ bool App::OpenProject(const std::string& dir)
     {
         std::vector<std::pair<std::string, std::vector<MpqLayer>>> compare;
         for (const Project::Source& s : project->compare) compare.push_back({ s.name, s.layers });
-        m_ghosts.Reset(&m_mpq, project->name, compare, sourceErrors);
+        m_ghosts.Reset(&m_mpq, project->name, compare, sourceErrors, { project->PatchInstallPath() });
     }
     m_ghosts.StartWorker();
     for (const auto& e : sourceErrors) Log("Source not attached: %s", e.c_str());

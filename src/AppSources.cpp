@@ -86,7 +86,7 @@ void App::ApplySources()
     m_loader.Stop();   // the fallback chains are about to close
     m_mpq.SetFallbacks({});
     std::vector<std::string> errors;
-    m_ghosts.Reset(&m_mpq, m_project->name, CompareSources(), errors);
+    m_ghosts.Reset(&m_mpq, m_project->name, CompareSources(), errors, { m_project->PatchInstallPath() });
     for (const auto& e : errors) Log("Source not attached: %s", e.c_str());
     UpdateFallbacks();
     m_versionsKey.clear();

@@ -128,7 +128,7 @@ std::vector<std::pair<std::string, BlpImage>> Ghosts::TakeImages()
 }
 
 void Ghosts::Reset(const MpqChain* project, const std::string& projectName, const std::vector<std::pair<std::string, std::vector<MpqLayer>>>& attached,
-                   std::vector<std::string>& errors)
+                   std::vector<std::string>& errors, std::vector<std::filesystem::path> skip)
 {
     const bool worker = m_worker != nullptr;
     StopWorker();   // it may be reading a chain about to close
@@ -137,6 +137,7 @@ void Ghosts::Reset(const MpqChain* project, const std::string& projectName, cons
     m_bigAlpha.clear();
     ++m_generation;
     m_nextLayerId = 1;
+    m_skip = std::move(skip);
     Source own;
     own.name = projectName;
     own.mpq = project;
@@ -152,7 +153,7 @@ void Ghosts::Reset(const MpqChain* project, const std::string& projectName, cons
 bool Ghosts::AddSource(const std::string& name, const std::vector<MpqLayer>& layers, std::string& error)
 {
     auto chain = std::make_unique<MpqChain>();
-    if (!chain->Open(layers)) { error = (name.empty() ? std::string("A source") : name) + ": no archives or files in its layers"; return false; }
+    if (!chain->Open(layers, m_skip)) { error = (name.empty() ? std::string("A source") : name) + ": no archives or files in its layers"; return false; }
     Source s;
     s.name = name.empty() && !layers.empty() ? fs::path(layers.front().path).filename().string() : name;
     s.layers = layers;

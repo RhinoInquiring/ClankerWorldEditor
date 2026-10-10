@@ -154,6 +154,10 @@ namespace checks
                    "skipping the installed patch (any case, any slash): the client's rows only");
             c.Open({ { MpqLayer::Kind::MpqFile, p.PatchInstallPath().string() } }, { p.PatchInstallPath() });
             expect(c.Report()[0].archives == 0 && !c.Read(shared), "the patch as a single-MPQ layer is skipped too");
+            Ghosts ghosts;   // a compare source on the same client: its files, not the project's export
+            std::vector<std::string> errors;
+            ghosts.Reset(&c, "project", { { "same client", { { MpqLayer::Kind::MpqFolder, p.clientDir } } } }, errors, { spelled });
+            expect(ghosts.Sources().size() == 2 && !hasRow(*ghosts.Sources()[1].mpq), "a compare source on the same client skips it too");
         }
         fs::remove_all(t, ec);
         printf("%d problem(s)\n", problems);
@@ -273,7 +277,7 @@ namespace checks
         std::vector<std::string> errors;
         std::vector<std::pair<std::string, std::vector<MpqLayer>>> compare;
         for (const Project::Source& s : project->compare) compare.push_back({ s.name, s.layers });
-        ghosts.Reset(&mpq, project->name, compare, errors);
+        ghosts.Reset(&mpq, project->name, compare, errors, { project->PatchInstallPath() });
         std::vector<const MpqChain*> fallbacks;
         for (size_t i = 1; i < ghosts.Sources().size(); ++i) fallbacks.push_back(ghosts.Sources()[i].mpq);
         mpq.SetFallbacks(fallbacks);
