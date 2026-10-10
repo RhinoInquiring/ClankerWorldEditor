@@ -6,13 +6,16 @@ The races of every source: the project's client and each compare source (View > 
 read in its own layout, 1.12 or 3.3.5. The window shows what each race is and what its characters can look like,
 with a preview, and a race of another client can be imported into the project.
 
+Its three panels, **Race list**, **Race preview** and **Race details**, can be moved like any other panel: drag a tab to
+dock it elsewhere, tab panels together or float them. View > Reset panel layout puts them back.
+
 | Part | What it shows |
 | --- | --- |
 | Source (top left) | The client whose races are listed. A source made of patch MPQs without race tables says so. |
-| List | Every row of the client's `ChrRaces`: id, name, team, skin colours male / female. **new** marks a race whose name the project's client does not have. |
-| Details (right) | File string, prefix, female and male names, faction template (with its faction's name), base language, displays, the character model per sex, the classes it can be (`CharBaseInfo`), and how many skins, faces, hair styles, hair colours and facial hair it has per sex |
+| List (Race list) | Every row of the client's `ChrRaces`: id, name, team, skin colours male / female. **new** marks a race whose name the project's client does not have. |
+| Details (Race details) | File string, prefix, female and male names, faction template (with its faction's name), base language, displays, the character model per sex, the classes it can be (`CharBaseInfo`), and how many skins, faces, hair styles, hair colours and facial hair it has per sex |
 | Warnings | A file string another race of the project's client uses, or an id that is another race there: an import of the race will need its own |
-| Preview (middle) | The character as the character creator shows it, naked, standing. The arrows step through skin, face, facial hair, hair style and hair colour. Left drag turns, right drag pans, the wheel zooms. A project race imported from a source shows with that source's files. |
+| Preview (Race preview) | The character as the character creator shows it, naked, standing. The arrows step through skin, face, facial hair, hair style and hair colour. Left drag turns, right drag pans, the wheel zooms. A project race imported from a source shows with that source's files. |
 | Import into the project (another source's race) | **Race id** (the first free one in the project's `race.id` range, 22-31 by default), **Alliance / Horde**, **Faction template**, **Classes**, **Starting outfits of added classes from**, and **Import as race N** |
 | Edit (a race of the project) | The editor below: **Apply** makes the edits one change, **Discard** drops them. **Remove from the project** (an imported race) or **Back to the client's** (a client race the project changed). |
 
@@ -43,10 +46,29 @@ Edits stay unapplied ("not applied") until **Apply**; undo takes an applied edit
 
 | Tab | What |
 | --- | --- |
-| Identity | Name, female and male names, file string (picks the login screen's model `UI_<file string>` and the race's sounds; its characters' files come from its displays and `CharSections`), prefix (helmets are found as `<helmet>_<prefix><M/F>.m2`), team, faction template, base language (`Languages.dbc`, by name), intro cinematic |
+| Identity | Name, female and male names, **Playable** (ChrRaces flag 0x1 marks an NPC race; an import clears it), file string (picks the login screen's model `UI_<file string>` and the race's sounds; its characters' files come from its displays and `CharSections`), prefix (helmets are found as `<helmet>_<prefix><M/F>.m2`), team, faction template, base language (`Languages.dbc`, by name), intro cinematic |
 | Classes | The classes it can be. A class dropped loses its starting outfits; a class it has no outfits of takes those of the race picked (new ids), or starts naked. |
 | Looks | Per sex, every skin colour, face, hair style, hair colour and facial hair, each with a texture to tell it apart, and **Remove**. The character creator steps through each choice by index, so the values after a removed one move down: a skin colour takes its faces and underwear with it, a hair style its geosets and scalps, a hair colour its scalps and facial hair of that colour. The preview shows the source's tables. |
+| Server | The world database rows its new characters are made from (needs the server link; written as you go, undo takes them back): **Copy its server rows** from a race, the start location of each class (**Here**: the ground under the camera on the open map, facing where the camera looks; **Go**), base stats, extra starting items, and how many skills, spells and action bar buttons it has. See below. |
 | Starting items | Per class and sex: the `CharStartOutfit` items (the creator shows them, AzerothCore gives them). **Change** and **Add an item** search `item_template`; an item the server does not have is flagged (nobody gets it). **Add a starting outfit** for a class and sex with none. Needs the server link to search. |
+
+## The server's side
+
+AzerothCore makes a character of a race and class only when `playercreateinfo` has a start for that pair, and (since
+its change of 2026-02-28) it takes a race as playable from the server's `ChrRaces.dbc`: a row without flag 0x1. The
+Server tab writes the rows; export puts the race into the server's DBCs.
+
+| Table | Key | What **Copy its server rows** gives the race |
+| --- | --- | --- |
+| `playercreateinfo` | race | The start of each of its classes. A class the source race cannot be takes the start of the first stock race that can. |
+| `playercreateinfo_action` | race | Action bar buttons per class, from the same race the start came from |
+| `playercreateinfo_item` | race | Extra starting items per class (a negative amount takes an item away) |
+| `player_race_stats` | Race | Base stats added to the class's |
+| `playercreateinfo_skills` | raceMask | The rows of the source race's own mask bit, now the race's bit; a racial language becomes the race's base language (Common 98, Orcish 109, Darnassian 113, Taurahe 115, Dwarvish 111, Thalassian 137, Gnomish 313, Troll 315, Gutterspeak 673, Draenei 759) |
+| `playercreateinfo_spell_custom` | racemask | The rows of the source race's own mask bit |
+
+Rows of shared masks (0 = every race, or several races) stay as they are. A race past 32 has no bit in a 32-bit
+mask, so no skills or spells of its own.
 
 The ranges are in project settings. A race id past 32 needs the client's 64-race extension and a server that takes
 it. The race's models and textures, and its tables in the patch, come with export (not done yet).

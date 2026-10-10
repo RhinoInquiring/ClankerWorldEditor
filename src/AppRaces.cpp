@@ -4,6 +4,7 @@
 #include "App.hpp"
 
 #include <imgui.h>
+#include <imgui_internal.h>
 #include <imgui_stdlib.h>
 
 #include <algorithm>
@@ -138,9 +139,23 @@ void App::RefreshRacePreview(bool frame)
 void App::DrawRaces()
 {
     if (!m_showRaces) return;
+    // Three panels the user can move: the list, the preview, the details.
     ImGui::SetNextWindowSize({ 1500, 820 }, ImGuiCond_FirstUseEver);
-    if (!ImGui::Begin("Races", &m_showRaces)) { ImGui::End(); return; }
-    if (!m_project) { ImGui::TextColored(kQuiet, "Open a project first."); ImGui::End(); return; }
+    const unsigned int space = PanelHost("Races", &m_showRaces, [](unsigned int node) {
+        ImGuiID rest = node;
+        const ImGuiID left = ImGui::DockBuilderSplitNode(rest, ImGuiDir_Left, 0.23f, nullptr, &rest);
+        const ImGuiID right = ImGui::DockBuilderSplitNode(rest, ImGuiDir_Right, 0.42f, nullptr, &rest);
+        ImGui::DockBuilderDockWindow("Race list", left);
+        ImGui::DockBuilderDockWindow("Race details", right);
+        ImGui::DockBuilderDockWindow("Race preview", rest);
+    });
+    if (!m_showRaces) return;
+    auto only = [&](const char* text) {   // nothing to show yet: the list panel says why
+        BeginPanel("Race list", space);
+        ImGui::TextColored(kQuiet, "%s", text);
+        ImGui::End();
+    };
+    if (!m_project) { only("Open a project first."); return; }
     RacesView& v = m_races;
 
     // The sources as attached now; a changed list starts over.
@@ -160,7 +175,7 @@ void App::DrawRaces()
         v.stale = true;
         v.projectKey[0] = ~0ull;
     }
-    if (v.sources.empty()) { ImGui::TextColored(kQuiet, "No sources."); ImGui::End(); return; }
+    if (v.sources.empty()) { only("No sources."); return; }
     auto read = [](RacesView::Source& s) {
         if (s.read) return;
         s.read = true;
@@ -190,8 +205,8 @@ void App::DrawRaces()
     const RaceCatalog& base = v.project;
     const RaceCatalog& list = v.source == 0 ? v.project : src.races;
 
-    // Left: the source and its races.
-    ImGui::BeginChild("##racelist", { 340, 0 }, ImGuiChildFlags_ResizeX | ImGuiChildFlags_Borders);
+    // The list: the source and its races.
+    BeginPanel("Race list", space);
     ImGui::SetNextItemWidth(-1);
     if (ImGui::BeginCombo("##source", (src.name + (v.source == 0 ? "  (project)" : "")).c_str()))
     {
@@ -253,15 +268,12 @@ void App::DrawRaces()
         }
         ImGui::EndTable();
     }
-    ImGui::EndChild();
-    ImGui::SameLine();
+    ImGui::End();
 
     const RaceCatalog::Race* r = v.race ? list.Find(v.race) : nullptr;
     const nlohmann::json* package = r && v.source == 0 ? m_raceRows.Package(r->id) : nullptr;
 
     // Middle: the preview and its choices; a project race imported from a source shows with that source's files.
-    constexpr float kDetailWidth = 480;
-    ImGui::BeginChild("##racepreview", { -kDetailWidth, 0 }, ImGuiChildFlags_Borders);
     auto preview = [&] {
         // The preview and its choices: a project race imported from a source shows with that source's files.
         size_t previewSource = v.source;
@@ -336,17 +348,18 @@ void App::DrawRaces()
         if (v.models && previewMpq)
             DrawScene(v.scene, { avail.x, std::max(avail.y, 120.0f) }, *v.models, *previewMpq, parts, "This race has no character model this client can show.");
     };
-    if (r) preview();
-    else ImGui::TextColored(kQuiet, "Pick a race on the left to see it here.");
-    ImGui::EndChild();
-    ImGui::SameLine();
+    if (BeginPanel("Race preview", space))
+    {
+        if (r) preview();
+        else ImGui::TextColored(kQuiet, "Pick a race in the list to see it here.");
+    }
+    ImGui::End();
 
     // Right: the selected race, and importing or editing it.
-    ImGui::BeginChild("##racedetail");
+    BeginPanel("Race details", space);
     if (!r)
     {
         ImGui::TextColored(kQuiet, "Races come from the project's client and its compare sources (View > Sources).");
-        ImGui::EndChild();
         ImGui::End();
         return;
     }
@@ -515,7 +528,6 @@ void App::DrawRaces()
     }
     else DrawRaceEditor(*r);
 
-    ImGui::EndChild();
     ImGui::End();
 }
 
@@ -596,6 +608,10 @@ void App::DrawRaceEditor(const RaceCatalog::Race& race)
         if (ImGui::RadioButton("Alliance", team == 0)) { row["Alliance"] = 0; dirty(); }
         ImGui::SameLine();
         if (ImGui::RadioButton("Horde", team == 1)) { row["Alliance"] = 1; dirty(); }
+        bool playable = !(row.value("Flags", 0u) & 1);
+        if (ImGui::Checkbox("Playable", &playable)) { row["Flags"] = (row.value("Flags", 0u) & ~1u) | (playable ? 0u : 1u); dirty(); }
+        ImGui::SetItemTooltip("ChrRaces flag 0x1 marks an NPC race: AzerothCore (since 2026-02-28) takes a race as playable when its\n"
+                              "server ChrRaces.dbc row does not have it, and the character creator leaves it out.");
         uint32_t faction = row.value("FactionID", 0u);
         if (FactionCombo(base, faction)) { row["FactionID"] = faction; dirty(); }
         const uint32_t language = row.value("BaseLanguage", 0u);
@@ -811,5 +827,216 @@ void App::DrawRaceEditor(const RaceCatalog::Race& race)
         }
         ImGui::EndTabItem();
     }
+    if (ImGui::BeginTabItem("Server"))
+    {
+        DrawRaceServerTab(race, p);
+        ImGui::EndTabItem();
+    }
     ImGui::EndTabBar();
+}
+
+void App::DrawRaceServerTab(const RaceCatalog::Race& race, const nlohmann::json& package)
+{
+    RacesView& v = m_races;
+    const RaceCatalog& base = v.project;
+    if (!m_db.Connected())
+    {
+        ImGui::TextColored(kQuiet, "These rows live in the world database: connect the server (Server panel).");
+        return;
+    }
+    const RaceServerTables t = RaceServer();
+    auto commit = [&](std::vector<Change> parts, const std::string& label) {
+        for (const Change& c : parts)
+            for (TableRowsAdapter* a : { &m_raceStarts, &m_raceActions, &m_raceItems, &m_raceStats, &m_raceSkills, &m_raceSpells })
+                if (c.domain == a->Domain()) a->Apply(c);
+        m_store.Commit(std::move(parts), label);
+    };
+    auto num = [](const nlohmann::json& row, const char* col) {
+        const auto it = row.find(col);
+        return it != row.end() && it->is_string() ? std::strtod(it->get<std::string>().c_str(), nullptr) : 0.0;
+    };
+    std::vector<uint32_t> classes;
+    for (const nlohmann::json& b : ChangeStore::List(package, "CharBaseInfo")) classes.push_back(b.value("ClassID", 0u));
+    std::sort(classes.begin(), classes.end());
+    ImGui::TextColored(kQuiet, "AzerothCore makes a character of a race and class only with a start row (playercreateinfo) for it, and takes the\n"
+                               "race as playable from the server's ChrRaces.dbc (export puts it there; not flagged as an NPC race).");
+
+    // Every row at once, from a race the server knows.
+    ImGui::SeparatorText("Copy from a race");
+    const std::vector<const RaceCatalog::Race*> playable = Playable(base);
+    if (!v.serverDonor || !base.Find(v.serverDonor))
+        for (const RaceCatalog::Race* b : playable)
+            if (b->alliance == int(race.row.value("Alliance", 1u)) && b->id != race.id && b->id < 12) { v.serverDonor = b->id; break; }
+    const RaceCatalog::Race* donor = base.Find(v.serverDonor);
+    ImGui::SetNextItemWidth(180);
+    if (ImGui::BeginCombo("##serverdonor", donor ? Plain(donor->name).c_str() : "pick a race"))
+    {
+        for (const RaceCatalog::Race* b : playable)
+            if (b->id != race.id && ImGui::Selectable(Plain(b->name).c_str(), v.serverDonor == b->id)) v.serverDonor = b->id;
+        ImGui::EndCombo();
+    }
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!donor || classes.empty());
+    if (ImGui::Button("Copy its server rows"))
+    {
+        std::vector<uint32_t> fallbacks;   // for a class it cannot be: the stock races, Alliance and Horde alike
+        for (uint32_t id = 1; id < 12; ++id)
+            if (id != v.serverDonor) fallbacks.push_back(id);
+        commit(CopyRaceServerRows(race.id, v.serverDonor, classes, race.row.value("BaseLanguage", 0u), fallbacks, t),
+               "server rows of " + Plain(race.name) + " from " + Plain(donor->name));
+        Log("%s: starts, action bars, extra items, stats, skills and spells copied from %s.", Plain(race.name).c_str(), Plain(donor->name).c_str());
+    }
+    ImGui::EndDisabled();
+    ImGui::SetItemTooltip("Starts, action bars and extra items of each of its classes, its base stats, and the skills and spells of\n"
+                          "that race's own mask bit (its racial language becomes this race's base language). Replaces what it has.");
+
+    // Where each class starts.
+    ImGui::SeparatorText("Start locations");
+    const std::vector<nlohmann::json> starts = m_raceStarts.Rows(race.id);
+    if (ImGui::BeginTable("##starts", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit))
+    {
+        ImGui::TableSetupColumn("Class");
+        ImGui::TableSetupColumn("Where", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("Facing");
+        ImGui::TableSetupColumn("");
+        ImGui::TableHeadersRow();
+        for (uint32_t cls : classes)
+        {
+            ImGui::PushID(int(cls));
+            const nlohmann::json* start = nullptr;
+            for (const nlohmann::json& s : starts)
+                if (uint32_t(num(s, "class")) == cls) start = &s;
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(ClassName(cls));
+            ImGui::TableNextColumn();
+            if (start)
+            {
+                const uint32_t map = uint32_t(num(*start, "map")), zone = uint32_t(num(*start, "zone"));
+                std::string mapName = std::to_string(map);
+                for (const MapEntry& m : m_maps)
+                    if (m.id == map) mapName = m.name;
+                const auto area = m_areas.Find(zone);
+                ImGui::Text("%s, %s  (%.0f, %.0f, %.0f)", mapName.c_str(), area ? area->name.c_str() : ("zone " + std::to_string(zone)).c_str(),
+                            num(*start, "position_x"), num(*start, "position_y"), num(*start, "position_z"));
+                ImGui::TableNextColumn();
+                ImGui::Text("%.0f deg", num(*start, "orientation") * 57.2958);
+            }
+            else
+            {
+                ImGui::TextColored(kWarn, "none: nobody can make this class of it");
+                ImGui::TableNextColumn();
+            }
+            ImGui::TableNextColumn();
+            // Here: the ground under the camera on the open map, facing where the camera looks.
+            ImGui::BeginDisabled(m_terrain.Map().empty());
+            if (ImGui::SmallButton("Here"))
+            {
+                const XMFLOAT3 e = m_camera.pos;
+                const float ground = GroundAt(e.x, e.z, e.y).value_or(e.y);
+                float sx, sy, sz;
+                EditorToServer({ e.x, ground, e.z }, sx, sy, sz);
+                uint32_t zone = 0;
+                if (const auto ref = m_terrain.ChunkAtGrid(int(std::floor(e.x / kChunkSize)), int(std::floor(e.z / kChunkSize))))
+                    if (const AdtChunk* c = m_terrain.Chunk(*ref)) zone = m_areas.ZoneOf(c->areaId);
+                float o = std::fmod(m_camera.yaw + XM_PI, XM_2PI);   // server facing: the camera's, turned into server axes
+                if (o < 0) o += XM_2PI;
+                commit({ SetRaceStart(race.id, cls, CurrentMapId(), zone, sx, sy, sz, o, t) }, "start of " + Plain(race.name) + " " + ClassName(cls));
+            }
+            ImGui::EndDisabled();
+            ImGui::SetItemTooltip("The ground under the camera on the open map, facing the way the camera looks.");
+            if (start)
+            {
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Go")) FlyTo(uint32_t(num(*start, "map")), float(num(*start, "position_x")), float(num(*start, "position_y")), float(num(*start, "position_z")));
+            }
+            ImGui::PopID();
+        }
+        ImGui::EndTable();
+    }
+
+    // Base stats: what every class of it adds to the class's own.
+    ImGui::SeparatorText("Base stats");
+    const std::vector<nlohmann::json> stats = m_raceStats.Rows(race.id);
+    if (stats.empty()) ImGui::TextColored(kWarn, "None: copy them from a race (above), or the server gives nothing on top of the class's.");
+    else
+    {
+        nlohmann::json row = stats.front();
+        bool changed = false;
+        int column = 0;
+        for (const char* stat : { "Strength", "Agility", "Stamina", "Intellect", "Spirit" })
+        {
+            if (column++) ImGui::SameLine();
+            int value = int(num(row, stat));
+            ImGui::SetNextItemWidth(70);
+            ImGui::InputInt(stat, &value, 0);
+            row[stat] = std::to_string(value);
+            changed = changed || ImGui::IsItemDeactivatedAfterEdit();
+        }
+        if (changed) commit({ m_raceStats.MakeChange(race.id, stats, { row }, "stats of " + Plain(race.name)) }, "stats of " + Plain(race.name));
+    }
+
+    // Extra items: given on top of the starting outfit (a negative amount takes one away).
+    ImGui::SeparatorText("Extra starting items");
+    const std::vector<nlohmann::json> items = m_raceItems.Rows(race.id);
+    int removeItem = -1;
+    for (size_t i = 0; i < items.size(); ++i)
+    {
+        ImGui::PushID(int(i));
+        const uint32_t entry = uint32_t(num(items[i], "itemid"));
+        const NpcView::Item& item = NpcItem(entry);
+        if (ImGui::SmallButton("Remove")) removeItem = int(i);
+        ImGui::SameLine();
+        ImGui::Text("%s  x%d  %s", ClassName(uint32_t(num(items[i], "class"))), int(num(items[i], "amount")), item.found ? item.name.c_str() : std::to_string(entry).c_str());
+        if (!item.found)
+        {
+            ImGui::SameLine();
+            ImGui::TextColored(kWarn, "not on your server");
+        }
+        ImGui::PopID();
+    }
+    if (removeItem >= 0)
+    {
+        std::vector<nlohmann::json> rows = items;
+        rows.erase(rows.begin() + removeItem);
+        commit({ m_raceItems.MakeChange(race.id, items, rows, "extra item") }, "extra item of " + Plain(race.name));
+    }
+    if (!classes.empty())
+    {
+        if (std::find(classes.begin(), classes.end(), v.editClass) == classes.end()) v.editClass = classes.front();
+        ImGui::SetNextItemWidth(140);
+        if (ImGui::BeginCombo("##itemclass", ClassName(v.editClass)))
+        {
+            for (uint32_t c : classes)
+                if (ImGui::Selectable(ClassName(c), c == v.editClass)) v.editClass = c;
+            ImGui::EndCombo();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Add an extra item")) ImGui::OpenPopup("##extraitem");
+        ImGui::SetNextWindowSize({ 440, 420 });
+        if (ImGui::BeginPopup("##extraitem"))
+        {
+            if (const auto chosen = ItemSearch("Any item: name or entry", "1 = 1"); chosen && *chosen)
+            {
+                std::vector<nlohmann::json> rows = items;
+                rows.push_back({ { "race", std::to_string(race.id) }, { "class", std::to_string(v.editClass) }, { "itemid", std::to_string(*chosen) },
+                                 { "amount", "1" }, { "Note", NpcItem(*chosen).name } });
+                commit({ m_raceItems.MakeChange(race.id, items, rows, "extra item") }, "extra item of " + Plain(race.name));
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
+    }
+
+    // What else it has: counts, and its language.
+    ImGui::SeparatorText("Skills, spells, action bars");
+    const std::vector<nlohmann::json> skills = m_raceSkills.Rows(RaceBit(race.id));
+    const uint32_t language = LanguageSkill(race.row.value("BaseLanguage", 0u));
+    const bool speaks = std::any_of(skills.begin(), skills.end(), [&](const nlohmann::json& s) { return uint32_t(num(s, "skill")) == language; });
+    ImGui::Text("%zu skill(s) and %zu spell(s) of its own mask bit, %zu action bar button(s)", skills.size(), m_raceSpells.Rows(RaceBit(race.id)).size(),
+                m_raceActions.Rows(race.id).size());
+    if (language && !speaks)
+        ImGui::TextColored(kWarn, "No skill of its base language (%s, skill %u): its characters cannot speak it. Copying server rows adds it.",
+                           base.LanguageName(race.row.value("BaseLanguage", 0u)).c_str(), language);
+    if (race.id > 32) ImGui::TextColored(kWarn, "Race %u has no bit in a 32-bit race mask: no skills or spells of its own.", race.id);
 }

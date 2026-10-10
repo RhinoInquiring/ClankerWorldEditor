@@ -3056,6 +3056,7 @@ void App::DrawStatusBar()
 void App::BuildDefaultLayout(unsigned int dockspace)
 {
     m_buildLayout = false;
+    ++m_panelLayoutGeneration;   // the multi-panel windows go back to their own arrangements too
     ImGui::DockBuilderRemoveNode(dockspace);
     ImGui::DockBuilderAddNode(dockspace, ImGuiDockNodeFlags_DockSpace);
     ImGui::DockBuilderSetNodeSize(dockspace, ImGui::GetMainViewport()->WorkSize);
@@ -3075,6 +3076,31 @@ void App::BuildDefaultLayout(unsigned int dockspace)
     ImGui::DockBuilderDockWindow("Log", bottom);
     ImGui::DockBuilderDockWindow("Viewport", center);
     ImGui::DockBuilderFinish(dockspace);
+}
+
+unsigned int App::PanelHost(const char* host, bool* open, const std::function<void(unsigned int)>& layout)
+{
+    const bool visible = ImGui::Begin(host, open);
+    const ImGuiID space = ImGui::GetID("##panels");
+    if (!ImGui::DockBuilderGetNode(space) || m_panelLayouts[host] != m_panelLayoutGeneration)
+    {
+        m_panelLayouts[host] = m_panelLayoutGeneration;
+        ImGui::DockBuilderRemoveNode(space);
+        ImGui::DockBuilderAddNode(space, ImGuiDockNodeFlags_DockSpace);
+        ImGui::DockBuilderSetNodeSize(space, ImGui::GetContentRegionAvail());
+        layout(space);
+        ImGui::DockBuilderFinish(space);
+    }
+    // A collapsed or hidden host keeps its panels docked (they hide with it).
+    ImGui::DockSpace(space, { 0, 0 }, visible ? ImGuiDockNodeFlags_None : ImGuiDockNodeFlags_KeepAliveOnly);
+    ImGui::End();
+    return space;
+}
+
+bool App::BeginPanel(const char* name, unsigned int space)
+{
+    ImGui::SetNextWindowDockID(space, ImGuiCond_FirstUseEver);
+    return ImGui::Begin(name);
 }
 
 // ---------------------------------------------------------------------------------------------- viewport

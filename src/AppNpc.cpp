@@ -4,6 +4,7 @@
 #include "App.hpp"
 
 #include <imgui.h>
+#include <imgui_internal.h>
 #include <imgui_stdlib.h>
 
 #include <algorithm>
@@ -339,19 +340,29 @@ void App::DrawNpcViewer()
 {
     if (!m_showNpc) return;
     NpcView& v = m_npc;
+    // Three panels the user can move: the list, the preview, what the model is made of.
     ImGui::SetNextWindowSize({ 1180, 700 }, ImGuiCond_FirstUseEver);
     if (v.focus) { ImGui::SetNextWindowFocus(); v.focus = false; }
-    if (!ImGui::Begin("NPC viewer", &m_showNpc)) { ImGui::End(); return; }
+    const unsigned int space = PanelHost("NPC viewer", &m_showNpc, [](unsigned int node) {
+        ImGuiID rest = node;
+        const ImGuiID left = ImGui::DockBuilderSplitNode(rest, ImGuiDir_Left, 0.23f, nullptr, &rest);
+        const ImGuiID right = ImGui::DockBuilderSplitNode(rest, ImGuiDir_Right, 0.42f, nullptr, &rest);
+        ImGui::DockBuilderDockWindow("NPC list", left);
+        ImGui::DockBuilderDockWindow("NPC details", right);
+        ImGui::DockBuilderDockWindow("NPC preview", rest);
+    });
+    if (!m_showNpc) return;
     if (!m_creatures.Connected())
     {
+        BeginPanel("NPC list", space);
         ImGui::TextColored(kQuiet, "Connect the world database (File > Server setup) to view creature templates.");
         ImGui::End();
         return;
     }
 
-    // Left: every creature template, filtered by name or entry.
+    // The list: every creature template, filtered by name or entry.
     const auto& templates = UnitTemplates(SpawnKind::Creature);
-    if (ImGui::BeginChild("##npclist", { 270, 0 }, ImGuiChildFlags_Borders | ImGuiChildFlags_ResizeX))
+    if (BeginPanel("NPC list", space))
     {
         ImGui::SetNextItemWidth(-1);
         ImGui::InputTextWithHint("##npcfilter", "Filter: name or entry", &v.filter);
@@ -390,15 +401,12 @@ void App::DrawNpcViewer()
         }
         ImGui::EndChild();
     }
-    ImGui::EndChild();
-    ImGui::SameLine();
+    ImGui::End();
 
-    // Middle: the preview and the animation bar.
-    const float sideWidth = 400;
+    // The preview and the animation bar.
     const ImGuiStyle& style = ImGui::GetStyle();
     const float barHeight = ImGui::GetFrameHeightWithSpacing() * 2 + style.ItemSpacing.y;
-    // Its right edge drags: a narrower preview gives the side panel room for every tab. Remembered with the layout.
-    if (ImGui::BeginChild("##npcmain", { std::max(ImGui::GetContentRegionAvail().x - sideWidth - style.ItemSpacing.x, 100.0f), 0 }, ImGuiChildFlags_ResizeX))
+    if (BeginPanel("NPC preview", space))
     {
         if (v.entry)
         {
@@ -452,12 +460,10 @@ void App::DrawNpcViewer()
             if (ImGui::SliderFloat("##time", &v.timeMs, 0, std::max(duration - 1, 0.0f), "%.0f ms")) v.paused = true;
         }
     }
-    ImGui::EndChild();
-    ImGui::SameLine();
+    ImGui::End();
 
-    // Right: what the model is made of.
-    if (ImGui::BeginChild("##npcside", { 0, 0 }, ImGuiChildFlags_Borders)) DrawNpcEditor(true);
-    ImGui::EndChild();
+    // What the model is made of.
+    if (BeginPanel("NPC details", space)) DrawNpcEditor(true);
     ImGui::End();
 }
 

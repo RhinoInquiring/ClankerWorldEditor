@@ -1371,4 +1371,81 @@ namespace checks
         printf("%s\n", problems ? "AREA CHECK FAILED" : "area check passed");
         return problems ? 1 : 0;
     }
+
+    /// `--race-server-check <AC server dir> [race] [donor race]`: the Races window's Server tab against the real world
+    /// database, cleaning up after itself: copies the donor's (default Human) character-creation rows to the race (default
+    /// 22, which must have none) for Warrior, Paladin and Shaman (a class the donor cannot be comes from another race),
+    /// with Orcish as its language; sets one start; checks what the database holds; undoes everything and checks it is gone.
+    int RaceServerCheck()
+    {
+        if (__argc < 3 || !__wargv) return 2;
+        setvbuf(stdout, nullptr, _IONBF, 0);
+        std::string password, note, error;
+        const auto profile = ServerProfile::FromWorldserverConf(std::filesystem::path(__wargv[2]), password, note);
+        if (!profile) { printf("%s\n", note.c_str()); return 1; }
+        Db db;
+        if (!db.Connect(profile->dbHost, profile->dbPort, profile->dbUser, password, profile->worldDb, error)) { printf("db: %s\n", error.c_str()); return 1; }
+        const uint32_t race = __argc > 3 ? uint32_t(_wtoi(__wargv[3])) : 22, donor = __argc > 4 ? uint32_t(_wtoi(__wargv[4])) : 1;
+        int problems = 0;
+        auto expect = [&](bool ok, const std::string& what) { printf("%s %s\n", ok ? "ok  " : "FAIL", what.c_str()); problems += !ok; };
+        auto count = [&](const std::string& sql) {
+            const auto rows = db.Query(sql, error);
+            return rows && !rows->empty() ? std::stoul((*rows)[0][0]) : 0ul;
+        };
+        const std::string r = std::to_string(race), bit = std::to_string(RaceBit(race));
+        auto inDb = [&] {
+            return count("SELECT COUNT(*) FROM playercreateinfo WHERE race = " + r) + count("SELECT COUNT(*) FROM playercreateinfo_action WHERE race = " + r) +
+                   count("SELECT COUNT(*) FROM player_race_stats WHERE Race = " + r) + count("SELECT COUNT(*) FROM playercreateinfo_skills WHERE raceMask = " + bit) +
+                   count("SELECT COUNT(*) FROM playercreateinfo_item WHERE race = " + r) + count("SELECT COUNT(*) FROM playercreateinfo_spell_custom WHERE racemask = " + bit);
+        };
+        if (const unsigned long before = inDb()) { printf("race %u already has %lu row(s) in the database: pick another race\n", race, before); return 1; }
+
+        ChangeStore store;
+        TableRowsAdapter starts{ store, "playercreateinfo", "race", "class" }, actions{ store, "playercreateinfo_action", "race", "class" },
+            items{ store, "playercreateinfo_item", "race", "class" }, stats{ store, "player_race_stats", "Race" },
+            skills{ store, "playercreateinfo_skills", "raceMask", "skill" }, spells{ store, "playercreateinfo_spell_custom", "racemask", "Spell" };
+        const RaceServerTables t{ starts, actions, items, stats, skills, spells };
+        for (TableRowsAdapter* a : { &starts, &actions, &items, &stats, &skills, &spells })
+        {
+            store.Register(*a);
+            a->SetDb(&db);
+        }
+        auto apply = [&](const std::vector<Change>& parts, const char* label) {
+            for (const Change& c : parts)
+                for (TableRowsAdapter* a : { &starts, &actions, &items, &stats, &skills, &spells })
+                    if (c.domain == a->Domain()) a->Apply(c);
+            store.Commit(parts, label);
+        };
+        const std::vector<uint32_t> classes{ 1, 2, 7 };
+        std::vector<uint32_t> fallbacks;
+        for (uint32_t id = 1; id < 12; ++id)
+            if (id != donor) fallbacks.push_back(id);
+        apply(CopyRaceServerRows(race, donor, classes, 1 /* Orcish */, fallbacks, t), "copy");
+
+        expect(count("SELECT COUNT(*) FROM playercreateinfo WHERE race = " + r) == 3, "a start for each of the 3 classes, in the database");
+        expect(count("SELECT COUNT(*) FROM playercreateinfo WHERE race = " + r + " AND class = 7") == 1, "Shaman's start from a race that has one");
+        const unsigned long donorActions = count("SELECT COUNT(*) FROM playercreateinfo_action WHERE race = " + std::to_string(donor) + " AND class IN (1, 2)");
+        const unsigned long shamanActions = count("SELECT COUNT(*) FROM playercreateinfo_action WHERE class = 7 AND race = (SELECT MIN(race) FROM playercreateinfo WHERE class = 7 AND race <> " + r + ")");
+        expect(count("SELECT COUNT(*) FROM playercreateinfo_action WHERE race = " + r) == donorActions + shamanActions,
+               std::to_string(donorActions + shamanActions) + " action bar buttons");
+        expect(count("SELECT COUNT(*) FROM player_race_stats a JOIN player_race_stats b ON b.Race = " + std::to_string(donor) +
+                     " WHERE a.Race = " + r + " AND a.Strength = b.Strength AND a.Spirit = b.Spirit") == 1, "the donor's base stats");
+        expect(count("SELECT COUNT(*) FROM playercreateinfo_skills WHERE raceMask = " + bit + " AND skill = 109") == 1 &&
+                   count("SELECT COUNT(*) FROM playercreateinfo_skills WHERE raceMask = " + bit + " AND skill = 98") == 0,
+               "its own mask's language is Orcish (109), not the donor's Common");
+        // One class's start moved; the other classes' kept.
+        apply({ SetRaceStart(race, 1, 0, 12, -8949.95f, -132.49f, 83.53f, 0.5f, t) }, "start");
+        expect(count("SELECT COUNT(*) FROM playercreateinfo WHERE race = " + r + " AND class = 1 AND zone = 12 AND ABS(position_x + 8949.95) < 0.01") == 1 &&
+                   count("SELECT COUNT(*) FROM playercreateinfo WHERE race = " + r) == 3,
+               "Warrior's start set, the others kept");
+        store.Undo();
+        store.Undo();
+        expect(inDb() == 0, "undo leaves the database as it was");
+        store.Redo();
+        expect(count("SELECT COUNT(*) FROM playercreateinfo WHERE race = " + r) == 3, "redo writes them again");
+        store.Undo();
+        expect(inDb() == 0, "and undo takes them away again");
+        printf("%d problem(s)\n", problems);
+        return problems ? 1 : 0;
+    }
 }

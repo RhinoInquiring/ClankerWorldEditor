@@ -3,6 +3,7 @@
 #include "Areas.hpp"
 #include "Changes.hpp"
 #include "Formats.hpp"
+#include "Tables.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -174,6 +175,33 @@ bool RemoveRaceChoice(nlohmann::json& package, uint32_t sex, RaceChoice choice, 
 /// `error`) when ids ran out.
 bool SetRaceClasses(nlohmann::json& package, const std::set<uint32_t>& classes, const nlohmann::json& donor,
                     const std::function<uint32_t()>& outfitIds, std::string& error);
+
+/// The world database rows a new character of a race is made from (AzerothCore's ObjectMgr::LoadPlayerInfo): per race
+/// and class its start (playercreateinfo), action bar buttons and extra items, per race its base stats, and per race mask
+/// its skills and spells. Rows of a mask that is the race's own bit belong to it; rows of shared masks (0 = every race,
+/// or several races) are left alone.
+struct RaceServerTables
+{
+    TableRowsAdapter& start;     // playercreateinfo by race: race, class, map, zone, position_x/y/z, orientation
+    TableRowsAdapter& actions;   // playercreateinfo_action by race: race, class, button, action, type
+    TableRowsAdapter& items;     // playercreateinfo_item by race: race, class, itemid, amount, Note
+    TableRowsAdapter& stats;     // player_race_stats by Race: Strength, Agility, Stamina, Intellect, Spirit
+    TableRowsAdapter& skills;    // playercreateinfo_skills by raceMask: classMask, skill, rank, comment
+    TableRowsAdapter& spells;    // playercreateinfo_spell_custom by racemask: classmask, Spell, Note
+};
+/// A race's own bit of an AzerothCore race mask (race 1 = 1).
+inline uint32_t RaceBit(uint32_t race) { return race >= 1 && race <= 32 ? 1u << (race - 1) : 0; }
+/// The SkillLine of a language (Languages.dbc id): Common 98, Orcish 109, ... 0 when not a racial language.
+uint32_t LanguageSkill(uint32_t language);
+
+/// The changes giving `race` the server rows `donor` has, for `classes`: its starts, action bars and extra items per
+/// class (a class the donor has no start of takes the first race's that has one, `fallbacks` in order), its base stats,
+/// and the skills and spells of its own mask bit; a racial language skill becomes `baseLanguage`'s. Changes not yet
+/// applied, one per table touched.
+std::vector<Change> CopyRaceServerRows(uint32_t race, uint32_t donor, const std::vector<uint32_t>& classes, uint32_t baseLanguage,
+                                       const std::vector<uint32_t>& fallbacks, const RaceServerTables& t);
+/// The change setting the start of one class of a race (playercreateinfo), keeping the other classes' rows.
+Change SetRaceStart(uint32_t race, uint32_t cls, uint32_t map, uint32_t zone, float x, float y, float z, float orientation, const RaceServerTables& t);
 
 /// Reads synthetic 1.12 and 3.3.5 tables and round-trips a package; false on the first wrong field.
 bool RacesSelfTest();

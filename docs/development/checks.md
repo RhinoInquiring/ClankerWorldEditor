@@ -34,6 +34,7 @@ Direct3D device. Checks that write files use a temporary folder and remove it.
 | `--blueprint-check <Data> <map> <x> <y> <out.png>` | Save, load and draw a blueprint |
 | `--model-check <Data> <map> <x> <y>` | Every model a tile places loads, boxes fit |
 | `--dialogue-check <AC server dir>` | Dialogue tables against the world database: menu, submenu, texts, option, conditions and a bark as one batch; a non-gossip condition under the same id is never touched; undo leaves nothing |
+| `--race-server-check <AC server dir> [race] [donor race]` | The Races window's Server tab on the world database: a donor's (default Human) character-creation rows copied to a race (default 22, which must have none) for Warrior, Paladin and Shaman (from another race), Orcish as its language, one start set, then undone (leaves the database as it was) |
 | `--npc-check <AC server dir> [entry]` | NPC editor tables against the world database: copy a template with models, equipment and loot (one batch), edit, undo; leaves the database as it was |
 | `--skin-check <Data> <out.png> <display id> [...]` | Character skins the editor composites vs Blizzard's bakes, side by side; fails above a mean difference of 12 |
 | `--race-check <Data> [other Data...]` | Every race of each client in its own layout (1.12 or 3.3.5): identity, classes, choices per sex, textures missing; fails when a playable race has no character model |

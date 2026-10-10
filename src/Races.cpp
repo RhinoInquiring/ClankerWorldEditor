@@ -528,6 +528,7 @@ std::vector<Change> ImportRaceChanges(const RaceCatalog& source, const std::stri
     const std::set<uint32_t> sectionIds = project.Ids("CharSections"), hairIds = project.Ids("CharHairGeosets"), outfitIds = project.Ids("CharStartOutfit");
 
     p["ChrRaces"]["ID"] = target;
+    p["ChrRaces"]["Flags"] = U(p["ChrRaces"], "Flags") & ~1u;   // 0x1 = an NPC race: an import is meant to be played
     for (const char* table : { "CharSections", "CharHairGeosets", "CharacterFacialHairStyles", "CharBaseInfo", "CharStartOutfit" })
         for (nlohmann::json& row : p[table]) row["RaceID"] = target;
     for (nlohmann::json& row : p["CharSections"])
@@ -687,6 +688,88 @@ bool SetRaceClasses(nlohmann::json& package, const std::set<uint32_t>& classes, 
     package["CharBaseInfo"] = std::move(base);
     package["CharStartOutfit"] = std::move(outfits);
     return true;
+}
+
+uint32_t LanguageSkill(uint32_t language)
+{
+    switch (language)   // Languages.dbc id -> SkillLine (the racial languages players learn)
+    {
+    case 1: return 109;    // Orcish
+    case 2: return 113;    // Darnassian
+    case 3: return 115;    // Taurahe
+    case 6: return 111;    // Dwarvish
+    case 7: return 98;     // Common
+    case 10: return 137;   // Thalassian
+    case 13: return 313;   // Gnomish
+    case 14: return 315;   // Troll
+    case 33: return 673;   // Gutterspeak
+    case 35: return 759;   // Draenei
+    default: return 0;
+    }
+}
+
+std::vector<Change> CopyRaceServerRows(uint32_t race, uint32_t donor, const std::vector<uint32_t>& classes, uint32_t baseLanguage,
+                                       const std::vector<uint32_t>& fallbacks, const RaceServerTables& t)
+{
+    std::vector<Change> out;
+    const std::string r = std::to_string(race);
+    auto num = [](const nlohmann::json& row, const char* col) { const auto it = row.find(col); return it != row.end() && it->is_string() ? uint32_t(std::stoul("0" + it->get<std::string>())) : 0u; };
+    // Per class: the donor's rows, else the first fallback race's that has a start for it.
+    auto perClass = [&](TableRowsAdapter& table, const char* raceColumn) {
+        std::vector<nlohmann::json> rows;
+        for (uint32_t cls : classes)
+        {
+            for (uint32_t from : [&] { std::vector<uint32_t> v{ donor }; v.insert(v.end(), fallbacks.begin(), fallbacks.end()); return v; }())
+            {
+                std::vector<nlohmann::json> found;
+                for (nlohmann::json row : table.Rows(from))
+                    if (num(row, "class") == cls) { row[raceColumn] = r; found.push_back(std::move(row)); }
+                bool hasStart = false;
+                for (const nlohmann::json& s : t.start.Rows(from)) hasStart = hasStart || num(s, "class") == cls;
+                if (!hasStart) continue;   // this race cannot be the class: try the next
+                rows.insert(rows.end(), found.begin(), found.end());
+                break;
+            }
+        }
+        out.push_back(table.MakeChange(race, table.Rows(race), rows, "race server rows"));
+    };
+    perClass(t.start, "race");
+    perClass(t.actions, "race");
+    perClass(t.items, "race");
+    std::vector<nlohmann::json> stats;
+    for (nlohmann::json row : t.stats.Rows(donor)) { row["Race"] = r; stats.push_back(std::move(row)); }
+    out.push_back(t.stats.MakeChange(race, t.stats.Rows(race), stats, "race server rows"));
+    // Skills and spells of the donor's own mask bit; a racial language becomes the race's own.
+    const uint32_t bit = RaceBit(race), donorBit = RaceBit(donor), language = LanguageSkill(baseLanguage);
+    std::vector<nlohmann::json> skills;
+    for (nlohmann::json row : t.skills.Rows(donorBit))
+    {
+        row["raceMask"] = std::to_string(bit);
+        const uint32_t skill = num(row, "skill");
+        bool isLanguage = false;
+        for (uint32_t l : { 1u, 2u, 3u, 6u, 7u, 10u, 13u, 14u, 33u, 35u }) isLanguage = isLanguage || LanguageSkill(l) == skill;
+        if (isLanguage && language) row["skill"] = std::to_string(language);
+        skills.push_back(std::move(row));
+    }
+    if (language && std::none_of(skills.begin(), skills.end(), [&](const nlohmann::json& s) { return num(s, "skill") == language; }))
+        skills.push_back({ { "raceMask", std::to_string(bit) }, { "classMask", "0" }, { "skill", std::to_string(language) }, { "rank", "300" },
+                           { "comment", "language" } });
+    out.push_back(t.skills.MakeChange(bit, t.skills.Rows(bit), skills, "race server rows"));
+    std::vector<nlohmann::json> spells;
+    for (nlohmann::json row : t.spells.Rows(donorBit)) { row["racemask"] = std::to_string(bit); spells.push_back(std::move(row)); }
+    out.push_back(t.spells.MakeChange(bit, t.spells.Rows(bit), spells, "race server rows"));
+    return out;
+}
+
+Change SetRaceStart(uint32_t race, uint32_t cls, uint32_t map, uint32_t zone, float x, float y, float z, float orientation, const RaceServerTables& t)
+{
+    std::vector<nlohmann::json> rows;
+    for (const nlohmann::json& row : t.start.Rows(race))
+        if (row.value("class", std::string()) != std::to_string(cls)) rows.push_back(row);
+    auto f = [](float v) { char b[32]; std::snprintf(b, sizeof b, "%.4f", v); return std::string(b); };
+    rows.push_back({ { "race", std::to_string(race) }, { "class", std::to_string(cls) }, { "map", std::to_string(map) }, { "zone", std::to_string(zone) },
+                     { "position_x", f(x) }, { "position_y", f(y) }, { "position_z", f(z) }, { "orientation", f(orientation) } });
+    return t.start.MakeChange(race, t.start.Rows(race), rows, "race start");
 }
 
 bool RacesSelfTest()

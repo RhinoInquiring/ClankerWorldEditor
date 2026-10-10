@@ -7,10 +7,13 @@ One creature template in a preview of its own: every animation, its skins, what 
 textures. The layout follows wow.export's Creatures tab ([Kruithne/wow.export](https://github.com/Kruithne/wow.export),
 MIT), rebuilt on this editor's renderer and AzerothCore's tables. Needs the world database.
 
+Its three panels, **NPC list**, **NPC preview** and **NPC details**, can be moved like any other panel: drag a tab to dock
+it elsewhere, tab panels together or float them. View > Reset panel layout puts them back.
+
 | Part | What it shows |
 | --- | --- |
-| List (left) | Every `creature_template`, filtered by name or entry |
-| Preview | The model as it spawns. Left drag turns, right drag pans, the wheel zooms |
+| List (NPC list) | Every `creature_template`, filtered by name or entry |
+| Preview (NPC preview) | The model as it spawns. Left drag turns, right drag pans, the wheel zooms |
 | Animation bar | Every animation of the model (names from `AnimationData.dbc`, `.anim` files loaded as needed), play / pause, frame steps, a time slider, speed |
 | Models | The template's `creature_template_model` rows (display, scale, chance); pick one to show it |
 | Skins | Every display drawing the same model, with its skin names (preview only) |

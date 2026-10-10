@@ -119,6 +119,15 @@ private:
     void DrawToolbar();
     void DrawStatusBar();
     void BuildDefaultLayout(unsigned int dockspace);
+    /// A window made of panels the user can move (every multi-panel window is one): `host` holds a dock space the panels
+    /// dock into, arranged by `layout` (DockBuilder calls on the space's node) the first time and after View > Reset panel
+    /// layout. The panels are windows of their own (BeginPanel): they can be moved, tabbed together, docked anywhere or
+    /// floated. Returns the dock space.
+    unsigned int PanelHost(const char* host, bool* open, const std::function<void(unsigned int)>& layout);
+    /// One panel of a host: a window docked into `space` until the user moves it. Always pair with ImGui::End().
+    bool BeginPanel(const char* name, unsigned int space);
+    uint64_t m_panelLayoutGeneration = 0;                 // bumped by Reset panel layout: hosts lay their panels out again
+    std::map<std::string, uint64_t> m_panelLayouts;       // host -> the generation its panels were laid out at
     void DrawViewport(float dt);
     void DrawToolsPanel();
     /// The Tools panel's sections are tabs, so nothing needs scrolling: BeginSections opens the tab bar (one per tool,
@@ -844,6 +853,7 @@ private:
         bool editDirty = false;
         uint32_t editSex = 0, editClass = 0, editDonor = 0;
         int pickSlot = -1;                               // the outfit slot the item search fills
+        uint32_t serverDonor = 0;                        // the race the Server tab copies rows from
         // The preview has renderers of its own: a source's files never mix with another's of the same name.
         const MpqChain* previewMpq = nullptr;
         std::unique_ptr<Renderer> renderer;
@@ -859,6 +869,8 @@ private:
     void DrawRaces();
     /// The Races window's editor of a project race: identity, classes, looks, starting items; applied as one change.
     void DrawRaceEditor(const RaceCatalog::Race& race);
+    /// The editor's Server tab: the world database rows new characters of the race are made from.
+    void DrawRaceServerTab(const RaceCatalog::Race& race, const nlohmann::json& package);
     /// Builds the preview's look of the selected race and choices (and its renderers, for another source).
     void RefreshRacePreview(bool frame);
     void DrawNpcViewer();
@@ -1072,7 +1084,7 @@ private:
     {
         return { &m_waypoints, &m_addons, &m_triggerRows, &m_teleports, &m_instances, &m_gossipPois, &m_teles, &m_npcTemplates, &m_npcModels, &m_npcEquips,
                  &m_lootDrops, &m_lootPickpocket, &m_lootSkinning, &m_gossipMenus, &m_gossipOptions, &m_npcTexts, &m_gossipConditions, &m_creatureTexts,
-                 &m_weather };
+                 &m_weather, &m_raceStarts, &m_raceActions, &m_raceItems, &m_raceStats, &m_raceSkills, &m_raceSpells };
     }
     PoiKind m_poiKind = PoiKind::MapIcon;                 // POIs tool: the kind listed, placed and selected
     uint32_t m_poiSel = 0;                                // selected point id of m_poiKind (0 = none)
@@ -1097,6 +1109,12 @@ private:
     DbcTable m_modelRows{ m_mpq, m_store, "CreatureModelData", CreatureModelDataFields(), 28 };
     // Races (AppRaces.cpp): the races the project imports or changes, one package each.
     RaceAdapter m_raceRows;
+    // ... and the world database rows its new characters are made from (AppRaces.cpp Server tab).
+    TableRowsAdapter m_raceStarts{ m_store, "playercreateinfo", "race", "class" }, m_raceActions{ m_store, "playercreateinfo_action", "race", "class" },
+                     m_raceItems{ m_store, "playercreateinfo_item", "race", "class" }, m_raceStats{ m_store, "player_race_stats", "Race" },
+                     m_raceSkills{ m_store, "playercreateinfo_skills", "raceMask", "skill" },
+                     m_raceSpells{ m_store, "playercreateinfo_spell_custom", "racemask", "Spell" };
+    RaceServerTables RaceServer() { return { m_raceStarts, m_raceActions, m_raceItems, m_raceStats, m_raceSkills, m_raceSpells }; }
     DbcTable m_extraRows{ m_mpq, m_store, "CreatureDisplayInfoExtra",
                           { { "ID", 0, 'i' }, { "DisplayRaceID", 1, 'i' }, { "DisplaySexID", 2, 'i' }, { "SkinID", 3, 'i' }, { "FaceID", 4, 'i' },
                             { "HairStyleID", 5, 'i' }, { "HairColorID", 6, 'i' }, { "FacialHairID", 7, 'i' }, { "NPCItemDisplay[0]", 8, 'i' },
