@@ -1643,9 +1643,29 @@ namespace checks
         for (const auto& [id, package] : t.races.Packages()) projectRaces.Apply(id, package);
         std::vector<std::string> notes;
         expect(ExportRaces(projectRaces, t.races.Packages(), [&](const std::string& c) { return c == "source" ? &source : nullptr; },
-                           { client / "DBFilesClient", server }, client, notes, error),
+                           { client / "DBFilesClient", server }, client, notes, error, &base),
                "race tables and files exported " + error);
         for (const std::string& n : notes) printf("     note: %s\n", n.c_str());
+        {
+            // The creator: the client's script kept whole, the race added once, and an export of an export the same.
+            const auto original = base.Read("Interface\\GlueXML\\CharacterCreate.lua");
+            const auto script = ReadFileBytes(client / "Interface" / "GlueXML" / "CharacterCreate.lua");
+            const std::string text = script ? std::string(script->begin(), script->end()) : std::string();
+            std::string head = original ? std::string(original->begin(), original->end()) : std::string();
+            if (const size_t cut = head.find("\n-- wow-world-editor"); cut != std::string::npos) head.resize(cut);
+            while (!head.empty() && std::isspace((unsigned char)head.back())) head.pop_back();
+            size_t playable = 0;
+            for (const RaceCatalog::Race& race : projectRaces.Races()) playable += !(race.flags & 1);
+            std::string upper = projectRaces.Find(target)->fileString;
+            for (char& ch : upper) ch = char(std::toupper((unsigned char)ch));
+            expect(script && text.compare(0, head.size(), head) == 0, "creator script starts with the client's own");
+            expect(text.find("EDITOR_CREATOR_PLAYABLE = " + std::to_string(playable) + ";") != std::string::npos &&
+                       text.find("file = \"" + upper + "\", donor = ") != std::string::npos && text.find(", scene = ") != std::string::npos,
+                   "creator script lists race " + upper + " among " + std::to_string(playable) + " playable");
+            auto has = [&](const std::string& f) { return base.HasInstalled(f); };
+            expect(CreatorScript(text, projectRaces, t.races.Packages(), has) == CreatorScript(head, projectRaces, t.races.Packages(), has),
+                   "an export over an earlier export's script adds the races once");
+        }
         size_t present = 0;
         for (const nlohmann::json& f : p.at("files"))
         {
@@ -1667,6 +1687,14 @@ namespace checks
         played.Open(std::vector<MpqLayer>{ { MpqLayer::Kind::MpqFolder, arg(2) }, { MpqLayer::Kind::Folder, client.string() } });
         RaceCatalog back;
         expect(back.Load(played, error), "the exported tables read " + error);
+        {
+            // Looks players may choose (3.3.5 flag 0x1) as many as the source offers players, whatever its layout.
+            size_t player = 0, sourcePlayer = 0;
+            for (const RaceCatalog::Section& s : back.Sections()) player += s.race == target && (s.flags & 1);
+            for (const RaceCatalog::Section& s : sourceRaces.Sections()) sourcePlayer += s.race == sourceRace && (s.flags & 1);
+            expect(player && player == sourcePlayer, std::to_string(player) + " looks players may choose, as in the source (" +
+                                                         RaceCatalog::LayoutName(sourceRaces.Format()) + ")");
+        }
         const RaceCatalog::Race* r = back.Find(target);
         expect(r && back.Races().size() == baseRaces.Races().size() + 1, "race " + std::to_string(target) + " is there, beside the client's " +
                                                                            std::to_string(baseRaces.Races().size()) + " races");
@@ -1709,7 +1737,8 @@ namespace checks
                 ok = ok && (composed.count(name) || played.HasOwn(name));
             expect(ok, "its male character composites from the client and the export");
         }
-        fs::remove_all(dir, ec);
+        if (!_wgetenv(L"WWE_KEEP")) fs::remove_all(dir, ec);   // WWE_KEEP=1 keeps the export to look at
+        else printf("kept %s\n", dir.string().c_str());
         printf("%d problem(s)\n", problems);
         return problems ? 1 : 0;
     }

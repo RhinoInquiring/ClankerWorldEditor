@@ -8,7 +8,7 @@
 | --- | --- | --- |
 | Export client files | Ctrl+E | Writes the client files to `<project>/out/client`, the server files to `<project>/out/server` |
 | Build patch MPQ | Ctrl+Shift+E | Exports, then packs `out/client` into `<project>/out/patch-enUS-Z.MPQ` |
-| Build patch MPQ and install into client | | Also copies it into the client's `Data\enUS\` |
+| Build patch MPQ and install into client and server | | Also copies it into the client's `Data\enUS\`, and, with a server folder set (File > Server setup), copies `out/server/dbc` into the server's `Data\dbc` and writes the project's rows into the connected world database. The server's own DBCs are kept once in `<project>/server-build/original-dbc` and put back when the project no longer changes that table. Restart the worldserver afterwards. |
 | Play test | F5 | Exports into the WXL client's overlay for a quick relog test |
 
 Every export starts from an empty `out/client`, so an undone edit never leaves a file behind.

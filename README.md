@@ -104,6 +104,7 @@ drawn into place. Right: Blizzard's baked skins (left column) beside the editor'
 | Feature | What it does |
 | --- | --- |
 | [Sources](docs/concepts/sources.md) | Where game files come from: client folders, single MPQs, unpacked folders, mixed folders, in layers |
+| [Client versions](docs/concepts/client-versions.md) | Converting other clients' data (1.12, newer) to 3.3.5a: what converts, the meaning rules, adding a version |
 | [Moving things](docs/concepts/moving-things.md) | One set of handles, keys and live fields for everything that moves: objects, spawns, triggers, points, path points |
 | [Ghost layers](docs/versions/ghost-layers.md) | Show other versions of the map over yours; see every version of a tile, patch history included |
 | [Compare](docs/versions/compare.md) | Flip a selected area through every other version in place, with what each would cost to paste |

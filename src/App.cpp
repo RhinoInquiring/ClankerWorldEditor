@@ -9,6 +9,7 @@
 #include <ImGuizmo.h>
 
 #include <shobjidl.h>
+#include <wincodec.h>
 
 #include <algorithm>
 #include <cctype>
@@ -70,6 +71,50 @@ std::optional<std::string> PickFolder(HWND owner, const wchar_t* title)
     std::string result = Narrow(path);
     CoTaskMemFree(path);
     return result;
+}
+
+std::optional<std::string> PickPicture(HWND owner, const wchar_t* title)
+{
+    ComPtr<IFileOpenDialog> dlg;
+    if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dlg)))) return std::nullopt;
+    const COMDLG_FILTERSPEC types[] = { { L"Pictures", L"*.png;*.jpg;*.jpeg;*.bmp;*.blp" } };
+    dlg->SetFileTypes(1, types);
+    dlg->SetTitle(title);
+    if (FAILED(dlg->Show(owner))) return std::nullopt;
+    ComPtr<IShellItem> item;
+    PWSTR path = nullptr;
+    if (FAILED(dlg->GetResult(&item)) || FAILED(item->GetDisplayName(SIGDN_FILESYSPATH, &path))) return std::nullopt;
+    std::string result = Narrow(path);
+    CoTaskMemFree(path);
+    return result;
+}
+
+bool ReadPicture(const std::string& path, uint32_t& width, uint32_t& height, std::vector<uint8_t>& rgba)
+{
+    if (path.size() > 4 && _stricmp(path.c_str() + path.size() - 4, ".blp") == 0)
+    {
+        const auto bytes = ReadFileBytes(path);
+        const auto image = bytes ? ParseBlp(*bytes) : std::nullopt;
+        if (!image) return false;
+        width = image->width;
+        height = image->height;
+        rgba = BlpPixels(*image);
+        return !rgba.empty();
+    }
+    ComPtr<IWICImagingFactory> factory;
+    ComPtr<IWICBitmapDecoder> decoder;
+    ComPtr<IWICBitmapFrameDecode> frame;
+    ComPtr<IWICFormatConverter> converter;
+    wchar_t wide[1024] = {};
+    MultiByteToWideChar(CP_ACP, 0, path.c_str(), -1, wide, 1024);
+    if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory))) ||
+        FAILED(factory->CreateDecoderFromFilename(wide, nullptr, GENERIC_READ, WICDecodeMetadataCacheOnDemand, &decoder)) ||
+        FAILED(decoder->GetFrame(0, &frame)) || FAILED(factory->CreateFormatConverter(&converter)) ||
+        FAILED(converter->Initialize(frame.Get(), GUID_WICPixelFormat32bppRGBA, WICBitmapDitherTypeNone, nullptr, 0, WICBitmapPaletteTypeCustom)) ||
+        FAILED(converter->GetSize(&width, &height)) || !width || !height)
+        return false;
+    rgba.resize(size_t(width) * height * 4);
+    return SUCCEEDED(converter->CopyPixels(nullptr, width * 4, UINT(rgba.size()), rgba.data()));
 }
 
 namespace
@@ -355,7 +400,7 @@ bool App::Init(HWND hwnd, ID3D11Device* device, ID3D11DeviceContext* context, bo
         { "Export client files", "Ctrl+E", [this] { Export(false); }, hasProject },
         { "Play test (export to client overlay)", "F5", [this] { Export(true); }, hasProject },
         { "Build patch MPQ", "Ctrl+Shift+E", [this] { BuildPatch(false); }, hasProject },
-        { "Build patch MPQ and install it into the client", "", [this] { BuildPatch(true); }, hasProject },
+        { "Build patch MPQ and install it into the client and server", "", [this] { BuildPatch(true); }, hasProject },
         { "Undo", "Ctrl+Z", [this] { Undo(); }, [this] { return m_store.CanUndo(); } },
         { "Redo", "Ctrl+Y", [this] { Redo(); }, [this] { return m_store.CanRedo(); } },
         { "Group: Terrain", "F1", [this] { SetGroup(Group::Terrain); }, always },
@@ -697,7 +742,8 @@ void App::Export(bool playTest)
                     if (s.name == client) return s.mpq;
                 return nullptr;
             };
-            if (!ExportRaces(races, m_raceRows.Packages(), sourceNamed, { out / "DBFilesClient", m_project->dir / "out" / "server" / "dbc" }, out, notes, error))
+            if (!ExportRaces(races, m_raceRows.Packages(), sourceNamed, { out / "DBFilesClient", m_project->dir / "out" / "server" / "dbc" }, out, notes, error,
+                             &m_mpq, m_project->AssetsDir()))
                 Log("Races: %s", error.c_str());
             else if (!m_raceRows.Packages().empty())
                 Log("Races: %zu race(s) of the project in DBFilesClient and out/server/dbc (ChrRaces, CharSections, CharHairGeosets, "
@@ -788,6 +834,7 @@ void App::BuildPatch(bool install)
         m_problems.push_back({ Problem::Severity::Warning, "Patch", text });
     }
     if (!install) return;
+    InstallToServer();
     const fs::path target = m_project->PatchInstallPath(), temp = target.string() + ".partial";
     fs::create_directories(target.parent_path(), ec);
     fs::copy_file(patch, temp, fs::copy_options::overwrite_existing, ec);
@@ -2896,7 +2943,7 @@ void App::DrawMenuBar()
         if (ImGui::MenuItem("Export client files", "Ctrl+E", false, m_project.has_value())) Export(false);
         if (ImGui::MenuItem("Play test", "F5", false, m_project.has_value())) Export(true);
         if (ImGui::MenuItem("Build patch MPQ", "Ctrl+Shift+E", false, m_project.has_value())) BuildPatch(false);
-        if (ImGui::MenuItem("Build patch MPQ and install into client", nullptr, false, m_project.has_value())) BuildPatch(true);
+        if (ImGui::MenuItem("Build patch MPQ and install into client and server", nullptr, false, m_project.has_value())) BuildPatch(true);
         if (ImGui::MenuItem("Build server data (maps, vmaps, mmaps)...", nullptr, false, m_project.has_value())) m_showServerData = true;
         ImGui::Separator();
         if (ImGui::MenuItem("Project settings...", nullptr, false, m_project.has_value())) OpenProjectSettings();

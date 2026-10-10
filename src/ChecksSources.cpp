@@ -69,6 +69,22 @@ namespace checks
                    "layer report: 3 unpacked files, 1 single archive, no notes");
         }
         {
+            // A project's base: a pack's own tables and glue scripts never stand in for the client's (export writes
+            // whole tables and the creator script over them); its other files still win.
+            MpqLayer pack{ MpqLayer::Kind::Folder, (t / "pack").string() };
+            put(t / "pack" / "DBFilesClient" / "ChrRaces.dbc", "a pack's races");
+            put(t / "pack" / "Interface" / "GlueXML" / "CharacterCreate.lua", "a pack's creator");
+            put(t / "pack" / "Textures" / "Wwe" / "pack_only.dbc", "pack art");
+            MpqChain plain, c;
+            plain.Open(data);
+            c.Open({ client, pack });
+            c.SetMapsFromLowestLayer(true);
+            expect(c.Read("DBFilesClient\\ChrRaces.dbc") == plain.Read("DBFilesClient\\ChrRaces.dbc") &&
+                       c.Read("Interface\\GlueXML\\CharacterCreate.lua") == plain.Read("Interface\\GlueXML\\CharacterCreate.lua"),
+                   "client tables and glue scripts come from the client, not a pack");
+            expect(text(c.Read("Textures\\Wwe\\pack_only.dbc")) == "pack art", "a pack's other files still read");
+        }
+        {
             MpqChain c;
             c.Open({ client, loose, single });
             expect(text(c.Read(shared)) == "from the single MPQ", "reordered: now the single MPQ wins");

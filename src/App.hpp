@@ -42,6 +42,10 @@
 
 /// Windows folder picker; nullopt when cancelled.
 std::optional<std::string> PickFolder(HWND owner, const wchar_t* title);
+/// A picture file (PNG, JPEG, BMP or BLP) from an open dialog.
+std::optional<std::string> PickPicture(HWND owner, const wchar_t* title);
+/// A picture file as RGBA pixels (WIC; BLP through ParseBlp). False when it cannot be read.
+bool ReadPicture(const std::string& path, uint32_t& width, uint32_t& height, std::vector<uint8_t>& rgba);
 
 /// The editor: owns the project, the change store, the adapters and every panel.
 class App
@@ -474,6 +478,12 @@ private:
     std::vector<ServerMap> ServerMapsToBuild() const;
     void DrawServerDataWindow();
     void StartServerData();
+    /// Writes every project row (spawns, table rows) into the connected database; false when one failed (logged).
+    bool SyncServerRows();
+    /// The server's side of installing the patch: out/server/dbc into <server>\Data\dbc (the server's originals kept
+    /// once in server-build\original-dbc and put back when the project stops changing a table), then the project's
+    /// rows into the database.
+    void InstallToServer();
     /// Puts back every server file a build replaced (the originals saved the first time).
     void RestoreServerData();
 

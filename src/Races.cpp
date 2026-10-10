@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstring>
 #include <fstream>
 #include <tuple>
@@ -153,6 +154,9 @@ namespace
         r.row = row;
         return r;
     }
+    /// CharSections.Flags of 1.12 (1: only NPCs wear it) as 3.3.5 means it (0x1: players may choose it).
+    uint32_t ClassicSectionFlags(uint32_t flags) { return (flags & 1) ? 0u : 1u; }
+
     RaceCatalog::Section SectionFrom(const nlohmann::json& j)
     {
         RaceCatalog::Section s{ U(j, "ID"), U(j, "RaceID"), U(j, "SexID"), U(j, "BaseSection"), U(j, "VariationIndex"), U(j, "ColorIndex"), U(j, "Flags") };
@@ -314,7 +318,11 @@ bool RaceCatalog::Load(const MpqChain& mpq, std::string& error)
     m_layout = l == &Wrath() ? Layout::Wrath : Layout::Classic;
     // Rows by 3.3.5 names whatever the layout; then the structs the window and the counts use.
     for (const nlohmann::json& j : Rows(races, l->races)) m_races.push_back(RaceFrom(j, m_layout == Layout::Wrath));
-    for (const nlohmann::json& j : Rows(ReadDbc(mpq, "CharSections"), l->sections)) m_sections.push_back(SectionFrom(j));
+    for (nlohmann::json& j : Rows(ReadDbc(mpq, "CharSections"), l->sections))
+    {
+        if (m_layout == Layout::Classic) j["Flags"] = ClassicSectionFlags(U(j, "Flags"));
+        m_sections.push_back(SectionFrom(j));
+    }
     for (const nlohmann::json& j : Rows(ReadDbc(mpq, "CharHairGeosets"), l->hair)) m_hair.push_back(HairFrom(j));
     for (const nlohmann::json& j : Rows(ReadDbc(mpq, "CharacterFacialHairStyles"), l->facial)) m_facial.push_back(FacialFrom(j));
     for (const nlohmann::json& j : Rows(ReadDbc(mpq, "CharBaseInfo"), l->baseInfo)) m_baseInfo.push_back({ uint8_t(U(j, "RaceID")), uint8_t(U(j, "ClassID")) });
@@ -545,6 +553,7 @@ std::vector<Change> ImportRaceChanges(const RaceCatalog& source, const std::stri
 
     p["ChrRaces"]["ID"] = target;
     p["ChrRaces"]["Flags"] = U(p["ChrRaces"], "Flags") & ~1u;   // 0x1 = an NPC race: an import is meant to be played
+    p["sectionFlags"] = "3.3.5";   // its CharSections flags as 3.3.5 means them (RaceCatalog::Load converts 1.12 ones)
     for (const char* table : { "CharSections", "CharHairGeosets", "CharacterFacialHairStyles", "CharBaseInfo", "CharStartOutfit" })
         for (nlohmann::json& row : p[table]) row["RaceID"] = target;
     for (nlohmann::json& row : p["CharSections"])
@@ -716,9 +725,282 @@ std::vector<uint8_t> RenameM2Textures(std::vector<uint8_t> m2, const std::map<st
     return m2;
 }
 
+namespace
+{
+    std::string Upper(std::string s)
+    {
+        for (char& c : s) c = char(std::toupper((unsigned char)c));
+        return s;
+    }
+
+    std::string LuaString(const std::string& s)
+    {
+        std::string out = "\"";
+        for (char c : s)
+        {
+            if (c == '\\' || c == '"') { out += '\\'; out += c; }
+            else if (c == '\n') out += "\\n";
+            else if (c != '\r') out += c;
+        }
+        return out + "\"";
+    }
+
+    // Appended to the client's CharacterCreate.lua (Lua 5.1, glue), after EDITOR_CREATOR_RACES. Races are found by the
+    // name the client shows (GetAvailableRaces, GetNameForRace): file strings can be shared (a High Elf with Blood Elf's)
+    // and are not always what the client reports for a new race. Only what a file string lacks is filled in globally.
+    constexpr const char* kCreatorLua = R"lua(do
+	local races, byName, byFile = EDITOR_CREATOR_RACES, {}, {};
+	local round = "Interface\\Glues\\CharacterCreate\\UI-CharacterCreate-RacesRound";
+	if ( MAX_RACES < EDITOR_CREATOR_PLAYABLE ) then
+		MAX_RACES = EDITOR_CREATOR_PLAYABLE;
+	end
+	for _, r in ipairs(races) do
+		for _, name in ipairs(r.names) do
+			byName[name] = r;
+		end
+		if ( r.own ) then
+			byFile[r.file] = r;
+		end
+		-- The client's own code looks these up by file string: they must be there.
+		for _, sex in ipairs({ "_MALE", "_FEMALE" }) do
+			if ( not RACE_ICON_TCOORDS[r.file..sex] ) then
+				RACE_ICON_TCOORDS[r.file..sex] = RACE_ICON_TCOORDS[r.donor..sex] or RACE_ICON_TCOORDS["HUMAN"..sex];
+			end
+		end
+		if ( not _G["RACE_INFO_"..r.file] ) then
+			_G["RACE_INFO_"..r.file] = _G["RACE_INFO_"..r.donor] or "";
+			_G["RACE_INFO_"..r.file.."_FEMALE"] = _G["RACE_INFO_"..r.donor.."_FEMALE"];
+			local i = 1;
+			while ( _G["ABILITY_INFO_"..r.donor..i] and not _G["ABILITY_INFO_"..r.file..i] ) do
+				_G["ABILITY_INFO_"..r.file..i] = _G["ABILITY_INFO_"..r.donor..i];
+				i = i + 1;
+			end
+		end
+		if ( not _G[r.file.."_DISABLED"] ) then
+			_G[r.file.."_DISABLED"] = _G[r.donor.."_DISABLED"] or "";
+		end
+	end
+
+	-- Scenes: the race's own or the one it borrows, with a sound track (SetBackgroundModel needs one for every scene).
+	local current;   -- the project race the creator shows, nil for others
+	local function Scene(name, r)
+		if ( r and strupper(name or "") ~= "DEATHKNIGHT" ) then
+			name = r.scene;
+		end
+		if ( name and GlueAmbienceTracks and not GlueAmbienceTracks[strupper(name)] ) then
+			GlueAmbienceTracks[strupper(name)] = (r and GlueAmbienceTracks[r.donor]) or GlueAmbienceTracks["CHARACTERSELECT"];
+		end
+		return name;
+	end
+	-- GlueParent's SetBackgroundModel, not the client's Get*BackgroundModel: the client registers its own functions
+	-- again when a screen opens, which would drop a replacement of them.
+	local setBackground = SetBackgroundModel;
+	function SetBackgroundModel(model, name)
+		local r;
+		if ( model == CharacterCreate ) then
+			r = current;
+		else
+			r = name and byFile[strupper(name)];
+		end
+		return setBackground(model, Scene(name, r));
+	end
+
+	-- The XML has ten race buttons: make the rest once the creator's frames exist.
+	local onLoad = CharacterCreate_OnLoad;
+	function CharacterCreate_OnLoad(self)
+		local parent = CharacterCreateRaceButton1:GetParent();
+		for i = 1, MAX_RACES do
+			if ( not _G["CharacterCreateRaceButton"..i] ) then
+				local button = CreateFrame("CheckButton", "CharacterCreateRaceButton"..i, parent, "CharacterCreateRaceButtonTemplate");
+				button:SetID(i);
+				button:Hide();
+			end
+		end
+		onLoad(self);
+	end
+
+	-- A project race's own icon on its button, and every button in its faction's column. Each button hangs from a slot
+	-- frame of scale 1 at its place, so shrinking a button never moves it.
+	local enumerate = CharacterCreateEnumerateRaces;
+	function CharacterCreateEnumerateRaces(...)
+		enumerate(...);
+		if ( CharacterCreate.numRaces > MAX_RACES ) then
+			return;
+		end
+		local columns = { Alliance = {}, Horde = {} };
+		for i = 1, CharacterCreate.numRaces do
+			local button = _G["CharacterCreateRaceButton"..i];
+			local r = byName[select(i * 3 - 2, ...)];
+			if ( r and r.icon ) then
+				for _, part in ipairs({ "NormalTexture", "PushedTexture" }) do
+					local texture = _G[button:GetName()..part];
+					texture:SetTexture(r.icon);
+					texture:SetTexCoord(0, 1, 0, 1);
+				end
+			end
+			local _, faction = GetFactionForRace(i);
+			table.insert(columns[faction] or columns.Horde, button);
+		end
+		for faction, buttons in pairs(columns) do
+			-- ponytail: the banners fit five rows at the client's spacing; more close up to the same height and shrink
+			-- once the gap is gone (about ten a side stay usable).
+			local step = #buttons > 5 and 236 / (#buttons - 1) or 59;
+			local scale = math.min(1, (step - 4) / 38);
+			for k, button in ipairs(buttons) do
+				local slot = button.editorSlot;
+				if ( not slot ) then
+					slot = CreateFrame("Frame", nil, button:GetParent());
+					slot:SetWidth(1);
+					slot:SetHeight(1);
+					button.editorSlot = slot;
+				end
+				slot:ClearAllPoints();
+				slot:SetPoint("TOP", slot:GetParent(), "TOP", faction == "Alliance" and -50 or 50, -61 - (k - 1) * step);
+				button:SetScale(scale);
+				button:ClearAllPoints();
+				button:SetPoint("TOP", slot, "TOP", 0, 0);
+			end
+		end
+	end
+
+	-- The panel: a project race's own icon and texts over what the client's code put there by file string.
+	local function Panel()
+		local r = current;
+		if ( r and r.round ) then
+			CharacterCreateRaceIcon:SetTexture(r.round);
+			CharacterCreateRaceIcon:SetTexCoord(0, 1, 0, 1);
+			CharacterCreateRaceIcon.editorIcon = true;
+		elseif ( CharacterCreateRaceIcon.editorIcon ) then
+			local _, file = GetNameForRace();
+			local coords = RACE_ICON_TCOORDS[strupper(file)..(GetSelectedSex() == SEX_MALE and "_MALE" or "_FEMALE")];
+			CharacterCreateRaceIcon:SetTexture(round);
+			if ( coords ) then
+				CharacterCreateRaceIcon:SetTexCoord(coords[1], coords[2], coords[3], coords[4]);
+			end
+			CharacterCreateRaceIcon.editorIcon = nil;
+		end
+		if ( r and r.texts ) then
+			CharacterCreateRaceText:SetText(r.info.."|n|n");
+			CharacterCreateRaceAbilityText:SetText(#r.abilities > 0 and table.concat(r.abilities, "\n\n").."\n\n" or "");
+		end
+	end
+	local setRace, setGender = SetCharacterRace, SetCharacterGender;
+	function SetCharacterRace(...)
+		current = byName[GetNameForRace()];
+		setRace(...);
+		Panel();
+	end
+	function SetCharacterGender(...)
+		setGender(...);
+		Panel();
+	end
+end
+)lua";
+}
+
+std::string CreatorBackgroundPath(const std::string& name)
+{
+    return "Interface\\Glues\\Models\\UI_" + name + "\\UI_" + name + ".m2";
+}
+
+uint32_t CreatorDonor(const RaceCatalog& project, const std::map<uint32_t, nlohmann::json>& packages, uint32_t race)
+{
+    const auto it = packages.find(race);
+    if (it != packages.end())
+        if (const uint32_t donor = it->second.value("creator", nlohmann::json::object()).value("donor", 0u); donor && donor != race && project.Find(donor))
+            return donor;
+    const RaceCatalog::Race* self = project.Find(race);
+    for (const RaceCatalog::Race& r : project.Races())
+        if (r.id != race && !(r.flags & 1) && !packages.count(r.id) && (!self || r.alliance == self->alliance)) return r.id;
+    return 0;
+}
+
+std::string CreatorScript(const std::string& clientLua, const RaceCatalog& project, const std::map<uint32_t, nlohmann::json>& packages,
+                          const std::function<bool(const std::string&)>& has)
+{
+    size_t playable = 0;
+    for (const RaceCatalog::Race& r : project.Races()) playable += !(r.flags & 1);
+    std::string entries;
+    for (const auto& [id, p] : packages)
+    {
+        const RaceCatalog::Race* race = project.Find(id);
+        if (!race || (race->flags & 1) || race->fileString.empty()) continue;
+        const nlohmann::json c = p.value("creator", nlohmann::json::object());
+        const RaceCatalog::Race* donor = project.Find(CreatorDonor(project, packages, id));
+        // Every name the client may show it by (GetNameForRace gives the one of the chosen sex).
+        std::vector<std::string> names;
+        for (const std::string& n : { race->name, race->names[0], race->names[1] })
+            if (!n.empty() && std::find(names.begin(), names.end(), n) == names.end()) names.push_back(n);
+        std::string entry = "\t{ names = {";
+        for (const std::string& n : names) entry += " " + LuaString(n) + ",";
+        entry += " }, file = " + LuaString(Upper(race->fileString)) + ", donor = " + LuaString(donor ? Upper(donor->fileString) : "HUMAN");
+        // A file string no other playable race has also finds it on character select (whose scene is by file string).
+        bool own = true;
+        for (const RaceCatalog::Race& other : project.Races())
+            own = own && (other.id == id || (other.flags & 1) || Lower(other.fileString) != Lower(race->fileString));
+        if (own) entry += ", own = true";
+        const std::string icon = c.value("icon", std::string());
+        if (!icon.empty() && has(icon + ".blp") && has(icon + "-Round.blp"))
+            entry += ", icon = " + LuaString(icon) + ", round = " + LuaString(icon + "-Round");
+        // The scene chosen, else its own, else the donor's.
+        std::string scene = c.value("background", std::string());
+        if (scene.empty() || !has(CreatorBackgroundPath(scene)))
+            scene = has(CreatorBackgroundPath(race->fileString)) ? race->fileString : donor ? donor->fileString : "Human";
+        entry += ", scene = " + LuaString(scene);
+        const std::string description = c.value("description", std::string());
+        std::vector<std::string> abilities;
+        for (const nlohmann::json& a : ChangeStore::List(c, "abilities"))
+            if (a.is_string() && !a.get<std::string>().empty()) abilities.push_back(a.get<std::string>());
+        if (!description.empty() || !abilities.empty())
+        {
+            entry += ",\n\t\ttexts = true, info = " + LuaString(description) + ",\n\t\tabilities = {";
+            for (const std::string& a : abilities) entry += "\n\t\t\t" + LuaString(a) + ",";
+            entry += " }";
+        }
+        entries += entry + " },\n";
+    }
+    if (entries.empty()) return {};
+    std::string lua = clientLua;
+    if (const size_t cut = lua.find("\n-- wow-world-editor"); cut != std::string::npos) lua.resize(cut);
+    while (!lua.empty() && std::isspace((unsigned char)lua.back())) lua.pop_back();
+    lua += '\n';
+    return lua + "\n-- wow-world-editor: the project's races in the character creator. Written by export: change a race in the editor, not here.\n"
+               "EDITOR_CREATOR_PLAYABLE = " + std::to_string(playable) + ";\nEDITOR_CREATOR_RACES = {\n" + entries + "};\n" + kCreatorLua;
+}
+
+std::pair<std::vector<uint8_t>, std::vector<uint8_t>> CreatorIcons(uint32_t width, uint32_t height, const uint8_t* rgba)
+{
+    // The middle square of the picture, sampled down (box filter) to 64 x 64; the round twin fades out past the circle.
+    constexpr uint32_t kSize = 64;
+    const uint32_t side = std::min(width, height), x0 = (width - side) / 2, y0 = (height - side) / 2;
+    std::vector<uint8_t> square(kSize * kSize * 4), circle;
+    for (uint32_t y = 0; y < kSize; ++y)
+        for (uint32_t x = 0; x < kSize; ++x)
+        {
+            const uint32_t ax = x0 + x * side / kSize, bx = std::max(ax + 1, x0 + (x + 1) * side / kSize);
+            const uint32_t ay = y0 + y * side / kSize, by = std::max(ay + 1, y0 + (y + 1) * side / kSize);
+            uint32_t sum[4] = {}, n = 0;
+            for (uint32_t sy = ay; sy < by; ++sy)
+                for (uint32_t sx = ax; sx < bx; ++sx, ++n)
+                    for (int k = 0; k < 4; ++k) sum[k] += rgba[(size_t(sy) * width + sx) * 4 + k];
+            for (int k = 0; k < 4; ++k) square[(y * kSize + x) * 4 + k] = uint8_t(sum[k] / n);
+        }
+    circle = square;
+    for (uint32_t y = 0; y < kSize; ++y)
+        for (uint32_t x = 0; x < kSize; ++x)
+        {
+            const float dx = x + 0.5f - kSize / 2.0f, dy = y + 0.5f - kSize / 2.0f;
+            const float inside = std::clamp(kSize / 2.0f - std::sqrt(dx * dx + dy * dy), 0.0f, 1.0f);
+            uint8_t& a = circle[(y * kSize + x) * 4 + 3];
+            a = uint8_t(a * inside);
+        }
+    return { WriteBlp(kSize, kSize, square.data()), WriteBlp(kSize, kSize, circle.data()) };
+}
+
 bool ExportRaces(const RaceCatalog& project, const std::map<uint32_t, nlohmann::json>& packages,
                  const std::function<const MpqChain*(const std::string& client)>& source, const std::vector<std::filesystem::path>& dbcDirs,
-                 const std::filesystem::path& clientOut, std::vector<std::string>& notes, std::string& error)
+                 const std::filesystem::path& clientOut, std::vector<std::string>& notes, std::string& error,
+                 const MpqChain* client, const std::filesystem::path& assets)
 {
     namespace fs = std::filesystem;
     std::error_code ec;
@@ -780,6 +1062,58 @@ bool ExportRaces(const RaceCatalog& project, const std::map<uint32_t, nlohmann::
         }
         if (lost) notes.push_back("race " + std::to_string(race) + ": " + std::to_string(lost) + " file(s) could not be read from " + client);
     }
+    if (!client) return true;
+
+    // The character creator: a race's own creator scene from its client when players lack it, then the script.
+    auto write = [&](const std::string& path, const std::vector<uint8_t>& bytes) {
+        std::string rel = path;
+        std::replace(rel.begin(), rel.end(), '\\', '/');
+        const fs::path target = clientOut / fs::path(rel);
+        fs::create_directories(target.parent_path(), ec);
+        std::ofstream out(target, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(bytes.data()), std::streamsize(bytes.size()));
+        if (!out) error = "Cannot write " + target.string();
+        return bool(out);
+    };
+    auto has = [&](const std::string& path) {
+        std::string rel = path;
+        std::replace(rel.begin(), rel.end(), '\\', '/');
+        return client->HasInstalled(path) || fs::exists(clientOut / fs::path(rel), ec) || (!assets.empty() && fs::exists(assets / fs::path(rel), ec));
+    };
+    for (const auto& [race, p] : packages)
+    {
+        const RaceCatalog::Race* r = project.Find(race);
+        const std::string from = p.value("source", nlohmann::json::object()).value("client", std::string());
+        const MpqChain* chain = from.empty() ? nullptr : source(from);
+        if (!r || (r->flags & 1) || r->fileString.empty() || !chain || has(CreatorBackgroundPath(r->fileString))) continue;
+        if (!chain->Read(CreatorBackgroundPath(r->fileString))) continue;   // its client has none either: a donor's then
+        std::vector<std::string> todo{ CreatorBackgroundPath(r->fileString) };
+        std::set<std::string> seen;
+        size_t copied = 0;
+        while (!todo.empty())
+        {
+            const std::string name = todo.back();
+            todo.pop_back();
+            if (!seen.insert(Lower(name)).second || client->HasInstalled(name)) continue;
+            const auto bytes = chain->Read(name);
+            if (!bytes) continue;
+            if (!write(name, *bytes)) return false;
+            ++copied;
+            for (std::string& ref : AssetReferences(*chain, name, *bytes)) todo.push_back(std::move(ref));
+        }
+        notes.push_back("race " + std::to_string(race) + ": its creator scene UI_" + r->fileString + " (" + std::to_string(copied) + " file(s)) came from " + from);
+    }
+    const auto lua = client->Read("Interface\\GlueXML\\CharacterCreate.lua");
+    if (!lua) { notes.push_back("the client has no Interface\\GlueXML\\CharacterCreate.lua: the creator was left as it is"); return true; }
+    const std::string script = CreatorScript(std::string(lua->begin(), lua->end()), project, packages, has);
+    return script.empty() || write("Interface\\GlueXML\\CharacterCreate.lua", std::vector<uint8_t>(script.begin(), script.end()));
+}
+
+bool FixClassicSectionFlags(nlohmann::json& package)
+{
+    if (package.contains("sectionFlags")) return false;
+    for (nlohmann::json& s : package["CharSections"]) s["Flags"] = ClassicSectionFlags(U(s, "Flags"));
+    package["sectionFlags"] = "3.3.5";
     return true;
 }
 

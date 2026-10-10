@@ -73,13 +73,60 @@ void App::ConnectServer()
     if (TestDatabase(m_db, *p, ReadSecret(p->name, "db").value_or(""), result))
     {
         Log("Server '%s': %s.", p->name.c_str(), result.c_str());
-        // The project's spawn changes go to this database (idempotent; catches up after offline edits).
-        for (SpawnAdapter* spawns : { &m_creatures, &m_gameobjects })
-            if (std::string error; !spawns->Sync(error)) Log("%s spawns not written to the database: %s", spawns->Table(), error.c_str());
-        for (TableRowsAdapter* table : TableAdapters())
-            if (std::string error; !table->Sync(error)) Log("%s not written to the database: %s", table->Table().c_str(), error.c_str());
+        SyncServerRows();
     }
     else Log("Server '%s': database not connected: %s", p->name.c_str(), result.c_str());
+}
+
+bool App::SyncServerRows()
+{
+    // The project's rows go to this database (idempotent; catches up after offline edits or a new database).
+    bool ok = true;
+    for (SpawnAdapter* spawns : { &m_creatures, &m_gameobjects })
+        if (std::string error; !spawns->Sync(error)) { Log("%s spawns not written to the database: %s", spawns->Table(), error.c_str()); ok = false; }
+    for (TableRowsAdapter* table : TableAdapters())
+        if (std::string error; !table->Sync(error)) { Log("%s not written to the database: %s", table->Table().c_str(), error.c_str()); ok = false; }
+    return ok;
+}
+
+void App::InstallToServer()
+{
+    const ServerProfile* p = m_project ? FindProfile(m_profiles, m_project->serverProfile) : nullptr;
+    if (!p || p->serverDir.empty()) { Log("Server: nothing installed: set the server folder first (File > Server setup)."); return; }
+    // ponytail: the dbc folder is taken as <server>\Data\dbc (as server data builds take Data); read DataDir from
+    // worldserver.conf if a server keeps its data elsewhere.
+    const fs::path from = m_project->dir / "out" / "server" / "dbc", to = fs::path(p->serverDir) / "Data" / "dbc",
+                   originals = m_project->dir / "server-build" / "original-dbc";
+    std::error_code ec;
+    if (!fs::is_directory(to, ec)) { Log("Server: no dbc folder at %s (extract the client's data there first).", to.string().c_str()); return; }
+    fs::create_directories(originals, ec);
+    size_t copied = 0, restored = 0;
+    // Each exported table over the server's, its original kept once so it can come back.
+    for (const auto& entry : fs::directory_iterator(from, ec))
+    {
+        if (!entry.is_regular_file()) continue;
+        const fs::path dest = to / entry.path().filename(), keep = originals / entry.path().filename();
+        std::error_code copyEc;
+        if (fs::exists(dest, copyEc) && !fs::exists(keep, copyEc)) fs::copy_file(dest, keep, copyEc);
+        if (!copyEc) fs::copy_file(entry.path(), dest, fs::copy_options::overwrite_existing, copyEc);
+        if (copyEc) { Log("Server: cannot copy %s into %s: %s", entry.path().filename().string().c_str(), to.string().c_str(), copyEc.message().c_str()); return; }
+        ++copied;
+    }
+    // A table installed earlier that the project no longer changes: the server's own again.
+    for (const auto& entry : fs::directory_iterator(originals, ec))
+        if (entry.is_regular_file() && !fs::exists(from / entry.path().filename()))
+        {
+            std::error_code copyEc;
+            fs::copy_file(entry.path(), to / entry.path().filename(), fs::copy_options::overwrite_existing, copyEc);
+            if (copyEc) { Log("Server: cannot put back %s: %s", entry.path().filename().string().c_str(), copyEc.message().c_str()); continue; }
+            fs::remove(entry.path(), copyEc);
+            ++restored;
+        }
+    Log("Server: %zu DBC file(s) into %s%s (originals kept in server-build\\original-dbc).", copied, to.string().c_str(),
+        restored ? (", " + std::to_string(restored) + " put back as the server had them").c_str() : "");
+    if (!m_db.Connected()) Log("Server: the database is not connected, so the project's rows were not written (they are when it connects).");
+    else if (SyncServerRows()) Log("Server: the project's rows are in %s.", p->worldDb.c_str());
+    Log("Server: restart the worldserver: it reads DBCs and these tables only at start.");
 }
 
 std::optional<std::string> App::RunServerCommand(const std::string& command)

@@ -133,8 +133,9 @@ public:
     bool HasInstalled(const std::string& name) const;
     void SetFallbacks(std::vector<const MpqChain*> fallbacks) { m_fallbacks = std::move(fallbacks); }
     /// A map's own files (World\Maps\<map>\...) come from the lowest layer holding its WDT, the plain client's copy,
-    /// not a mod's version stacked over it; other files resolve top-first as usual. On for the project's base: mods'
-    /// copies of a map stay other versions of it. Set before reading.
+    /// not a mod's version stacked over it; so do the client's tables (DBFilesClient\) and glue scripts
+    /// (Interface\GlueXML\), each from the lowest layer holding it. Other files resolve top-first as usual. On for the
+    /// project's base: mods' copies stay other versions, and export builds on what players have. Set before reading.
     void SetMapsFromLowestLayer(bool on) { m_mapsFromLowest = on; std::lock_guard lock(m_homeLock); m_mapHomes.clear(); }
     /// The first archive of the layer a map path comes from under that rule; none when it is off or no layer has the map.
     std::optional<size_t> MapHome(const std::string& name) const;

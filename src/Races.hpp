@@ -170,6 +170,10 @@ std::vector<Change> ImportRaceChanges(const RaceCatalog& source, const std::stri
 /// so the client's own stay as they are; every reference follows a rename (CharSections textures, a model's own row,
 /// fixed texture names inside a copied model). A file the client has as it is, players have: nothing to copy.
 
+/// Converts the CharSections flags of a package imported from a 1.12 client before imports converted them (1.12: 1 =
+/// only NPCs wear it; 3.3.5: 0x1 = players may choose it) and marks it done ("sectionFlags"). False when already done.
+bool FixClassicSectionFlags(nlohmann::json& package);
+
 /// The changes removing a project race the project added: its package and the display and model rows its import added.
 std::vector<Change> RemoveRaceChanges(uint32_t race, const RaceAdapter& races, const DbcTable& displays, const DbcTable& models);
 
@@ -180,9 +184,30 @@ std::vector<uint8_t> RenameM2Textures(std::vector<uint8_t> m2, const std::map<st
 /// sex, section, variation and colour, as the client's cache needs) into each of `dbcDirs`, and copies every package's
 /// files from its source client (`source` finds a client by name; null when it is not attached) under `clientOut`. With
 /// no package, removes race tables an earlier export left. `notes` gets what export could not do. False on a write error.
+/// With `client` (the project's client) it also writes the character creator (CreatorScript) and copies a race's own
+/// creator background from its source client when players lack one; `assets` is the project's folder of files that
+/// go into the patch as they are (a race's icon).
 bool ExportRaces(const RaceCatalog& project, const std::map<uint32_t, nlohmann::json>& packages,
                  const std::function<const MpqChain*(const std::string& client)>& source, const std::vector<std::filesystem::path>& dbcDirs,
-                 const std::filesystem::path& clientOut, std::vector<std::string>& notes, std::string& error);
+                 const std::filesystem::path& clientOut, std::vector<std::string>& notes, std::string& error,
+                 const MpqChain* client = nullptr, const std::filesystem::path& assets = {});
+
+/// The client's character creator script (Interface\GlueXML\CharacterCreate.lua, given as `clientLua`) with the
+/// project's playable races added: a button for every playable race (the client's XML has ten), laid out per faction,
+/// and each project race's icon, description, abilities and creator background — its own, or its donor race's. A
+/// package's "creator" holds the choices: {"donor": race, "icon": game path without .blp (a -Round twin beside it),
+/// "description", "abilities": [lines], "background": a UI_ scene name}. What an earlier export added (from the
+/// "-- wow-world-editor" line on) is cut off `clientLua` first. `has` says whether players will have a game file.
+/// Empty when no project race is playable.
+std::string CreatorScript(const std::string& clientLua, const RaceCatalog& project, const std::map<uint32_t, nlohmann::json>& packages,
+                          const std::function<bool(const std::string&)>& has);
+/// The creator scene a background name loads: Interface\Glues\Models\UI_<name>\UI_<name>.m2.
+std::string CreatorBackgroundPath(const std::string& name);
+/// The race whose icon, texts and background a project race borrows when it has none of its own: its package's
+/// "creator" donor, else the first playable client race of its team.
+uint32_t CreatorDonor(const RaceCatalog& project, const std::map<uint32_t, nlohmann::json>& packages, uint32_t race);
+/// The square creator icon (64 x 64) and its round twin from a picture of any size (RGBA), as two BLP files.
+std::pair<std::vector<uint8_t>, std::vector<uint8_t>> CreatorIcons(uint32_t width, uint32_t height, const uint8_t* rgba);
 
 /// What a character chooses in the creator, each with its own values per sex.
 enum class RaceChoice { Skin, Face, HairStyle, HairColor, FacialHair };

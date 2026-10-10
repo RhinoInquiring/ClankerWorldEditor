@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <fstream>
 
 using namespace DirectX;
 
@@ -573,6 +574,24 @@ void App::DrawRaceEditor(const RaceCatalog::Race& race)
         ImGui::TextColored(kQuiet, "Imported from %s, race %u there.", from.value("client", std::string("?")).c_str(), from.value("race", 0u));
         if (!p.contains("files"))
             ImGui::TextColored(kWarn, "Imported before its files were listed: remove it and import it again so export brings its models and textures.");
+        // Imported from a 1.12 client before imports converted its CharSections flags: the creator offers none of its looks.
+        if (!p.contains("sectionFlags"))
+            for (RacesView::Source& s : v.sources)
+                if (s.name == from.value("client", std::string()))
+                {
+                    if (!s.read)
+                    {
+                        s.read = true;
+                        if (s.mpq) s.races.Load(*s.mpq, s.error);
+                    }
+                    if (s.races.Format() == RaceCatalog::Layout::Classic)
+                    {
+                        ImGui::TextColored(kWarn, "Its looks came from a 1.12 client unconverted: the creator offers none of them (1.12 flags NPC-only\n"
+                                                  "looks with 1, 3.3.5 flags player looks with 1).");
+                        if (ImGui::Button("Convert its looks for 3.3.5") && FixClassicSectionFlags(p)) v.editDirty = true;
+                    }
+                    break;
+                }
         else
         {
             size_t renamed = 0;
@@ -843,6 +862,114 @@ void App::DrawRaceEditor(const RaceCatalog::Race& race)
                 ImGui::TextColored(kQuiet, "The creator shows these, and the server gives them (AzerothCore reads the same table).");
             }
         }
+        ImGui::EndTabItem();
+    }
+    if (ImGui::BeginTabItem("Creator"))
+    {
+        nlohmann::json& c = p["creator"];
+        if (!c.is_object()) c = nlohmann::json::object();
+        const std::string fs = row.value("ClientFileString", std::string());
+        if (row.value("Flags", 0u) & 1) ImGui::TextColored(kWarn, "Not playable (Identity): the creator leaves it out.");
+        ImGui::TextColored(kQuiet, "Export adds the race to the client's creator script; what it has none of comes from the donor.");
+        for (const RaceCatalog::Race& other : base.Races())
+            if (other.id != race.id && !fs.empty() && _stricmp(other.fileString.c_str(), fs.c_str()) == 0)
+            {
+                ImGui::TextColored(kWarn, "%s has the file string %s too: the creator keys icon, texts and scene by it, so they share them "
+                                          "(Identity: give this race its own).", Plain(other.name).c_str(), fs.c_str());
+                break;
+            }
+
+        const uint32_t chosen = c.value("donor", 0u);
+        const RaceCatalog::Race* donor = base.Find(chosen && chosen != race.id ? chosen : CreatorDonor(base, {}, race.id));
+        ImGui::SetNextItemWidth(260);
+        if (ImGui::BeginCombo("Donor race", donor ? ((chosen ? "" : "auto: ") + Plain(donor->name)).c_str() : "none"))
+        {
+            if (ImGui::Selectable("auto (first client race of its team)", !chosen)) { c.erase("donor"); dirty(); }
+            for (const RaceCatalog::Race* b : Playable(base))
+                if (b->id != race.id && ImGui::Selectable(Plain(b->name).c_str(), chosen == b->id)) { c["donor"] = b->id; dirty(); }
+            ImGui::EndCombo();
+        }
+
+        ImGui::SeparatorText("Icon");
+        const std::string icon = c.value("icon", std::string());
+        if (icon.empty()) ImGui::TextColored(kQuiet, "The donor's (%s).", donor ? Plain(donor->name).c_str() : "Human");
+        else ImGui::TextColored(kQuiet, "A picture of its own: assets\\%s.blp and -Round.blp.", icon.c_str());
+        if (ImGui::Button("Picture..."))
+            if (const auto file = PickPicture(m_hwnd, L"Race icon: a picture, its middle square is used"))
+            {
+                uint32_t w = 0, h = 0;
+                std::vector<uint8_t> rgba;
+                if (!ReadPicture(*file, w, h, rgba)) Log("Race icon: cannot read %s", file->c_str());
+                else
+                {
+                    const std::string game = "Interface\\Glues\\CharacterCreate\\EditorRace" + std::to_string(race.id);
+                    const auto [square, round] = CreatorIcons(w, h, rgba.data());
+                    const std::filesystem::path dir = m_project->AssetsDir() / "Interface" / "Glues" / "CharacterCreate";
+                    std::error_code ec;
+                    std::filesystem::create_directories(dir, ec);
+                    std::ofstream(dir / ("EditorRace" + std::to_string(race.id) + ".blp"), std::ios::binary)
+                        .write(reinterpret_cast<const char*>(square.data()), std::streamsize(square.size()));
+                    std::ofstream(dir / ("EditorRace" + std::to_string(race.id) + "-Round.blp"), std::ios::binary)
+                        .write(reinterpret_cast<const char*>(round.data()), std::streamsize(round.size()));
+                    c["icon"] = game;
+                    dirty();
+                }
+            }
+        ImGui::SetItemTooltip("PNG, JPEG, BMP or BLP. Made 64 x 64 for the race button, with a round twin for the panel.");
+        if (!icon.empty())
+        {
+            ImGui::SameLine();
+            if (ImGui::Button("Use the donor's")) { c.erase("icon"); dirty(); }
+        }
+
+        ImGui::SeparatorText("Texts");
+        std::string description = c.value("description", std::string());
+        if (ImGui::InputTextMultiline("Description", &description, { -120, 110 })) { c["description"] = description; dirty(); }
+        std::string lines;
+        for (const nlohmann::json& a : ChangeStore::List(c, "abilities"))
+            if (a.is_string()) lines += (lines.empty() ? "" : "\n") + a.get<std::string>();
+        if (ImGui::InputTextMultiline("Abilities", &lines, { -120, 90 }))
+        {
+            nlohmann::json list = nlohmann::json::array();
+            for (size_t at = 0; at <= lines.size();)
+            {
+                const size_t end = std::min(lines.find('\n', at), lines.size());
+                list.push_back(lines.substr(at, end - at));
+                at = end + 1;
+            }
+            c["abilities"] = list;
+            dirty();
+        }
+        ImGui::SetItemTooltip("One per line, shown under the description (\"- Resistant to Shadow damage.\").");
+        if (description.empty() && lines.empty())
+            ImGui::TextColored(kQuiet, "Both empty: the client's texts of this file string, else the donor's.");
+
+        ImGui::SeparatorText("Background");
+        const std::string own = CreatorBackgroundPath(fs);
+        const std::string client = from.value("client", std::string());
+        const MpqChain* source = nullptr;
+        for (const Ghosts::Source& s : m_ghosts.Sources())
+            if (!client.empty() && s.name == client) source = s.mpq;
+        std::string automatic;
+        if (!fs.empty() && m_mpq.HasInstalled(own)) automatic = "its own (UI_" + fs + ")";
+        else if (!fs.empty() && source && source->Read(own)) automatic = "its own UI_" + fs + ", copied from " + client;
+        else automatic = "the donor's (UI_" + (donor ? donor->fileString : std::string("Human")) + ")";
+        std::vector<std::string> scenes{ "DeathKnight" };
+        for (const RaceCatalog::Race& r : base.Races())
+            if (!r.fileString.empty() && std::find(scenes.begin(), scenes.end(), r.fileString) == scenes.end() && m_mpq.HasInstalled(CreatorBackgroundPath(r.fileString)))
+                scenes.push_back(r.fileString);
+        const std::string background = c.value("background", std::string());
+        ImGui::SetNextItemWidth(260);
+        if (ImGui::BeginCombo("Scene", background.empty() ? ("auto: " + automatic).c_str() : ("UI_" + background).c_str()))
+        {
+            if (ImGui::Selectable(("auto: " + automatic).c_str(), background.empty())) { c.erase("background"); dirty(); }
+            for (const std::string& s : scenes)
+                if (ImGui::Selectable(("UI_" + s).c_str(), background == s)) { c["background"] = s; dirty(); }
+            ImGui::EndCombo();
+        }
+        ImGui::SetItemTooltip("The scene behind the character in the creator and on character select.");
+        if (row.value("Required_expansion", 0u) > 2)
+            ImGui::TextColored(kWarn, "Required expansion %u: 3.3.5 accounts have at most 2, so the creator shows it greyed out.", row.value("Required_expansion", 0u));
         ImGui::EndTabItem();
     }
     if (ImGui::BeginTabItem("Server"))

@@ -629,10 +629,12 @@ std::optional<size_t> MpqChain::MapHome(const std::string& name) const
 {
     if (!m_mapsFromLowest) return std::nullopt;
     const std::string lower = Lower(Backslashes(name));
-    static const std::string prefix = "world\\maps\\", mapDbc = "dbfilesclient\\map.dbc";
-    // Map.dbc too: the list of maps is the client's; packs' Map.dbc only say which maps they add (App::RefreshMapList).
+    static const std::string prefix = "world\\maps\\";
+    // The client's tables and glue scripts too: export writes whole tables (and the creator script) over the client's,
+    // so they must start from what players have, not a pack's version. Packs' Map.dbc only say which maps they add
+    // (App::RefreshMapList); another client's tables are read from its own chain (compare sources).
     std::string dir, wdt;
-    if (lower == mapDbc) dir = wdt = mapDbc;
+    if (lower.rfind("dbfilesclient\\", 0) == 0 || lower.rfind("interface\\gluexml\\", 0) == 0) dir = wdt = lower;
     else
     {
         if (lower.compare(0, prefix.size(), prefix) != 0) return std::nullopt;
