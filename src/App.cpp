@@ -489,7 +489,7 @@ bool App::OpenProject(const std::string& dir)
     if (!project) { Log("Could not open project: %s", error.c_str()); return false; }
 
     CloseProject();
-    const size_t archives = m_mpq.Open(project->base.layers);
+    const size_t archives = m_mpq.Open(project->base.layers, { project->PatchInstallPath() });   // not its own installed patch: what the client had
     m_mpq.SetMapsFromLowestLayer(true);   // each map as its own source has it (the client's), mods' copies are other versions
     for (size_t i = 0; i < project->base.layers.size() && i < m_mpq.Report().size(); ++i)
         if (!m_mpq.Report()[i].note.empty())

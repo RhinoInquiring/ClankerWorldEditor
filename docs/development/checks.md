@@ -64,7 +64,7 @@ Direct3D device. Checks that write files use a temporary folder and remove it.
 
 | Command | Checks |
 | --- | --- |
-| `--sources-check <Data>` | Layer order, overrides, disabling, "players have it", notes, project.json |
+| `--sources-check <Data>` | Layer order, overrides, disabling, "players have it", notes, project.json, a project's base leaving out its installed patch |
 | `--scan-check` | Scanning a mixed folder into layers, strays, rescan |
 | `--mpq-check <folder> [keep.MPQ]` | Packs a folder like the patch and reads every file back |
 | `--minimap-check <Data> <map> <x> <y> [out.png]` | The editor's minimap of a tile beside the client's (`<out>.client.png`) |

@@ -34,6 +34,7 @@ public:
         std::filesystem::path exported;    // the project's export (out/client): its files win over the sources
         std::filesystem::path backup;      // replaced server files go here, under maps / vmaps / mmaps
         std::vector<MpqLayer> layers;      // the project's sources, as the editor reads them
+        std::vector<std::filesystem::path> skip;   // archives left out of them (the project's installed patch)
     };
 
     ~ServerDataJob() { Cancel(); }

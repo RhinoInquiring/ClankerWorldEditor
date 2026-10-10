@@ -428,7 +428,7 @@ std::vector<MpqLayer> RescanLayers(const std::vector<MpqLayer>& layers, const st
     return out;
 }
 
-size_t MpqChain::Open(const std::vector<MpqLayer>& layers)
+size_t MpqChain::Open(const std::vector<MpqLayer>& layers, const std::vector<std::filesystem::path>& skip)
 {
     namespace fs = std::filesystem;
     Close();
@@ -543,6 +543,8 @@ size_t MpqChain::Open(const std::vector<MpqLayer>& layers)
         }
         for (const auto& path : found)
         {
+            if (std::any_of(skip.begin(), skip.end(), [&](const fs::path& s) { return fs::equivalent(path, s, ec); }))
+                continue;   // same file however spelled (case, slashes, relative)
             HANDLE h = nullptr;
             // No listfile here: reads go by hash, and parsing the names took 4 of the 4.4 s a stock client opens in.
             // List() loads them when something first enumerates the archive.

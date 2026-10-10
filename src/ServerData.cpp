@@ -112,7 +112,7 @@ void ServerDataJob::SetStatus(const std::string& status)
 void ServerDataJob::Run(Options o, std::vector<ServerMap> maps)
 {
     MpqChain chain;   // its own: the editor's is used on the main thread
-    chain.Open(o.layers);
+    chain.Open(o.layers, o.skip);
     bool ok = true;
     for (size_t i = 0; i < maps.size() && ok && !m_cancel; ++i)
         ok = BuildMap(o, maps[i], chain, float(i) / maps.size(), float(i + 1) / maps.size());

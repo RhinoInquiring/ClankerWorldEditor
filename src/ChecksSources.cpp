@@ -111,6 +111,50 @@ namespace checks
                        old->compare[0].layers[0].path == "D:/epoch/Data",
                    "an old project: its client becomes the base, its sources compare sources");
         }
+        {
+            // A project's installed patch is its own output: its base leaves it out, so an exported row does not come
+            // back as the client's. A Data-like folder: the client's Map.dbc in patch.MPQ, the project's patch with
+            // one more row in enUS.
+            MpqChain client;
+            client.Open(data);
+            std::vector<uint8_t> dbc = client.Read(shared).value_or(std::vector<uint8_t>{});
+            const size_t rows = ParseMapDbc(dbc).size();
+            expect(dbc.size() > 20 && rows > 0, "the client's Map.dbc read");
+            if (dbc.size() > 20)
+            {
+                put(t / "own" / "src-client" / "DBFilesClient" / "Map.dbc", std::string(dbc.begin(), dbc.end()));
+                uint32_t count, size;
+                memcpy(&count, &dbc[4], 4);
+                memcpy(&size, &dbc[12], 4);
+                std::vector<uint8_t> row(dbc.begin() + 20, dbc.begin() + 20 + size);   // the first row again, as map 60000
+                const uint32_t id = 60000;
+                memcpy(row.data(), &id, 4);
+                dbc.insert(dbc.begin() + 20 + size_t(count) * size, row.begin(), row.end());
+                ++count;
+                memcpy(&dbc[4], &count, 4);
+                put(t / "own" / "src-patch" / "DBFilesClient" / "Map.dbc", std::string(dbc.begin(), dbc.end()));
+            }
+            Project p;
+            p.clientDir = (t / "own").string();
+            p.patchName = "patch-enUS-X.MPQ";
+            expect(WriteMpq(t / "own" / "Data" / "patch.MPQ", t / "own" / "src-client", error) &&
+                       WriteMpq(p.PatchInstallPath(), t / "own" / "src-patch", error),
+                   "a client archive and the project's installed patch built");
+            auto hasRow = [&](const MpqChain& c) {
+                const auto maps = ParseMapDbc(c.Read(shared).value_or(std::vector<uint8_t>{}));
+                return std::any_of(maps.begin(), maps.end(), [](const MapEntry& m) { return m.id == 60000; });
+            };
+            std::string spelled = p.PatchInstallPath().string();   // another spelling of the same file
+            for (char& ch : spelled) ch = ch == '\\' ? '/' : char(std::toupper((unsigned char)ch));
+            MpqChain c;
+            c.Open({ { MpqLayer::Kind::MpqFolder, p.clientDir } });
+            expect(hasRow(c), "without the skip the patch's row is seen");
+            c.Open({ { MpqLayer::Kind::MpqFolder, p.clientDir } }, { spelled });
+            expect(!hasRow(c) && ParseMapDbc(c.Read(shared).value_or(std::vector<uint8_t>{})).size() == rows && c.Report()[0].archives == 1,
+                   "skipping the installed patch (any case, any slash): the client's rows only");
+            c.Open({ { MpqLayer::Kind::MpqFile, p.PatchInstallPath().string() } }, { p.PatchInstallPath() });
+            expect(c.Report()[0].archives == 0 && !c.Read(shared), "the patch as a single-MPQ layer is skipped too");
+        }
         fs::remove_all(t, ec);
         printf("%d problem(s)\n", problems);
         return problems ? 1 : 0;
@@ -224,7 +268,7 @@ namespace checks
         Renderer renderer;
         if (!renderer.Init(device.Get(), context.Get(), error)) return 1;
         MpqChain mpq;
-        mpq.Open(project->base.layers);
+        mpq.Open(project->base.layers, { project->PatchInstallPath() });
         Ghosts ghosts;
         std::vector<std::string> errors;
         std::vector<std::pair<std::string, std::vector<MpqLayer>>> compare;

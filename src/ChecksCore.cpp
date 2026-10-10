@@ -117,7 +117,7 @@ namespace checks
 
         auto t = now();
         MpqChain mpq;
-        mpq.Open(project->base.layers);
+        mpq.Open(project->base.layers, { project->PatchInstallPath() });
         mpq.SetMapsFromLowestLayer(true);
         mpq.SetOverlay(project->dir / "overlay");
         printf("base open: %.0f ms\n", ms(t, now()));

@@ -106,8 +106,9 @@ public:
     ~MpqChain();
 
     /// Opens the enabled layers, lowest priority first (later layers win); returns how many archives (an unpacked
-    /// folder counts as one) opened. LayerReport() says what each layer gave.
-    size_t Open(const std::vector<MpqLayer>& layers);
+    /// folder counts as one) opened. LayerReport() says what each layer gave. Archives in `skip` are left out (a
+    /// project's base skips its own installed patch: it is the project's output, not the client's files).
+    size_t Open(const std::vector<MpqLayer>& layers, const std::vector<std::filesystem::path>& skip = {});
     /// One client Data folder (or a client folder holding Data), or "<install>*<product>" for a CASC storage.
     size_t Open(const std::string& dataDir)
     {

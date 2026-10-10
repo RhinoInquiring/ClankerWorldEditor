@@ -604,6 +604,7 @@ void App::StartServerData()
     o.exported = m_project->ClientOutDir();
     o.backup = m_project->dir / "server-build" / "original";
     o.layers = m_project->base.layers;
+    o.skip = { m_project->PatchInstallPath() };
     m_serverJobLog.clear();
     m_serverJob.Start(std::move(o), std::move(maps));
 }
