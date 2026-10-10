@@ -1110,25 +1110,17 @@ void App::DrawNpcGearTab()
     }
 }
 
-void App::DrawItemPicker()
+std::optional<uint32_t> App::ItemSearch(const char* hint, const std::string& filter)
 {
     NpcView& v = m_npc;
-    ImGui::SetNextWindowSize({ 440, 420 });
-    if (!ImGui::BeginPopup("##itempick")) return;
     bool search = ImGui::IsWindowAppearing();
     if (search) ImGui::SetKeyboardFocusHere();
     ImGui::SetNextItemWidth(-1);
-    if (ImGui::InputTextWithHint("##query", v.pickLoot ? "Any item: name or entry" : v.pickArmor >= 0 ? "Armour for this slot: name or entry" : "Weapons, shields, held items: name or entry", &v.pickQuery))
-        search = true;
+    if (ImGui::InputTextWithHint("##query", hint, &v.pickQuery)) search = true;
     if (search)
     {
         v.pickHits.clear();
-        // What creature_equip_template accepts (weapons, shields, held-in-off-hand items, ranged weapons), or what an
-        // armour slot of CreatureDisplayInfoExtra shows.
-        static const char* const kArmourTypes[11] = { "1", "3", "4", "5, 20", "6", "7", "8", "9", "10", "19", "16" };
-        std::string where = v.pickLoot ? std::string("1 = 1")
-                          : v.pickArmor >= 0 && v.pickArmor < 11 ? std::string("InventoryType IN (") + kArmourTypes[v.pickArmor] + ")"
-                                                                  : "InventoryType IN (13, 14, 15, 17, 21, 22, 23, 25, 26)";
+        std::string where = filter;
         if (!v.pickQuery.empty())
         {
             const bool number = std::all_of(v.pickQuery.begin(), v.pickQuery.end(), [](unsigned char c) { return std::isdigit(c); });
@@ -1166,6 +1158,23 @@ void App::DrawItemPicker()
         if (v.pickHits.size() == 200) ImGui::TextColored(kQuiet, "First 200 shown: type more of the name.");
     }
     ImGui::EndChild();
+    return chosen;
+}
+
+void App::DrawItemPicker()
+{
+    NpcView& v = m_npc;
+    ImGui::SetNextWindowSize({ 440, 420 });
+    if (!ImGui::BeginPopup("##itempick")) return;
+    // What creature_equip_template accepts (weapons, shields, held-in-off-hand items, ranged weapons), or what an
+    // armour slot of CreatureDisplayInfoExtra shows.
+    static const char* const kArmourTypes[11] = { "1", "3", "4", "5, 20", "6", "7", "8", "9", "10", "19", "16" };
+    const std::string where = v.pickLoot ? std::string("1 = 1")
+                            : v.pickArmor >= 0 && v.pickArmor < 11 ? std::string("InventoryType IN (") + kArmourTypes[v.pickArmor] + ")"
+                                                                    : "InventoryType IN (13, 14, 15, 17, 21, 22, 23, 25, 26)";
+    const std::optional<uint32_t> chosen = ItemSearch(v.pickLoot ? "Any item: name or entry" : v.pickArmor >= 0 ? "Armour for this slot: name or entry"
+                                                                                                             : "Weapons, shields, held items: name or entry",
+                                                      where);
     if (chosen && *chosen && v.pickLoot)
     {
         NpcView::Loot& loot = NpcLoot(v.lootKind);

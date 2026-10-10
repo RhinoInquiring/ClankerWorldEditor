@@ -46,6 +46,47 @@ uint32_t Step(const std::vector<uint32_t>& list, uint32_t value, int dir)
     const long i = long(it - list.begin()) + dir, n = long(list.size());
     return list[size_t((i % n + n) % n)];
 }
+
+/// The races of a catalog that characters can be (they have classes).
+std::vector<const RaceCatalog::Race*> Playable(const RaceCatalog& races)
+{
+    std::vector<const RaceCatalog::Race*> out;
+    for (const RaceCatalog::Race& r : races.Races())
+        if (!races.Classes(r.id).empty()) out.push_back(&r);
+    return out;
+}
+
+/// A faction template as "id: faction name  (races using it)", by the project's client.
+std::string FactionLabel(const RaceCatalog& races, uint32_t id)
+{
+    std::string users;
+    for (const RaceCatalog::Race* r : Playable(races))
+        if (r->faction == id) users += (users.empty() ? "" : ", ") + Plain(r->name);
+    const std::string name = races.FactionName(id);
+    return std::to_string(id) + ": " + (name.empty() ? "not in the project's client" : name) + (users.empty() ? "" : "  (" + users + ")");
+}
+
+/// Picks a faction template among the playable races' (and `extra`, e.g. a source race's own); true when it changed.
+bool FactionCombo(const RaceCatalog& races, uint32_t& faction, uint32_t extra = 0)
+{
+    bool changed = false;
+    ImGui::SetNextItemWidth(360);
+    if (ImGui::BeginCombo("Faction template", FactionLabel(races, faction).c_str()))
+    {
+        std::set<uint32_t> shown;
+        for (const RaceCatalog::Race* r : Playable(races))
+            if (shown.insert(r->faction).second && ImGui::Selectable(FactionLabel(races, r->faction).c_str(), faction == r->faction))
+                faction = r->faction, changed = true;
+        if (extra && !shown.count(extra) && ImGui::Selectable((FactionLabel(races, extra) + "  (the source's)").c_str(), faction == extra))
+            faction = extra, changed = true;
+        ImGui::EndCombo();
+    }
+    ImGui::SameLine();
+    ImGui::TextColored(kQuiet, "(?)");
+    ImGui::SetItemTooltip("The faction a new character belongs to: reputations, and which NPCs are friendly.");
+    if (races.FactionName(faction).empty()) ImGui::TextColored(kWarn, "Faction template %u is not in the project's client: pick one that is.", faction);
+    return changed;
+}
 }
 
 void App::RefreshRacePreview(bool frame)
@@ -97,7 +138,7 @@ void App::RefreshRacePreview(bool frame)
 void App::DrawRaces()
 {
     if (!m_showRaces) return;
-    ImGui::SetNextWindowSize({ 1100, 680 }, ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize({ 1500, 820 }, ImGuiCond_FirstUseEver);
     if (!ImGui::Begin("Races", &m_showRaces)) { ImGui::End(); return; }
     if (!m_project) { ImGui::TextColored(kQuiet, "Open a project first."); ImGui::End(); return; }
     RacesView& v = m_races;
@@ -150,7 +191,7 @@ void App::DrawRaces()
     const RaceCatalog& list = v.source == 0 ? v.project : src.races;
 
     // Left: the source and its races.
-    ImGui::BeginChild("##racelist", { 380, 0 }, ImGuiChildFlags_ResizeX | ImGuiChildFlags_Borders);
+    ImGui::BeginChild("##racelist", { 340, 0 }, ImGuiChildFlags_ResizeX | ImGuiChildFlags_Borders);
     ImGui::SetNextItemWidth(-1);
     if (ImGui::BeginCombo("##source", (src.name + (v.source == 0 ? "  (project)" : "")).c_str()))
     {
@@ -215,17 +256,100 @@ void App::DrawRaces()
     ImGui::EndChild();
     ImGui::SameLine();
 
-    // Right: the selected race.
-    ImGui::BeginChild("##racedetail");
     const RaceCatalog::Race* r = v.race ? list.Find(v.race) : nullptr;
+    const nlohmann::json* package = r && v.source == 0 ? m_raceRows.Package(r->id) : nullptr;
+
+    // Middle: the preview and its choices; a project race imported from a source shows with that source's files.
+    constexpr float kDetailWidth = 480;
+    ImGui::BeginChild("##racepreview", { -kDetailWidth, 0 }, ImGuiChildFlags_Borders);
+    auto preview = [&] {
+        // The preview and its choices: a project race imported from a source shows with that source's files.
+        size_t previewSource = v.source;
+        uint32_t previewRace = r->id;
+        if (package)
+        {
+            const nlohmann::json from = package->value("source", nlohmann::json::object());
+            previewRace = from.value("race", 0u);
+            previewSource = v.sources.size();
+            for (size_t i = 0; i < v.sources.size(); ++i)
+                if (v.sources[i].name == from.value("client", std::string()))
+                {
+                    previewSource = i;
+                    read(v.sources[i]);
+                }
+        }
+        if (previewSource != v.previewSource || previewRace != v.previewRace)
+        {
+            v.previewSource = previewSource;
+            v.previewRace = previewRace;
+            v.stale = true;
+        }
+        if (previewSource >= v.sources.size())
+        {
+            ImGui::TextColored(kQuiet, "The client it came from is not a source now: no preview.");
+            return;
+        }
+        if (v.sources[previewSource].races.Format() == RaceCatalog::Layout::Classic)
+            ImGui::TextColored(kQuiet, "1.12 tables: the preview needs the client's models and textures converted to 3.3.5 (wow-upport) in this source.");
+        bool frame = false;
+        if (ImGui::RadioButton("Male", v.sex == 0) && v.sex != 0) { v.sex = 0; v.stale = frame = true; }
+        ImGui::SameLine();
+        if (ImGui::RadioButton("Female", v.sex == 1) && v.sex != 1) { v.sex = 1; v.stale = frame = true; }
+        if (v.stale || !v.models) RefreshRacePreview(true);
+        if (v.looks)
+        {
+            const DisplayLooks::Choices c = v.looks->CharacterChoices(v.previewRace, v.sex, v.skin, v.hairStyle);
+            auto chooser = [&](const char* label, const std::vector<uint32_t>& values, uint32_t& value) {
+                ImGui::PushID(label);
+                ImGui::BeginDisabled(values.size() < 2);
+                if (ImGui::ArrowButton("##prev", ImGuiDir_Left)) { value = Step(values, value, -1); v.stale = true; }
+                ImGui::SameLine();
+                if (ImGui::ArrowButton("##next", ImGuiDir_Right)) { value = Step(values, value, 1); v.stale = true; }
+                ImGui::EndDisabled();
+                ImGui::SameLine();
+                const auto it = std::find(values.begin(), values.end(), value);
+                ImGui::Text("%s %s", label, values.empty() ? "-" : it == values.end() ? "?" : (std::to_string(it - values.begin() + 1) + " / " + std::to_string(values.size())).c_str());
+                ImGui::PopID();
+            };
+            if (ImGui::BeginTable("##choices", 2, ImGuiTableFlags_SizingStretchSame))
+            {
+                ImGui::TableNextColumn(); chooser("Skin", c.skins, v.skin);
+                ImGui::TableNextColumn(); chooser("Face", c.faces, v.face);
+                ImGui::TableNextColumn(); chooser("Hair style", c.hairStyles, v.hairStyle);
+                ImGui::TableNextColumn(); chooser("Hair colour", c.hairColors, v.hairColor);
+                ImGui::TableNextColumn(); chooser("Facial hair", c.facialHair, v.facial);
+                ImGui::EndTable();
+            }
+            if (v.stale) RefreshRacePreview(frame);
+        }
+        const ImGuiIO& io = ImGui::GetIO();
+        if (v.pose && v.pose->duration) v.timeMs = std::fmod(v.timeMs + io.DeltaTime * 1000.0f, float(v.pose->duration));
+        std::vector<ModelRenderer::Part> parts;
+        if (v.look && v.models)
+        {
+            ModelRenderer::Part body{ v.look->look, {}, v.pose.get(), uint32_t(v.timeMs) };
+            XMStoreFloat4x4(&body.world, XMMatrixScaling(v.look->scale, v.look->scale, v.look->scale));
+            parts.push_back(body);
+        }
+        const ImVec2 avail = ImGui::GetContentRegionAvail();
+        const MpqChain* previewMpq = v.sources[previewSource].mpq;
+        if (v.models && previewMpq)
+            DrawScene(v.scene, { avail.x, std::max(avail.y, 120.0f) }, *v.models, *previewMpq, parts, "This race has no character model this client can show.");
+    };
+    if (r) preview();
+    else ImGui::TextColored(kQuiet, "Pick a race on the left to see it here.");
+    ImGui::EndChild();
+    ImGui::SameLine();
+
+    // Right: the selected race, and importing or editing it.
+    ImGui::BeginChild("##racedetail");
     if (!r)
     {
-        ImGui::TextColored(kQuiet, "Pick a race on the left. Races come from the project's client and its compare sources (View > Sources).");
+        ImGui::TextColored(kQuiet, "Races come from the project's client and its compare sources (View > Sources).");
         ImGui::EndChild();
         ImGui::End();
         return;
     }
-    const nlohmann::json* package = v.source == 0 ? m_raceRows.Package(r->id) : nullptr;
     ImGui::Text("%s", Plain(r->name).c_str());
     ImGui::SameLine();
     ImGui::TextColored(kQuiet, "race %u in %s", r->id, v.source == 0 ? "the project" : src.name.c_str());
@@ -328,36 +452,13 @@ void App::DrawRaces()
             const std::vector<uint32_t> had = src.races.Classes(r->id);
             o.classes = std::set<uint32_t>(had.begin(), had.end());
         }
-        // Playable races of the project (they have classes): their faction templates, and outfit donors.
-        std::vector<const RaceCatalog::Race*> playable;
-        for (const RaceCatalog::Race& b : base.Races())
-            if (!base.Classes(b.id).empty()) playable.push_back(&b);
+        const std::vector<const RaceCatalog::Race*> playable = Playable(base);
         if (ImGui::RadioButton("Alliance", o.alliance == 0)) o.alliance = 0;
         ImGui::SameLine();
         if (ImGui::RadioButton("Horde", o.alliance == 1)) o.alliance = 1;
         ImGui::SameLine();
         ImGui::TextColored(kQuiet, "team: the side whose character creator lists it");
-        auto factionLabel = [&](uint32_t id) {
-            std::string users;
-            for (const RaceCatalog::Race* b : playable)
-                if (b->faction == id) users += (users.empty() ? "" : ", ") + Plain(b->name);
-            const std::string name = base.FactionName(id);
-            return std::to_string(id) + ": " + (name.empty() ? "not in the project's client" : name) + (users.empty() ? "" : "  (" + users + ")");
-        };
-        ImGui::SetNextItemWidth(360);
-        if (ImGui::BeginCombo("Faction template", factionLabel(o.faction).c_str()))
-        {
-            std::set<uint32_t> shown;
-            for (const RaceCatalog::Race* b : playable)
-                if (shown.insert(b->faction).second && ImGui::Selectable(factionLabel(b->faction).c_str(), o.faction == b->faction)) o.faction = b->faction;
-            if (!shown.count(r->faction) && ImGui::Selectable((factionLabel(r->faction) + "  (the source's)").c_str(), o.faction == r->faction))
-                o.faction = r->faction;
-            ImGui::EndCombo();
-        }
-        ImGui::SameLine();
-        ImGui::TextColored(kQuiet, "(?)");
-        ImGui::SetItemTooltip("The faction a new character belongs to: reputations, and which NPCs are friendly.");
-        if (base.FactionName(o.faction).empty()) ImGui::TextColored(kWarn, "Faction template %u is not in the project's client: pick one that is.", o.faction);
+        FactionCombo(base, o.faction, r->faction);
         ImGui::TextColored(kQuiet, "Classes");
         std::set<uint32_t>& classes = *o.classes;
         const std::vector<uint32_t> had = src.races.Classes(r->id);
@@ -412,90 +513,303 @@ void App::DrawRaces()
         }
         ImGui::EndDisabled();
     }
-    else if (package)
-    {
-        ImGui::SeparatorText("In the project");
-        const nlohmann::json from = package->value("source", nlohmann::json::object());
-        ImGui::TextColored(kQuiet, "Imported from %s, race %u there.", from.value("client", std::string("?")).c_str(), from.value("race", 0u));
-        if (ImGui::Button("Remove from the project")) commit(RemoveRaceChanges(r->id, m_raceRows, m_displayRows, m_modelRows), "remove race " + Plain(r->name));
-        ImGui::SameLine();
-        ImGui::TextColored(kQuiet, "(undo brings it back)");
-    }
+    else DrawRaceEditor(*r);
 
-    // The preview and its choices: a project race imported from a source shows with that source's files.
-    ImGui::SeparatorText("Preview");
-    size_t previewSource = v.source;
-    uint32_t previewRace = r->id;
-    if (package)
-    {
-        const nlohmann::json from = package->value("source", nlohmann::json::object());
-        previewRace = from.value("race", 0u);
-        previewSource = v.sources.size();
-        for (size_t i = 0; i < v.sources.size(); ++i)
-            if (v.sources[i].name == from.value("client", std::string()))
-            {
-                previewSource = i;
-                read(v.sources[i]);
-            }
-    }
-    if (previewSource != v.previewSource || previewRace != v.previewRace)
-    {
-        v.previewSource = previewSource;
-        v.previewRace = previewRace;
-        v.stale = true;
-    }
-    if (previewSource >= v.sources.size())
-    {
-        ImGui::TextColored(kQuiet, "The client it came from is not a source now: no preview.");
-        ImGui::EndChild();
-        ImGui::End();
-        return;
-    }
-    if (v.sources[previewSource].races.Format() == RaceCatalog::Layout::Classic)
-        ImGui::TextColored(kQuiet, "1.12 tables: the preview needs the client's models and textures converted to 3.3.5 (wow-upport) in this source.");
-    bool frame = false;
-    if (ImGui::RadioButton("Male", v.sex == 0) && v.sex != 0) { v.sex = 0; v.stale = frame = true; }
-    ImGui::SameLine();
-    if (ImGui::RadioButton("Female", v.sex == 1) && v.sex != 1) { v.sex = 1; v.stale = frame = true; }
-    if (v.stale || !v.models) RefreshRacePreview(true);
-    if (v.looks)
-    {
-        const DisplayLooks::Choices c = v.looks->CharacterChoices(v.previewRace, v.sex, v.skin, v.hairStyle);
-        auto chooser = [&](const char* label, const std::vector<uint32_t>& values, uint32_t& value) {
-            ImGui::PushID(label);
-            ImGui::BeginDisabled(values.size() < 2);
-            if (ImGui::ArrowButton("##prev", ImGuiDir_Left)) { value = Step(values, value, -1); v.stale = true; }
-            ImGui::SameLine();
-            if (ImGui::ArrowButton("##next", ImGuiDir_Right)) { value = Step(values, value, 1); v.stale = true; }
-            ImGui::EndDisabled();
-            ImGui::SameLine();
-            const auto it = std::find(values.begin(), values.end(), value);
-            ImGui::Text("%s %s", label, values.empty() ? "-" : it == values.end() ? "?" : (std::to_string(it - values.begin() + 1) + " / " + std::to_string(values.size())).c_str());
-            ImGui::PopID();
-        };
-        chooser("Skin", c.skins, v.skin);
-        ImGui::SameLine(200);
-        chooser("Face", c.faces, v.face);
-        ImGui::SameLine(400);
-        chooser("Facial hair", c.facialHair, v.facial);
-        chooser("Hair style", c.hairStyles, v.hairStyle);
-        ImGui::SameLine(200);
-        chooser("Hair colour", c.hairColors, v.hairColor);
-        if (v.stale) RefreshRacePreview(frame);
-    }
-    const ImGuiIO& io = ImGui::GetIO();
-    if (v.pose && v.pose->duration) v.timeMs = std::fmod(v.timeMs + io.DeltaTime * 1000.0f, float(v.pose->duration));
-    std::vector<ModelRenderer::Part> parts;
-    if (v.look && v.models)
-    {
-        ModelRenderer::Part body{ v.look->look, {}, v.pose.get(), uint32_t(v.timeMs) };
-        XMStoreFloat4x4(&body.world, XMMatrixScaling(v.look->scale, v.look->scale, v.look->scale));
-        parts.push_back(body);
-    }
-    const ImVec2 avail = ImGui::GetContentRegionAvail();
-    const MpqChain* previewMpq = v.sources[previewSource].mpq;
-    if (v.models && previewMpq)
-        DrawScene(v.scene, { avail.x, std::max(avail.y, 120.0f) }, *v.models, *previewMpq, parts, "This race has no character model this client can show.");
     ImGui::EndChild();
     ImGui::End();
+}
+
+void App::DrawRaceEditor(const RaceCatalog::Race& race)
+{
+    RacesView& v = m_races;
+    const RaceCatalog& base = v.project;
+    const nlohmann::json* package = m_raceRows.Package(race.id);
+    // The package as edited: read again when another race is picked, or when an undo changed it while unedited.
+    if (v.editRace != race.id || (!v.editDirty && v.editVersion != m_raceRows.Version()))
+    {
+        v.editRace = race.id;
+        v.editVersion = m_raceRows.Version();
+        v.edit = package ? *package : base.Package(race.id);
+        v.editDirty = false;
+        v.editClass = 0;
+        v.pickSlot = -1;
+    }
+    if (!v.edit.is_object()) return;
+    nlohmann::json& p = v.edit;
+    nlohmann::json& row = p["ChrRaces"];
+
+    // Applies changes made of parts as one undo step.
+    auto commit = [&](std::vector<Change> parts, const std::string& label) {
+        for (const Change& c : parts)
+        {
+            if (c.domain == m_raceRows.Domain()) m_raceRows.Apply(c);
+            else if (c.domain == m_displayRows.Domain()) m_displayRows.Apply(c);
+            else if (c.domain == m_modelRows.Domain()) m_modelRows.Apply(c);
+        }
+        m_store.Commit(std::move(parts), label);
+    };
+    ImGui::SeparatorText("Edit");
+    const nlohmann::json from = p.value("source", nlohmann::json::object());
+    if (!from.empty()) ImGui::TextColored(kQuiet, "Imported from %s, race %u there.", from.value("client", std::string("?")).c_str(), from.value("race", 0u));
+    else if (!package) ImGui::TextColored(kQuiet, "The client's race: applying an edit makes it the project's.");
+    else ImGui::TextColored(kQuiet, "The client's race, changed by the project.");
+    ImGui::BeginDisabled(!v.editDirty);
+    if (ImGui::Button("Apply"))
+    {
+        commit({ m_raceRows.MakeChange(race.id, p, "edit race " + Plain(race.name)) }, "edit race " + Plain(race.name));
+        v.editDirty = false;
+        v.editVersion = m_raceRows.Version();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Discard")) v.editRace = 0;
+    ImGui::EndDisabled();
+    if (package)
+    {
+        ImGui::SameLine();
+        if (ImGui::Button(from.empty() ? "Back to the client's" : "Remove from the project"))
+            commit(RemoveRaceChanges(race.id, m_raceRows, m_displayRows, m_modelRows), (from.empty() ? "revert race " : "remove race ") + Plain(race.name));
+    }
+    if (v.editDirty)
+    {
+        ImGui::SameLine();
+        ImGui::TextColored(kWarn, "not applied");
+    }
+    auto dirty = [&] { v.editDirty = true; };
+
+    if (!ImGui::BeginTabBar("##raceedit")) return;
+    if (ImGui::BeginTabItem("Identity"))
+    {
+        auto text = [&](const char* label, const char* key, const char* tip = nullptr) {
+            std::string value = row.value(key, std::string());
+            ImGui::SetNextItemWidth(260);
+            if (ImGui::InputText(label, &value)) { row[key] = value; dirty(); }
+            if (tip) ImGui::SetItemTooltip("%s", tip);
+        };
+        text("Name", "Name_lang");
+        text("Female name", "Name_female_lang", "What female characters of it are called (3.3.5); empty: the name.");
+        text("Male name", "Name_male_lang", "What male characters of it are called (3.3.5); empty: the name.");
+        text("File string", "ClientFileString",
+             "Picks the login screen's model (Interface\\Glues\\Models\\UI_<file string>) and the race's sounds. Its characters' "
+             "models and textures are named by its displays and CharSections, not by it.");
+        text("Prefix", "ClientPrefix", "Helmets are found as <helmet>_<prefix><M|F>.m2: a prefix no helmet has shows none (a bare head).");
+        int team = int(row.value("Alliance", 1u));
+        if (ImGui::RadioButton("Alliance", team == 0)) { row["Alliance"] = 0; dirty(); }
+        ImGui::SameLine();
+        if (ImGui::RadioButton("Horde", team == 1)) { row["Alliance"] = 1; dirty(); }
+        uint32_t faction = row.value("FactionID", 0u);
+        if (FactionCombo(base, faction)) { row["FactionID"] = faction; dirty(); }
+        const uint32_t language = row.value("BaseLanguage", 0u);
+        const std::string languageName = base.LanguageName(language);
+        ImGui::SetNextItemWidth(260);
+        if (ImGui::BeginCombo("Base language", (std::to_string(language) + ": " + (languageName.empty() ? "none" : languageName)).c_str()))
+        {
+            for (const auto& [id, name] : base.Languages())
+                if (ImGui::Selectable((std::to_string(id) + ": " + name).c_str(), id == language)) { row["BaseLanguage"] = id; dirty(); }
+            ImGui::EndCombo();
+        }
+        ImGui::SetItemTooltip("The language its characters speak (Languages.dbc). The server also needs its language skill (server rows, a later phase).");
+        int cinematic = int(row.value("CinematicSequenceID", 0u));
+        ImGui::SetNextItemWidth(120);
+        if (ImGui::InputInt("Intro cinematic", &cinematic)) { row["CinematicSequenceID"] = uint32_t(std::max(cinematic, 0)); dirty(); }
+        ImGui::SetItemTooltip("CinematicSequences id played on a new character's first login; 0 none.");
+        ImGui::EndTabItem();
+    }
+    if (ImGui::BeginTabItem("Classes"))
+    {
+        std::set<uint32_t> classes, outfits;
+        for (const nlohmann::json& b : ChangeStore::List(p, "CharBaseInfo")) classes.insert(b.value("ClassID", 0u));
+        for (const nlohmann::json& o : ChangeStore::List(p, "CharStartOutfit")) outfits.insert(o.value("ClassID", 0u));
+        std::set<uint32_t> wanted = classes;
+        bool changed = false;
+        int column = 0;
+        for (uint32_t c : { 1u, 2u, 3u, 4u, 5u, 6u, 7u, 8u, 9u, 11u })
+        {
+            if (column++ % 5) ImGui::SameLine();
+            bool on = wanted.count(c) != 0;
+            if (ImGui::Checkbox(ClassName(c), &on)) { on ? (void)wanted.insert(c) : (void)wanted.erase(c); changed = true; }
+        }
+        std::vector<const RaceCatalog::Race*> playable = Playable(base);
+        if (!v.editDonor || !base.Find(v.editDonor))
+            for (const RaceCatalog::Race* b : playable)
+                if (int(b->alliance) == int(row.value("Alliance", 1u)) && b->id != race.id) { v.editDonor = b->id; break; }
+        const RaceCatalog::Race* donor = base.Find(v.editDonor);
+        ImGui::SetNextItemWidth(200);
+        if (ImGui::BeginCombo("Outfits of a class it has none of, from", donor ? Plain(donor->name).c_str() : "none"))
+        {
+            if (ImGui::Selectable("none (they start naked)", !v.editDonor)) v.editDonor = 0;
+            for (const RaceCatalog::Race* b : playable)
+                if (ImGui::Selectable(Plain(b->name).c_str(), v.editDonor == b->id)) v.editDonor = b->id;
+            ImGui::EndCombo();
+        }
+        if (changed)
+        {
+            // New outfit ids: free in the project's range, past the ones the edit holds already.
+            std::set<uint32_t> used = base.Ids("CharStartOutfit");
+            for (const nlohmann::json& o : ChangeStore::List(p, "CharStartOutfit")) used.insert(o.value("ID", 0u));
+            const Project::IdRange range = m_project->Range("charstartoutfit.id");
+            auto next = [&]() -> uint32_t {
+                for (uint32_t id = range.first; id && id <= range.last; ++id)
+                    if (used.insert(id).second) return id;
+                return 0;
+            };
+            std::string error;
+            if (SetRaceClasses(p, wanted, v.editDonor ? base.Package(v.editDonor) : nlohmann::json(), next, error)) dirty();
+            else Log("Classes: %s", error.c_str());
+        }
+        for (uint32_t c : wanted)
+            if (!outfits.count(c) && classes.count(c)) ImGui::TextColored(kQuiet, "%s starts naked: no outfit (Starting items).", ClassName(c));
+        if (wanted.empty()) ImGui::TextColored(kWarn, "No class: nobody can make a character of it.");
+        if (wanted.count(6)) ImGui::TextColored(kQuiet, "Death Knights also need the server's Acherus start (server rows, a later phase).");
+        ImGui::EndTabItem();
+    }
+    if (ImGui::BeginTabItem("Looks"))
+    {
+        if (ImGui::RadioButton("Male##looks", v.editSex == 0)) v.editSex = 0;
+        ImGui::SameLine();
+        if (ImGui::RadioButton("Female##looks", v.editSex == 1)) v.editSex = 1;
+        ImGui::SameLine();
+        ImGui::TextColored(kQuiet, "Removing a choice moves the ones after it down; the preview shows the source's tables.");
+        static const std::pair<RaceChoice, const char*> kChoices[] = { { RaceChoice::Skin, "Skin colours" }, { RaceChoice::Face, "Faces" },
+                                                                       { RaceChoice::HairStyle, "Hair styles" }, { RaceChoice::HairColor, "Hair colours" },
+                                                                       { RaceChoice::FacialHair, "Facial hair" } };
+        for (const auto& [choice, label] : kChoices)
+        {
+            const std::vector<uint32_t> values = RaceChoiceValues(p, v.editSex, choice);
+            if (!ImGui::TreeNode(label, "%s (%zu)", label, values.size())) continue;
+            for (uint32_t value : values)
+            {
+                ImGui::PushID(int(value));
+                // A texture of it, to tell the values apart.
+                std::string texture;
+                const int section = choice == RaceChoice::Skin ? 0 : choice == RaceChoice::Face ? 1 : choice == RaceChoice::FacialHair ? 2 : 3;
+                const char* column = choice == RaceChoice::Skin || choice == RaceChoice::HairColor ? "ColorIndex" : "VariationIndex";
+                for (const nlohmann::json& s : ChangeStore::List(p, "CharSections"))
+                    if (s.value("SexID", 0u) == v.editSex && s.value("BaseSection", 0u) == uint32_t(section) && s.value(column, 0u) == value)
+                    {
+                        texture = s.value("TextureName[0]", std::string());
+                        break;
+                    }
+                const bool remove = ImGui::SmallButton("Remove");
+                ImGui::SameLine();
+                ImGui::Text("%u", value + 1);
+                ImGui::SameLine(110);
+                ImGui::TextColored(kQuiet, "%s", texture.empty() ? (choice == RaceChoice::HairStyle || choice == RaceChoice::FacialHair ? "(geosets)" : "-") : texture.c_str());
+                ImGui::PopID();
+                if (remove && RemoveRaceChoice(p, v.editSex, choice, value)) { dirty(); break; }
+            }
+            ImGui::TreePop();
+        }
+        ImGui::EndTabItem();
+    }
+    if (ImGui::BeginTabItem("Starting items"))
+    {
+        std::vector<uint32_t> classes;
+        for (const nlohmann::json& b : ChangeStore::List(p, "CharBaseInfo")) classes.push_back(b.value("ClassID", 0u));
+        std::sort(classes.begin(), classes.end());
+        if (classes.empty()) ImGui::TextColored(kQuiet, "No classes (Classes tab).");
+        else
+        {
+            if (std::find(classes.begin(), classes.end(), v.editClass) == classes.end()) v.editClass = classes.front();
+            ImGui::SetNextItemWidth(160);
+            if (ImGui::BeginCombo("Class", ClassName(v.editClass)))
+            {
+                for (uint32_t c : classes)
+                    if (ImGui::Selectable(ClassName(c), c == v.editClass)) v.editClass = c;
+                ImGui::EndCombo();
+            }
+            ImGui::SameLine();
+            if (ImGui::RadioButton("Male##items", v.editSex == 0)) v.editSex = 0;
+            ImGui::SameLine();
+            if (ImGui::RadioButton("Female##items", v.editSex == 1)) v.editSex = 1;
+            nlohmann::json* outfit = nullptr;
+            for (nlohmann::json& o : p["CharStartOutfit"])
+                if (o.value("ClassID", 0u) == v.editClass && o.value("SexID", 0u) == v.editSex) { outfit = &o; break; }
+            if (!outfit)
+            {
+                ImGui::TextColored(kQuiet, "No starting outfit: characters of this class and sex start naked.");
+                if (ImGui::Button("Add a starting outfit"))
+                {
+                    std::set<uint32_t> used = base.Ids("CharStartOutfit");
+                    for (const nlohmann::json& o : p["CharStartOutfit"]) used.insert(o.value("ID", 0u));
+                    const Project::IdRange range = m_project->Range("charstartoutfit.id");
+                    uint32_t id = 0;
+                    for (uint32_t i = range.first; i && i <= range.last && !id; ++i)
+                        if (!used.count(i)) id = i;
+                    if (!id) Log("Starting outfit: the charstartoutfit.id range is full.");
+                    else
+                    {
+                        nlohmann::json o = { { "ID", id }, { "RaceID", race.id }, { "ClassID", v.editClass }, { "SexID", v.editSex }, { "OutfitID", 0 } };
+                        for (int i = 0; i < 24; ++i)
+                            for (const char* k : { "ItemID", "DisplayItemID", "InventoryType" }) o[std::string(k) + "[" + std::to_string(i) + "]"] = 0;
+                        p["CharStartOutfit"].push_back(std::move(o));
+                        dirty();
+                    }
+                }
+            }
+            else
+            {
+                if (!m_db.Connected()) ImGui::TextColored(kQuiet, "Connect the server (Server panel) to search items and see which exist there.");
+                auto slot = [](const char* key, int i) { return std::string(key) + "[" + std::to_string(i) + "]"; };
+                int empty = -1;
+                if (ImGui::BeginTable("##outfit", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit))
+                {
+                    ImGui::TableSetupColumn("Item");
+                    ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
+                    ImGui::TableSetupColumn("Type");
+                    ImGui::TableSetupColumn("");
+                    ImGui::TableHeadersRow();
+                    for (int i = 0; i < 24; ++i)
+                    {
+                        const uint32_t entry = (*outfit).value(slot("ItemID", i), 0u);
+                        if (!entry) { if (empty < 0) empty = i; continue; }
+                        ImGui::PushID(i);
+                        ImGui::TableNextRow();
+                        ImGui::TableNextColumn();
+                        ImGui::Text("%u", entry);
+                        ImGui::TableNextColumn();
+                        if (m_db.Connected())
+                        {
+                            const NpcView::Item& item = NpcItem(entry);
+                            if (item.found) ImGui::TextUnformatted(item.name.c_str());
+                            else ImGui::TextColored(kWarn, "not on your server: nobody gets it");
+                        }
+                        else ImGui::TextColored(kQuiet, "-");
+                        ImGui::TableNextColumn();
+                        ImGui::Text("%u", (*outfit).value(slot("InventoryType", i), 0u));
+                        ImGui::TableNextColumn();
+                        if (ImGui::SmallButton("Change")) { v.pickSlot = i; ImGui::OpenPopup("##raceitem"); }
+                        ImGui::SameLine();
+                        if (ImGui::SmallButton("Clear"))
+                        {
+                            for (const char* k : { "ItemID", "DisplayItemID", "InventoryType" }) (*outfit)[slot(k, i)] = 0;
+                            dirty();
+                        }
+                        ImGui::PopID();
+                    }
+                    ImGui::EndTable();
+                }
+                ImGui::BeginDisabled(empty < 0 || !m_db.Connected());
+                if (ImGui::Button("Add an item")) { v.pickSlot = empty; ImGui::OpenPopup("##raceitem"); }
+                ImGui::EndDisabled();
+                if (empty < 0) { ImGui::SameLine(); ImGui::TextColored(kQuiet, "all 24 slots used"); }
+                ImGui::SetNextWindowSize({ 440, 420 });
+                if (ImGui::BeginPopup("##raceitem"))
+                {
+                    if (const auto chosen = ItemSearch("Any item: name or entry", "1 = 1"); chosen && v.pickSlot >= 0)
+                    {
+                        const NpcView::Item& item = NpcItem(*chosen);
+                        (*outfit)[slot("ItemID", v.pickSlot)] = *chosen;
+                        (*outfit)[slot("DisplayItemID", v.pickSlot)] = *chosen ? item.display : 0;
+                        (*outfit)[slot("InventoryType", v.pickSlot)] = *chosen ? item.type : 0;
+                        dirty();
+                        ImGui::CloseCurrentPopup();
+                    }
+                    ImGui::EndPopup();
+                }
+                ImGui::TextColored(kQuiet, "The creator shows these, and the server gives them (AzerothCore reads the same table).");
+            }
+        }
+        ImGui::EndTabItem();
+    }
+    ImGui::EndTabBar();
 }

@@ -94,6 +94,7 @@ namespace checks
     int RaceCheck();
     int RaceLookCheck();
     int RaceImportCheck();
+    int RaceEditCheck();
     int LoaderCheck();
     int RenderCheck();
     int PoisCheck();

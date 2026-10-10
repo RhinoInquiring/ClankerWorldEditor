@@ -1484,4 +1484,114 @@ namespace checks
         printf("%d problem(s)\n", problems);
         return problems ? 1 : 0;
     }
+
+    /// `--race-edit-check <data dir> [race]`: the Races window's edits on a client race's package (default Human):
+    /// removing the middle value of every choice of both sexes (the values after it move down with their textures, no
+    /// gaps, and the rows tied to it go too: a skin colour's faces and underwear, a hair style's geosets), and giving it
+    /// other classes (outfits of dropped classes go, a new class takes another race's with new ids).
+    int RaceEditCheck()
+    {
+        if (__argc < 3 || !__wargv) return 2;
+        setvbuf(stdout, nullptr, _IONBF, 0);
+        int problems = 0;
+        auto expect = [&](bool ok, const std::string& what) { printf("%s %s\n", ok ? "ok  " : "FAIL", what.c_str()); problems += !ok; };
+        MpqChain mpq;
+        mpq.Open(std::filesystem::path(__wargv[2]).string());
+        RaceCatalog races;
+        std::string error;
+        if (!races.Load(mpq, error)) { printf("%s\n", error.c_str()); return 1; }
+        const uint32_t race = __argc > 3 ? uint32_t(_wtoi(__wargv[3])) : 1;
+        const nlohmann::json original = races.Package(race);
+        if (!original.is_object()) { printf("no race %u\n", race); return 1; }
+        printf("race %u %s: %zu CharSections rows\n", race, original["ChrRaces"].value("Name_lang", "").c_str(), original["CharSections"].size());
+
+        static const std::pair<RaceChoice, const char*> kChoices[] = { { RaceChoice::Skin, "skin colour" }, { RaceChoice::Face, "face" },
+                                                                       { RaceChoice::HairStyle, "hair style" }, { RaceChoice::HairColor, "hair colour" },
+                                                                       { RaceChoice::FacialHair, "facial hair" } };
+        // The first texture of a value, as the Looks tab shows it.
+        auto texture = [](const nlohmann::json& p, uint32_t sex, RaceChoice c, uint32_t value) {
+            const uint32_t section = c == RaceChoice::Skin ? 0 : c == RaceChoice::Face ? 1 : c == RaceChoice::FacialHair ? 2 : 3;
+            const char* column = c == RaceChoice::Skin || c == RaceChoice::HairColor ? "ColorIndex" : "VariationIndex";
+            std::vector<std::string> out;
+            for (const nlohmann::json& s : p["CharSections"])
+                if (s.value("SexID", 0u) == sex && s.value("BaseSection", 0u) == section && s.value(column, 0u) == value)
+                    out.push_back(s.value("TextureName[0]", std::string()) + "|" + s.value("TextureName[1]", std::string()));
+            std::sort(out.begin(), out.end());
+            return out;
+        };
+        auto contiguous = [](const std::vector<uint32_t>& v) {
+            for (size_t i = 0; i < v.size(); ++i)
+                if (v[i] != i) return false;
+            return true;
+        };
+        for (uint32_t sex = 0; sex < 2; ++sex)
+            for (const auto& [choice, name] : kChoices)
+            {
+                nlohmann::json p = original;
+                const std::vector<uint32_t> before = RaceChoiceValues(p, sex, choice);
+                if (before.size() < 3) { printf("     %s %s: %zu value(s), skipped\n", sex ? "female" : "male", name, before.size()); continue; }
+                const uint32_t middle = before[before.size() / 2];
+                const auto next = texture(p, sex, choice, middle + 1);   // what the next value shows: it moves down into the gap
+                const auto last = texture(p, sex, choice, before.back());
+                const size_t rowsBefore = p["CharSections"].size();
+                const bool removed = RemoveRaceChoice(p, sex, choice, middle);
+                const std::vector<uint32_t> after = RaceChoiceValues(p, sex, choice);
+                const bool wasContiguous = contiguous(before);
+                bool ok = removed && after.size() == before.size() - 1 && (!wasContiguous || contiguous(after)) &&
+                          texture(p, sex, choice, middle) == next && texture(p, sex, choice, before.back() - 1) == last;
+                // Rows tied to the value went with it: no face or underwear of a removed skin colour is past the last one left.
+                if (choice == RaceChoice::Skin)
+                    for (const nlohmann::json& s : p["CharSections"])
+                        ok = ok && !(s.value("SexID", 0u) == sex && s.value("ColorIndex", 0u) >= before.size() - 1 &&
+                                     (s.value("BaseSection", 0u) == 1 || s.value("BaseSection", 0u) == 4));
+                if (choice == RaceChoice::HairStyle)
+                    for (const nlohmann::json& h : p["CharHairGeosets"]) ok = ok && !(h.value("SexID", 0u) == sex && h.value("VariationID", 0u) >= before.size() - 1);
+                expect(ok, std::string(sex ? "female " : "male ") + name + " " + std::to_string(middle + 1) + " of " + std::to_string(before.size()) +
+                               " removed: " + std::to_string(after.size()) + " left" + (wasContiguous ? ", no gap" : " (the client's had gaps)") +
+                               ", " + std::to_string(rowsBefore - p["CharSections"].size()) + " CharSections row(s) went");
+            }
+
+        // Classes: keep two, add one it has no outfits of from another race.
+        {
+            nlohmann::json p = original;
+            const std::vector<uint32_t> had = races.Classes(race);
+            if (had.size() >= 2)
+            {
+                const uint32_t keepA = had[0], keepB = had[1];
+                uint32_t added = 0, donorRace = 0;
+                for (const RaceCatalog::Race& r : races.Races())   // a class this race lacks, and a race with outfits of it
+                {
+                    if (r.id == race || added) continue;
+                    for (const RaceCatalog::Outfit& o : races.Outfits())
+                        if (o.race == r.id && std::find(had.begin(), had.end(), uint32_t(o.cls)) == had.end()) { added = o.cls; donorRace = r.id; break; }
+                }
+                uint32_t nextId = 990000;
+                const std::set<uint32_t> wanted{ keepA, keepB, added };
+                const nlohmann::json donor = races.Package(donorRace);
+                expect(SetRaceClasses(p, wanted, donor, [&] { return nextId++; }, error), "classes set " + error);
+                std::set<uint32_t> classes, outfitClasses;
+                bool ids = true;
+                for (const nlohmann::json& b : p["CharBaseInfo"]) classes.insert(b.value("ClassID", 0u));
+                for (const nlohmann::json& o : p["CharStartOutfit"])
+                {
+                    outfitClasses.insert(o.value("ClassID", 0u));
+                    ids = ids && o.value("RaceID", 0u) == race && (o.value("ClassID", 0u) != added || o.value("ID", 0u) >= 990000);
+                }
+                expect(classes == wanted && outfitClasses == wanted && ids,
+                       "classes " + std::to_string(keepA) + ", " + std::to_string(keepB) + " kept, " + std::to_string(added) + " added with race " +
+                           std::to_string(donorRace) + "'s outfits under new ids");
+            }
+        }
+        // The edited package as the project's races show it.
+        {
+            nlohmann::json p = original;
+            RemoveRaceChoice(p, 0, RaceChoice::Skin, 0);
+            RaceCatalog edited = races;
+            edited.Apply(race, p);
+            expect(edited.Count(race, 0).skins == races.Count(race, 0).skins - 1 && edited.Count(race, 1).skins == races.Count(race, 1).skins,
+                   "the project's races count one male skin colour fewer, the female ones unchanged");
+        }
+        printf("%d problem(s)\n", problems);
+        return problems ? 1 : 0;
+    }
 }

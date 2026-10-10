@@ -95,6 +95,9 @@ public:
     std::set<uint32_t> Ids(const std::string& table) const;
     /// The name of the faction a FactionTemplate id belongs to in this client ("PLAYER, Human"); empty when it has none.
     std::string FactionName(uint32_t factionTemplate) const;
+    /// Languages.dbc: every language (id, name) of this client, and one's name (empty when it has none).
+    std::vector<std::pair<uint32_t, std::string>> Languages() const;
+    std::string LanguageName(uint32_t id) const;
 
 private:
     Layout m_layout = Layout::None;
@@ -104,7 +107,7 @@ private:
     std::vector<FacialHair> m_facial;
     std::vector<std::pair<uint8_t, uint8_t>> m_baseInfo;
     std::vector<Outfit> m_outfits;
-    Dbc m_displayInfo, m_modelData, m_factionTemplates, m_factions;
+    Dbc m_displayInfo, m_modelData, m_factionTemplates, m_factions, m_languages;
     std::function<std::string(uint32_t)> m_modelOf;
 };
 
@@ -155,6 +158,22 @@ std::vector<Change> ImportRaceChanges(const RaceCatalog& source, const std::stri
                                       const Project& ranges, std::string& error, const RaceImportOptions& options = {});
 /// The changes removing a project race the project added: its package and the display and model rows its import added.
 std::vector<Change> RemoveRaceChanges(uint32_t race, const RaceAdapter& races, const DbcTable& displays, const DbcTable& models);
+
+/// What a character chooses in the creator, each with its own values per sex.
+enum class RaceChoice { Skin, Face, HairStyle, HairColor, FacialHair };
+/// The values a race package offers of a choice for a sex (CharSections colours / variations, CharHairGeosets and
+/// CharacterFacialHairStyles variations), ascending.
+std::vector<uint32_t> RaceChoiceValues(const nlohmann::json& package, uint32_t sex, RaceChoice choice);
+/// Takes one value of a choice out of a race package and closes the gap: the character creator steps through a choice
+/// by index, so the values above it move down one. A skin colour takes its faces and underwear with it, a hair style
+/// its geosets and scalp textures, a hair colour its scalp and facial hair textures of that colour, a facial hair style
+/// its geosets and textures. False when the package has no such value.
+bool RemoveRaceChoice(nlohmann::json& package, uint32_t sex, RaceChoice choice, uint32_t value);
+/// Gives a race package these classes (CharBaseInfo). A class it no longer has loses its starting outfits; a class it has
+/// no outfits of takes `donor`'s (a package; new ids from `outfitIds`, which returns 0 when none is left). False (and
+/// `error`) when ids ran out.
+bool SetRaceClasses(nlohmann::json& package, const std::set<uint32_t>& classes, const nlohmann::json& donor,
+                    const std::function<uint32_t()>& outfitIds, std::string& error);
 
 /// Reads synthetic 1.12 and 3.3.5 tables and round-trips a package; false on the first wrong field.
 bool RacesSelfTest();

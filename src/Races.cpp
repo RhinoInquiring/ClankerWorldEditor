@@ -320,7 +320,21 @@ bool RaceCatalog::Load(const MpqChain& mpq, std::string& error)
     m_modelData = ReadDbc(mpq, "CreatureModelData");
     m_factionTemplates = ReadDbc(mpq, "FactionTemplate");
     m_factions = ReadDbc(mpq, "Faction");
+    m_languages = ReadDbc(mpq, "Languages");
     return true;
+}
+
+std::vector<std::pair<uint32_t, std::string>> RaceCatalog::Languages() const
+{
+    std::vector<std::pair<uint32_t, std::string>> out;
+    for (uint32_t r = 0; r < m_languages.Rows(); ++r) out.push_back({ m_languages.U32(r, 0), m_languages.Str(r, 1) });   // ID, Name_lang
+    return out;
+}
+
+std::string RaceCatalog::LanguageName(uint32_t id) const
+{
+    const auto r = m_languages.Find(id);
+    return r ? m_languages.Str(*r, 1) : std::string();
 }
 
 std::string RaceCatalog::FactionName(uint32_t factionTemplate) const
@@ -497,22 +511,9 @@ std::vector<Change> ImportRaceChanges(const RaceCatalog& source, const std::stri
     // The import's choices: team, faction, and the classes it can be (outfits of an added class from the donor race).
     if (options.alliance >= 0) p["ChrRaces"]["Alliance"] = options.alliance;
     if (options.faction) p["ChrRaces"]["FactionID"] = options.faction;
-    if (options.classes)
-    {
-        const std::set<uint32_t>& keep = *options.classes;
-        std::set<uint32_t> had;   // classes the race has outfits of (some clients keep outfits of classes it cannot be)
-        for (const nlohmann::json& row : p["CharStartOutfit"]) had.insert(U(row, "ClassID"));
-        nlohmann::json base = nlohmann::json::array(), outfits = nlohmann::json::array();
-        for (uint32_t c : keep) base.push_back({ { "RaceID", sourceRace }, { "ClassID", c } });
-        for (const nlohmann::json& row : p["CharStartOutfit"])
-            if (keep.count(U(row, "ClassID"))) outfits.push_back(row);
-        const nlohmann::json donor = options.outfitDonor ? project.Package(options.outfitDonor) : nlohmann::json();
-        if (donor.is_object())
-            for (const nlohmann::json& row : donor["CharStartOutfit"])
-                if (keep.count(U(row, "ClassID")) && !had.count(U(row, "ClassID"))) outfits.push_back(row);
-        p["CharBaseInfo"] = std::move(base);
-        p["CharStartOutfit"] = std::move(outfits);
-    }
+    if (options.classes)   // outfit ids are placeholders here: every outfit gets a new one below
+        if (!SetRaceClasses(p, *options.classes, options.outfitDonor ? project.Package(options.outfitDonor) : nlohmann::json(), [] { return 1u; }, error))
+            return {};
 
     // Ids: the lowest free in the project's range for each table, never one the client or the project uses already.
     std::map<std::string, std::set<uint32_t>> taken;
@@ -600,6 +601,92 @@ std::vector<Change> RemoveRaceChanges(uint32_t race, const RaceAdapter& races, c
     for (const nlohmann::json& id : ChangeStore::List(added, "CreatureModelData"))
         if (const nlohmann::json* row = models.Edited(id)) out.push_back(models.MakeChange(id, *row, nullptr, "remove race"));
     return out;
+}
+
+namespace
+{
+    // Where a choice lives: its CharSections base sections and the column holding its value there, and its geoset table.
+    struct ChoiceRows { std::vector<uint32_t> sections; const char* column; const char* geosets; };
+    ChoiceRows RowsOf(RaceChoice c)
+    {
+        switch (c)
+        {
+        case RaceChoice::Skin: return { { 0, 1, 4 }, "ColorIndex", nullptr };          // skin, its faces, its underwear
+        case RaceChoice::Face: return { { 1 }, "VariationIndex", nullptr };
+        case RaceChoice::HairStyle: return { { 3 }, "VariationIndex", "CharHairGeosets" };
+        case RaceChoice::HairColor: return { { 3, 2 }, "ColorIndex", nullptr };      // scalp (where its values are) and facial hair of that colour
+        case RaceChoice::FacialHair: return { { 2 }, "VariationIndex", "CharacterFacialHairStyles" };
+        }
+        return {};
+    }
+}
+
+std::vector<uint32_t> RaceChoiceValues(const nlohmann::json& package, uint32_t sex, RaceChoice choice)
+{
+    std::set<uint32_t> out;
+    const ChoiceRows c = RowsOf(choice);
+    if (c.geosets)
+        for (const nlohmann::json& row : ChangeStore::List(package, c.geosets))
+        {
+            if (U(row, "SexID") == sex) out.insert(U(row, "VariationID"));
+        }
+    else
+        for (const nlohmann::json& row : ChangeStore::List(package, "CharSections"))
+            if (U(row, "SexID") == sex && U(row, "BaseSection") == c.sections.front()) out.insert(U(row, c.column));
+    return { out.begin(), out.end() };
+}
+
+bool RemoveRaceChoice(nlohmann::json& package, uint32_t sex, RaceChoice choice, uint32_t value)
+{
+    const std::vector<uint32_t> values = RaceChoiceValues(package, sex, choice);
+    if (std::find(values.begin(), values.end(), value) == values.end()) return false;
+    const ChoiceRows c = RowsOf(choice);
+    auto shift = [&](nlohmann::json& rows, const char* column, const std::function<bool(const nlohmann::json&)>& mine) {
+        nlohmann::json kept = nlohmann::json::array();
+        for (nlohmann::json& row : rows)
+        {
+            if (mine(row))
+            {
+                const uint32_t v = U(row, column);
+                if (v == value) continue;
+                if (v > value) row[column] = v - 1;
+            }
+            kept.push_back(std::move(row));
+        }
+        rows = std::move(kept);
+    };
+    if (package.contains("CharSections"))
+        shift(package["CharSections"], c.column, [&](const nlohmann::json& row) {
+            return U(row, "SexID") == sex && std::count(c.sections.begin(), c.sections.end(), U(row, "BaseSection"));
+        });
+    if (c.geosets && package.contains(c.geosets))
+        shift(package[c.geosets], "VariationID", [&](const nlohmann::json& row) { return U(row, "SexID") == sex; });
+    return true;
+}
+
+bool SetRaceClasses(nlohmann::json& package, const std::set<uint32_t>& classes, const nlohmann::json& donor,
+                    const std::function<uint32_t()>& outfitIds, std::string& error)
+{
+    const uint32_t race = U(package.at("ChrRaces"), "ID");
+    std::set<uint32_t> had;   // classes it has outfits of
+    nlohmann::json outfits = nlohmann::json::array();
+    for (const nlohmann::json& row : ChangeStore::List(package, "CharStartOutfit"))
+        if (classes.count(U(row, "ClassID"))) { outfits.push_back(row); had.insert(U(row, "ClassID")); }
+    if (donor.is_object())
+        for (nlohmann::json row : ChangeStore::List(donor, "CharStartOutfit"))
+            if (classes.count(U(row, "ClassID")) && !had.count(U(row, "ClassID")))
+            {
+                const uint32_t id = outfitIds();
+                if (!id) { error = "the charstartoutfit.id range is full"; return false; }
+                row["ID"] = id;
+                row["RaceID"] = race;
+                outfits.push_back(std::move(row));
+            }
+    nlohmann::json base = nlohmann::json::array();
+    for (uint32_t c : classes) base.push_back({ { "RaceID", race }, { "ClassID", c } });
+    package["CharBaseInfo"] = std::move(base);
+    package["CharStartOutfit"] = std::move(outfits);
+    return true;
 }
 
 bool RacesSelfTest()

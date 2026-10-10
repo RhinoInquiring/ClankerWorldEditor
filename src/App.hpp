@@ -837,6 +837,13 @@ private:
         uint32_t importTarget = 0;                       // the race id an import gets (0: the first free one)
         std::pair<size_t, uint32_t> importFor{ ~size_t(0), 0 };   // the source race the import choices below were set for
         RaceImportOptions import;                        // team, faction template, classes and outfit donor of the next import
+        // Editing a project race: its package as edited, applied as one change.
+        nlohmann::json edit;                             // the package being edited (null: none)
+        uint32_t editRace = 0;
+        uint64_t editVersion = ~0ull;                    // RaceAdapter version `edit` was read at
+        bool editDirty = false;
+        uint32_t editSex = 0, editClass = 0, editDonor = 0;
+        int pickSlot = -1;                               // the outfit slot the item search fills
         // The preview has renderers of its own: a source's files never mix with another's of the same name.
         const MpqChain* previewMpq = nullptr;
         std::unique_ptr<Renderer> renderer;
@@ -850,6 +857,8 @@ private:
     } m_races;
     bool m_showRaces = false;
     void DrawRaces();
+    /// The Races window's editor of a project race: identity, classes, looks, starting items; applied as one change.
+    void DrawRaceEditor(const RaceCatalog::Race& race);
     /// Builds the preview's look of the selected race and choices (and its renderers, for another source).
     void RefreshRacePreview(bool frame);
     void DrawNpcViewer();
@@ -876,6 +885,9 @@ private:
     void DrawNpcTemplateTab();
     void DrawNpcGearTab();
     void DrawItemPicker();
+    /// An item search inside an open popup: a query box and the item_template rows matching it and `filter` (an SQL
+    /// condition). The chosen entry (0: the "(empty slot)" line), or none.
+    std::optional<uint32_t> ItemSearch(const char* hint, const std::string& filter);
     void DrawNpcAppearanceTab();
     void DrawNpcLootTab();
     /// The loot rows of one kind for the template's current loot id (read when the id changes).

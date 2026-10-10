@@ -39,6 +39,7 @@ Direct3D device. Checks that write files use a temporary folder and remove it.
 | `--race-check <Data> [other Data...]` | Every race of each client in its own layout (1.12 or 3.3.5): identity, classes, choices per sex, textures missing; fails when a playable race has no character model |
 | `--race-look <Data> <race> <sex> <out.png> [all]` | A race's character as the Races window previews it: the model loads, its textures exist, the composited skin is saved (`all`: every skin colour) |
 | `--race-import-check <Data> <source Data> <source race> [target race]` | Imports a race of another client as the Races window does: every row of the new race, ids new and in the project's ranges, displays pointing at the source's model files, the same choices, save and reload, undo, redo, remove |
+| `--race-edit-check <Data> [race]` | The Races window's edits on a client race (default Human): the middle value of every choice of both sexes removed, the rest moved down with their textures and no gap, the rows tied to it gone; classes kept, dropped and added with another race's outfits |
 | `--appearance-check <Data> [display id]` | A new appearance (copy, bake dropped, hair changed) draws composited, exports both DBCs, and reads back intact |
 | `--anim-check <Data> <model.m2> [...]` | Skeletons animate without flying apart; every animation (incl. `.anim` files) loads and Walk differs from Stand |
 | `--catalog-check <Data> <out.png>` | Catalog build time, search, thumbnails |
