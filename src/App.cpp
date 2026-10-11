@@ -73,11 +73,13 @@ std::optional<std::string> PickFolder(HWND owner, const wchar_t* title)
     return result;
 }
 
-std::optional<std::string> PickPicture(HWND owner, const wchar_t* title)
+std::optional<std::string> PickPicture(HWND owner, const wchar_t* title) { return PickFile(owner, title, L"Pictures", L"*.png;*.jpg;*.jpeg;*.bmp;*.blp"); }
+
+std::optional<std::string> PickFile(HWND owner, const wchar_t* title, const wchar_t* kind, const wchar_t* patterns)
 {
     ComPtr<IFileOpenDialog> dlg;
     if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dlg)))) return std::nullopt;
-    const COMDLG_FILTERSPEC types[] = { { L"Pictures", L"*.png;*.jpg;*.jpeg;*.bmp;*.blp" } };
+    const COMDLG_FILTERSPEC types[] = { { kind, patterns } };
     dlg->SetFileTypes(1, types);
     dlg->SetTitle(title);
     if (FAILED(dlg->Show(owner))) return std::nullopt;
@@ -365,6 +367,7 @@ bool App::Init(HWND hwnd, ID3D11Device* device, ID3D11DeviceContext* context, bo
     m_roads.onChanged = [this](const std::string& map, const RoadStore::Cells& cells) { m_terrain.RefreshCells(map, cells); };
     m_store.Register(m_creatures);
     m_store.Register(m_raceRows);
+    m_store.Register(m_creatureModelRows);
     m_store.Register(m_gameobjects);
     for (DbcTable* table : DbcTables()) m_store.Register(*table);
     for (TableRowsAdapter* table : TableAdapters())
@@ -382,7 +385,7 @@ bool App::Init(HWND hwnd, ID3D11Device* device, ID3D11DeviceContext* context, bo
             if (table == 0 && id == v.appearanceId) return &v.editDisplay;
             if (table == 1 && v.editExtra.is_object() && id == v.editExtra.value("ID", 0u)) return &v.editExtra;
         }
-        return (table == 0 ? m_displayRows : m_extraRows).Edited(id);
+        return (table == 0 ? m_displayRows : table == 1 ? m_extraRows : m_modelRows).Edited(id);
     });
     m_looks.SetUpload([this](const std::string& name, const BlpImage& image) { m_renderer.CacheTexture(name, image); });
 
@@ -437,6 +440,7 @@ bool App::Init(HWND hwnd, ID3D11Device* device, ID3D11DeviceContext* context, bo
         { "Window: NPC viewer", "", [this] { m_showNpc = true; m_npc.focus = true; }, always },
         { "Window: Sources", "", [this] { m_showSources = true; }, hasProject },
         { "Window: Races", "", [this] { m_showRaces = true; }, hasProject },
+        { "Window: Creature models", "", [this] { m_showCreatureModels = true; }, hasProject },
         { "Window: Keyboard shortcuts", "Ctrl+/", [this] { m_showShortcuts = true; }, always },
         { "View: toggle far terrain", "", [this] { m_drawOptions.farTerrain = !m_drawOptions.farTerrain; }, always },
         { "View: toggle terrain level of detail", "", [this] { m_drawOptions.lod = !m_drawOptions.lod; }, always },
@@ -609,7 +613,9 @@ void App::CloseProject()
     m_models.Clear();
     m_objSel.clear();
     m_races = RacesView{};   // its sources' chains are about to close
+    m_creatureModels = CreatureModelsView{};   // the same
     m_raceRows.Clear();
+    m_creatureModelRows.Clear();
     m_catalog.Clear();
     m_catalogKey.clear();
     m_catalogItems.clear();
@@ -832,6 +838,24 @@ void App::Export(bool playTest)
             }
         }
         else if (!m_raceRows.Packages().empty()) Log("Races: %s", raceError.c_str());
+    }
+    // Creature models imported from other clients: their files (their rows went out with CreatureModelData and
+    // CreatureDisplayInfo above).
+    if (!m_creatureModelRows.Packages().empty())
+    {
+        std::vector<std::string> notes;
+        auto sourceNamed = [this](const std::string& client) -> const MpqChain* {
+            for (const Ghosts::Source& s : m_ghosts.Sources())
+                if (s.name == client) return s.mpq;
+            return nullptr;
+        };
+        if (!ExportCreatureModels(m_creatureModelRows.Packages(), sourceNamed, m_mpq, out, notes, error)) Log("Creature models: %s", error.c_str());
+        else Log("Creature models: %zu imported model(s) with their files.", m_creatureModelRows.Packages().size());
+        for (const std::string& n : notes)
+        {
+            Log("Creature models: %s", n.c_str());
+            m_problems.push_back({ Problem::Severity::Warning, "Creature models", n });
+        }
     }
     // Generated pictures (world maps) go in as they are.
     size_t generated = 0;
@@ -1640,6 +1664,22 @@ void App::UpdateFallbacks()
     if (m_project) m_loader.Start(&m_mpq);
     m_renderer.ForgetMissingTextures();
     m_models.ForgetFailed();
+}
+
+void App::UpdateProjectFiles()
+{
+    const uint64_t key[2] = { m_project ? m_creatureModelRows.Version() + 1 : 0, m_project ? m_assetsVersion + m_ghosts.Sources().size() : 0 };
+    if (key[0] == m_projectFilesKey[0] && key[1] == m_projectFilesKey[1]) return;
+    m_projectFilesKey[0] = key[0];
+    m_projectFilesKey[1] = key[1];
+    if (!m_project) { m_mpq.SetProjectFiles(nullptr); return; }
+    m_mpq.SetProjectFiles(ProjectFilesLayer(m_project->AssetsDir(), m_creatureModelRows.Packages(), [this](const std::string& client) -> const MpqChain* {
+        for (const Ghosts::Source& s : m_ghosts.Sources())
+            if (s.name == client && s.mpq != &m_mpq) return s.mpq;
+        return nullptr;
+    }, m_mpq));
+    m_models.ForgetFailed();   // a model or texture that was missing may be there now
+    m_renderer.ForgetMissingTextures();
 }
 
 void App::PickTexture(const std::string& path)
@@ -2740,6 +2780,7 @@ void App::Frame(float dt)
 {
     m_fps = m_fps * 0.95f + (dt > 0 ? 1.0f / dt : 0) * 0.05f;
     Autosave();
+    UpdateProjectFiles();
     if (m_closeRequested)
     {
         m_closeRequested = false;
@@ -2886,6 +2927,7 @@ void App::Frame(float dt)
     DrawVersions();
     DrawSources();
     DrawRaces();
+    DrawCreatureModels();
     UpdateNpc();
     DrawNpcViewer();
     DrawShortcuts();
@@ -3063,6 +3105,7 @@ void App::DrawMenuBar()
         ImGui::MenuItem("Sources", nullptr, &m_showSources);
         ImGui::MenuItem("NPC viewer", nullptr, &m_showNpc);
         ImGui::MenuItem("Races", nullptr, &m_showRaces);
+        ImGui::MenuItem("Creature models", nullptr, &m_showCreatureModels);
         if (ImGui::MenuItem("Reset panel layout")) m_buildLayout = true;
         ImGui::EndMenu();
     }

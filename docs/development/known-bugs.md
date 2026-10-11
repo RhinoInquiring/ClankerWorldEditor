@@ -20,3 +20,29 @@ objects and comes out exact.
 
 **Likely cause:** objects straddling the tile border are counted on one side of the comparison but not the other
 (the added copies are clipped to loaded tiles; see the note in `src/ChecksVersions.cpp`).
+
+## Turtle's Raven shows wrong in Creature models
+
+**Where:** View > Creature models, source Turtle Client (the up-ported Turtle 1.18.1 client), `Creature\Raven\Raven.mdx`.
+
+**What happens:** the model loads but does not look right in the preview. Not looked into yet: the file comes from
+Turtle's converted archives (wow-upport), so the cause may be the conversion or the editor's renderer.
+
+**Shown by:** `--creature-model-check "<MPQs-upported>\Turtle Client" "<3.3.5 client>" raven <out.png>` draws it next to
+its batch list.
+
+**Workaround:** none yet.
+
+## An imported creature model does not show with `.morph`
+
+**Where:** Creature models window, a model imported from another client (seen with Turtle's `Creature\Turtle\TurtleChristmas`,
+model 9002, display 90000), exported, then `.morph 90000` in game.
+
+**What happens:** nothing changes. Not looked into yet. Suspects, in order: the client did not load the exported patch or
+its CreatureDisplayInfo.dbc (patch not installed, or the client not restarted); the worldserver lacks the row (`out/server/dbc`
+not copied, or not restarted); the model itself (moved to `Creature\TurtleClient\...`, its texture names rewritten).
+
+**Shown by:** `--creature-import-check` passes for the same kind of model (files, rows, the exported model loading), so the
+file side looks right outside the client.
+
+**Workaround:** none yet.

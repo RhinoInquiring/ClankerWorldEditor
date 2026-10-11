@@ -191,7 +191,7 @@ namespace checks
 
         DisplayLooks looks(mpq);
         std::set<std::string> uploaded;
-        looks.SetRowOverride([&](int table, uint32_t id) { return (table == 0 ? displays : extras).Edited(id); });
+        looks.SetRowOverride([&](int table, uint32_t id) -> const nlohmann::json* { return table == 2 ? nullptr : (table == 0 ? displays : extras).Edited(id); });
         looks.SetUpload([&](const std::string& name, const BlpImage&) { uploaded.insert(name); });
         Spawn s;
         s.displayId = displayId;
@@ -1602,6 +1602,471 @@ namespace checks
     /// client and the export hold, the other races are as they were, CharSections is sorted, the server gets the same tables.
     /// `--race-model-check <project dir>`: reads a project's changes (nothing written) and, for each of its races, the
     /// model rows its import added and whether they still need filling for 3.3.5 (what the race editor's button offers).
+    int CreatureModelCheck()
+    {
+        // `--creature-model-check <data> [client data]`: the Creature models window's list of a client. Models are
+        // grouped with their skins (no character models, no humanoid displays); every 25th one is loaded with its
+        // first skin. A file the source lacks comes from the client, as in the window (a source of patches only).
+        // Broken: the model file is missing everywhere, or a skin texture is. A model with no mesh (particles, an
+        // invisible marker) is fine. Fails when there are no models, or more than 2% of the sampled ones break.
+        auto arg = [](int i) {
+            char buf[1024] = {};
+            WideCharToMultiByte(CP_ACP, 0, __wargv[i], -1, buf, sizeof buf, nullptr, nullptr);
+            return std::string(buf);
+        };
+        MpqChain mpq, client;
+        mpq.Open(arg(2));
+        if (__argc > 3) client.Open(arg(3));
+        DisplayLooks looks(mpq);
+        const auto models = looks.CreatureModels();
+        size_t displays = 0, characters = 0;
+        for (const auto& m : models)
+        {
+            displays += m.displays.size();
+            if (_strnicmp(m.path.c_str(), "Character\\", 10) == 0) ++characters;
+        }
+        printf("%zu creature models, %zu skins (displays)\n", models.size(), displays);
+        if (models.empty()) { printf("FAIL: no creature models\n"); return 1; }
+        if (__argc > 4)
+        {
+            // `... <path word>`: every model whose path holds the word, in detail (where each file comes from, the mesh).
+            std::string word = arg(4);
+            for (char& c : word) c = char(std::tolower((unsigned char)c));
+            auto where = [&](const std::string& p) { return mpq.HasOwn(p) ? "source" : client.HasOwn(p) ? "client" : "MISSING"; };
+            std::vector<DisplayLooks::CreatureModel> shots;
+            for (const auto& m : models)
+            {
+                std::string lower = m.path;
+                for (char& c : lower) c = char(std::tolower((unsigned char)c));
+                if (lower.find(word) == std::string::npos) continue;
+                const std::string file = M2Name(m.path);
+                printf("%s (model %u): m2 %s, skin %s\n", m.path.c_str(), m.id, where(file), where(M2SkinName(file)));
+                const auto mesh = LoadM2(file, [&](const std::string& p) { auto b = mpq.Read(p); return b ? b : client.Read(p); });
+                if (!mesh) printf("  does not load\n");
+                else
+                {
+                    printf("  %zu vertices, %zu triangles, %zu batches, %zu animations\n", mesh->vertices.size(), mesh->indices.size() / 3, mesh->batches.size(),
+                           mesh->skeleton ? mesh->skeleton->sequences.size() : 0);
+                    // As the window poses it: Stand (animation 0), batches with any opacity over its first second.
+                    if (mesh->skeleton && !mesh->skeleton->sequences.empty())
+                    {
+                        int stand = 0;
+                        for (size_t s = 0; s < mesh->skeleton->sequences.size(); ++s)
+                            if (mesh->skeleton->sequences[s].id == 0) { stand = int(s); break; }
+                        const auto pose = LoadSkeleton(file, [&](const std::string& p) { auto b = mpq.Read(p); return b ? b : client.Read(p); }, stand);
+                        size_t visible = 0;
+                        for (const auto& b : mesh->batches)
+                        {
+                            float most = 0;
+                            for (uint32_t t = 0; t < 1000; t += 50) most = std::max(most, pose ? BatchAlpha(*pose, b.weight, b.color, t) : 1.0f);
+                            if (most > 0.01f) ++visible;
+                        }
+                        printf("  posed in Stand: %zu of %zu batches visible\n", visible, mesh->batches.size());
+                    }
+                    for (const auto& b : mesh->batches)
+                        printf("    geoset %u type %u blend %d (m2 %u)%s%s uv %d weight %d color %d alpha %.2f %s %s\n", b.geoset, b.textureType, int(b.blend),
+                               b.m2Blend, b.envMap ? " env-map" : "", b.twoSided ? " two-sided" : "", b.uvAnim, b.weight, b.color, mesh->skeleton ? BatchAlpha(*mesh->skeleton, b.weight, b.color, 0) : 1.0f,
+                               b.texture.c_str(), b.texture.empty() ? "" : where(b.texture));
+                }
+                for (uint32_t d : m.displays)
+                    if (const auto look = looks.DisplayLook(d))
+                        for (const auto& [type, path] : look->look.textures) printf("  display %u skin %u: %s %s\n", d, type - 10, path.c_str(), where(path));
+                if (__argc > 5) shots.push_back(m);
+            }
+            if (shots.empty()) return 0;
+            // `... <out.png>`: each one drawn with its first skin as the model renderer draws it, side by side.
+            ComPtr<ID3D11Device> device;
+            ComPtr<ID3D11DeviceContext> context;
+            if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &device, nullptr, &context))) return 1;
+            Renderer renderer;
+            ModelRenderer models3d;
+            std::string error;
+            if (!renderer.Init(device.Get(), context.Get(), error) || !models3d.Init(device.Get(), context.Get(), renderer, error)) { printf("%s\n", error.c_str()); return 1; }
+            MpqChain both;   // the window's preview chain: the source, then the client
+            both.SetFallbacks({ &mpq, &client });
+            constexpr UINT kThumb = 128;
+            const UINT count = UINT(std::min<size_t>(shots.size(), 16));
+            std::vector<uint8_t> strip(size_t(kThumb) * count * kThumb * 4, 0);
+            for (UINT slot = 0; slot < count; ++slot)
+            {
+                const auto& m = shots[slot];
+                auto look = m.displays.empty() ? std::nullopt : looks.DisplayLook(m.displays.front());
+                ModelLook ml = look ? look->look : ModelLook{ m.path, {}, {} };
+                XMFLOAT4X4 world;
+                XMStoreFloat4x4(&world, XMMatrixIdentity());
+                ID3D11ShaderResourceView* srv = models3d.LookThumbnail(m.path + "#" + std::to_string(slot), { { ml, world } }, both, true);
+                printf("picture %u: %s%s\n", slot, m.path.c_str(), srv ? "" : " (not drawn)");
+                if (!srv) continue;
+                ComPtr<ID3D11Resource> res;
+                srv->GetResource(&res);
+                ComPtr<ID3D11Texture2D> tex;
+                res.As(&tex);
+                D3D11_TEXTURE2D_DESC d{};
+                tex->GetDesc(&d);
+                d.Usage = D3D11_USAGE_STAGING;
+                d.BindFlags = 0;
+                d.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+                d.MiscFlags = 0;
+                ComPtr<ID3D11Texture2D> staging;
+                device->CreateTexture2D(&d, nullptr, &staging);
+                context->CopyResource(staging.Get(), tex.Get());
+                D3D11_MAPPED_SUBRESOURCE mapped{};
+                if (SUCCEEDED(context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped)))
+                {
+                    for (UINT y = 0; y < kThumb && y < d.Height; ++y)
+                        for (UINT x = 0; x < kThumb && x < d.Width; ++x)
+                        {
+                            const uint8_t* p = static_cast<const uint8_t*>(mapped.pData) + y * mapped.RowPitch + x * 4;
+                            uint8_t* q = strip.data() + (size_t(y) * kThumb * count + slot * kThumb + x) * 4;
+                            q[0] = p[2]; q[1] = p[1]; q[2] = p[0]; q[3] = 255;
+                        }
+                    context->Unmap(staging.Get(), 0);
+                }
+            }
+            CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+            return SavePng(__wargv[5], kThumb * count, kThumb, strip) ? 0 : 1;
+        }
+        size_t sampled = 0, broken = 0, fromClient = 0, noMesh = 0;
+        for (size_t i = 0; i < models.size(); i += 25)
+        {
+            const auto& m = models[i];
+            ++sampled;
+            // Each file from the source, else the client (the window's preview chain).
+            auto has = [&](const std::string& p) { return mpq.HasOwn(p) || client.HasOwn(p); };
+            const std::string file = M2Name(m.path);
+            if (!mpq.HasOwn(file) && client.HasOwn(file)) ++fromClient;
+            const bool hasFile = has(file);
+            const auto look = m.displays.empty() ? std::nullopt : looks.DisplayLook(m.displays.front());
+            const auto mesh = hasFile ? LoadM2(file, [&](const std::string& p) { auto b = mpq.Read(p); return b ? b : client.Read(p); }) : std::nullopt;
+            if (hasFile && !mesh) ++noMesh;
+            size_t missing = 0;
+            if (look)
+                for (const auto& [type, path] : look->look.textures)
+                    if (!has(path)) ++missing;
+            if (!hasFile || missing || (look && look->look.model != m.path))
+            {
+                ++broken;
+                printf("  broken: %s%s%s\n", m.path.c_str(), hasFile ? "" : " (file missing)", missing ? " (skin texture missing)" : "");
+            }
+        }
+        printf("sampled %zu: %zu broken, %zu from the client, %zu with no mesh; %zu character models listed\n", sampled, broken, fromClient, noMesh,
+               characters);
+        const bool ok = characters == 0 && broken * 50 <= sampled;
+        printf("%s\n", ok ? "OK" : "FAIL");
+        return ok ? 0 : 1;
+    }
+
+    int CreatureFileCheck()
+    {
+        // `--creature-file-check <Data> [model.m2 [names Data]]`: a model from loose files as Add a model file takes it. Without a file,
+        // the client's murloc is written out as loose files first (model, skins, textures) and added under another folder.
+        namespace fs = std::filesystem;
+        int problems = 0;
+        auto expect = [&](bool ok, const std::string& what) { printf("%s %s\n", ok ? "ok  " : "FAIL", what.c_str()); problems += !ok; };
+        MpqChain client;
+        client.Open(fs::path(__wargv[2]).string());
+        const fs::path work = fs::temp_directory_path() / "wwe-creature-file-check";
+        std::error_code ec;
+        fs::remove_all(work, ec);
+        fs::create_directories(work / "loose", ec);
+        fs::path file;
+        if (__argc > 3) file = fs::path(__wargv[3]);
+        else
+        {
+            DisplayLooks looks(client);
+            for (const auto& m : looks.CreatureModels())
+                if (_stricmp(m.path.c_str(), "Creature\\Murloc\\Murloc.mdx") == 0)
+                {
+                    const std::string m2 = M2Name(m.path), folder = m2.substr(0, m2.find_last_of('\\') + 1);
+                    auto out = [&](const std::string& game) {
+                        if (const auto bytes = client.Read(game))
+                            std::ofstream(work / "loose" / game.substr(folder.size()), std::ios::binary).write(reinterpret_cast<const char*>(bytes->data()), std::streamsize(bytes->size()));
+                    };
+                    out(m2);
+                    for (int i = 0; i < 4; ++i) out(M2SkinName(m2).replace(M2SkinName(m2).size() - 7, 2, "0" + std::to_string(i)));
+                    if (const auto look = m.displays.empty() ? std::nullopt : looks.DisplayLook(m.displays.front()))
+                        for (const auto& [type, path] : look->look.textures) out(path);
+                    file = work / "loose" / m2.substr(folder.size());
+                }
+        }
+        if (file.empty() || !fs::is_regular_file(file, ec)) { printf("no model file to add\n"); return 1; }
+        printf("adding %s\n", file.string().c_str());
+        // `... <model.m2> <names Data>`: a newer client behind the client (as an attached source), naming texture file ids.
+        MpqChain names;
+        if (__argc > 4)
+        {
+            names.Open(fs::path(__wargv[4]).string());
+            client.SetFallbacks({ &names });
+        }
+
+        ChangeStore store;
+        CreatureModelAdapter adapter;
+        DbcTable displays(client, store, "CreatureDisplayInfo", CreatureDisplayInfoFields(), 16), models(client, store, "CreatureModelData", CreatureModelDataFields(), 28);
+        const Project project;
+        const fs::path assets = work / "assets";
+        std::vector<std::string> notes;
+        std::string error;
+        const std::string folder = "Creature\\WWECheck" + file.stem().string() + "\\";
+        auto parts = AddLooseCreatureModel(file, folder, client, assets, adapter, displays, models, project, notes, error);
+        for (const std::string& n : notes) printf("  note: %s\n", n.c_str());
+        if (parts.empty()) { printf("add: %s\n", error.c_str()); fs::remove_all(work, ec); return 1; }
+        for (const Change& c : parts)
+            if (c.domain == adapter.Domain()) adapter.Apply(c);
+            else if (c.domain == displays.Domain()) displays.Apply(c);
+            else models.Apply(c);
+        const uint32_t modelId = parts.front().data.at("model");
+        const nlohmann::json& row = models.Row(modelId);
+        const std::string name = row.value("ModelName", std::string());
+        expect(_stricmp(name.c_str(), (folder + file.stem().string() + ".mdx").c_str()) == 0, "model row " + std::to_string(modelId) + " names " + name);
+        expect(row.value("CollisionHeight", 0.0) > 0 && row.value("AttachedEffectScale", 0.0) == 1.0, "collision size from the model, effect scales 1");
+        auto fromAssets = [&](const std::string& game) -> std::optional<std::vector<uint8_t>> {
+            std::string rel = game;
+            std::replace(rel.begin(), rel.end(), '\\', '/');
+            if (auto bytes = ReadFileBytes(assets / rel)) return bytes;
+            return client.Read(game);
+        };
+        std::string rel = folder;
+        std::replace(rel.begin(), rel.end(), '\\', '/');
+        size_t files = 0;
+        for (const auto& e : fs::directory_iterator(assets / rel, ec)) files += e.is_regular_file();
+        expect(files >= 2, std::to_string(files) + " file(s) in assets\\" + folder);
+        expect(LoadM2(M2Name(name), fromAssets).has_value(), "the model loads from the assets over the client");
+        const uint32_t displayId = parts.front().data.at("after").at("added").at("CreatureDisplayInfo").at(0);
+        const nlohmann::json& d = displays.Row(displayId);
+        const std::string skin = d.value("TextureVariation[0]", std::string());
+        expect(d.value("ModelID", 0u) == modelId, "display " + std::to_string(displayId) + " draws it");
+        if (!skin.empty()) expect(fromAssets(folder + skin + ".blp").has_value(), "its skin " + skin + " is beside it");
+
+        // A 1.12 model is refused with a pointer to the converter.
+        std::vector<uint8_t> classic(0x150, 0);
+        std::memcpy(classic.data(), "MD20", 4);
+        classic[4] = 0x00; classic[5] = 0x01;   // version 256
+        std::ofstream(work / "old.m2", std::ios::binary).write(reinterpret_cast<const char*>(classic.data()), std::streamsize(classic.size()));
+        error.clear();
+        const bool refused = AddLooseCreatureModel(work / "old.m2", "Creature\\Old\\", client, assets, adapter, displays, models, project, notes, error).empty();
+        expect(refused && error.find("wow-upport") != std::string::npos, "a 1.12 model is refused (" + error + ")");
+        fs::remove_all(work, ec);
+        printf("%s\n", problems ? "FAIL" : "OK");
+        return problems ? 1 : 0;
+    }
+
+    int CreatureSkinCheck()
+    {
+        // `--creature-skin-check <Data>`: a new skin on a client model as the Creature models window makes one: a picture
+        // saved as a BLP beside the model in a (temporary) assets folder, a display of the project's own naming it; the
+        // look must find the texture there through the assets-then-client chain, and the model must draw with it.
+        namespace fs = std::filesystem;
+        int problems = 0;
+        auto expect = [&](bool ok, const std::string& what) { printf("%s %s\n", ok ? "ok  " : "FAIL", what.c_str()); problems += !ok; };
+        MpqChain client;
+        client.Open(fs::path(__wargv[2]).string());
+        DisplayLooks looks(client);
+        std::optional<DisplayLooks::CreatureModel> pick;
+        for (const auto& m : looks.CreatureModels())
+            if (_stricmp(m.path.c_str(), "Creature\\Murloc\\Murloc.mdx") == 0 || (!pick && !m.displays.empty() && m.path.find("Murloc") != std::string::npos)) pick = m;
+        if (!pick || pick->displays.empty()) { printf("no murloc model with skins in this client\n"); return 1; }
+        const std::string folder = pick->path.substr(0, pick->path.find_last_of('\\') + 1);
+        const uint32_t display = 90999;
+        const std::string stem = "MurlocSkin" + std::to_string(display);
+
+        // The picture: a 64 x 64 checkerboard, palettized as the window writes it.
+        const fs::path assets = fs::temp_directory_path() / "wwe-creature-skin-check";
+        std::error_code ec;
+        fs::remove_all(assets, ec);
+        std::string rel = folder + stem + ".blp";
+        std::replace(rel.begin(), rel.end(), '\\', '/');
+        fs::create_directories((assets / rel).parent_path(), ec);
+        std::vector<uint8_t> rgba(64 * 64 * 4);
+        for (uint32_t y = 0; y < 64; ++y)
+            for (uint32_t x = 0; x < 64; ++x)
+            {
+                uint8_t* p = &rgba[(y * 64 + x) * 4];
+                const bool on = ((x / 8) + (y / 8)) & 1;
+                p[0] = on ? 230 : 20; p[1] = on ? 40 : 200; p[2] = 30; p[3] = 255;
+            }
+        const std::vector<uint8_t> blp = WriteIndexedBlp(64, 64, rgba.data());
+        std::ofstream(assets / rel, std::ios::binary).write(reinterpret_cast<const char*>(blp.data()), std::streamsize(blp.size()));
+
+        MpqChain assetChain, both;
+        MpqLayer layer;
+        layer.kind = MpqLayer::Kind::Folder;
+        layer.path = assets.string();
+        layer.installed = false;
+        assetChain.Open(std::vector<MpqLayer>{ layer });
+        both.SetFallbacks({ &assetChain, &client });
+        expect(both.Read(folder + stem + ".blp").has_value() && !client.HasOwn(folder + stem + ".blp"), "the picture is found through the assets, not the client");
+
+        // The project's display: a copy of the model's first skin naming the picture, read over the client's rows.
+        Dbc infos;
+        infos.Load(client.Read("DBFilesClient\\CreatureDisplayInfo.dbc").value_or(std::vector<uint8_t>{}));
+        nlohmann::json row = { { "ID", display }, { "ModelID", pick->id }, { "ExtendedDisplayInfoID", 0 }, { "CreatureModelScale", 1.5 },
+                               { "TextureVariation[0]", stem }, { "TextureVariation[1]", "" }, { "TextureVariation[2]", "" } };
+        looks.SetRowOverride([&](int table, uint32_t id) -> const nlohmann::json* { return table == 0 && id == display ? &row : nullptr; });
+        const auto look = looks.DisplayLook(display);
+        const auto it = look ? look->look.textures.find(11) : look->look.textures.end();
+        expect(look && it != look->look.textures.end() && _stricmp(it->second.c_str(), (folder + stem + ".blp").c_str()) == 0, "the new skin's texture is the picture beside the model");
+        expect(look && std::abs(look->scale - 1.5f) < 0.001f, "the new skin's scale is its own");
+
+        ComPtr<ID3D11Device> device;
+        ComPtr<ID3D11DeviceContext> context;
+        if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &device, nullptr, &context))) return 1;
+        Renderer renderer;
+        ModelRenderer models;
+        std::string error;
+        if (!renderer.Init(device.Get(), context.Get(), error) || !models.Init(device.Get(), context.Get(), renderer, error)) { printf("%s\n", error.c_str()); return 1; }
+        const auto info = look ? models.Info(look->look.model, both) : std::nullopt;
+        expect(info && (info->skinSlots & 2), "the model draws skin 1, the slot the picture fills");
+        XMFLOAT4X4 world;
+        XMStoreFloat4x4(&world, XMMatrixIdentity());
+        expect(look && models.LookThumbnail("skin-check", { { look->look, world } }, both, true) != nullptr, "the model draws with the new skin");
+        fs::remove_all(assets, ec);
+        printf("%s\n", problems ? "FAIL" : "OK");
+        return problems ? 1 : 0;
+    }
+
+    int CreatureImportCheck()
+    {
+        // `--creature-import-check <Data> <source Data> <path word>`: imports the first creature model of the source whose
+        // path holds the word, as the Creature models window does, exports it, and removes it again.
+        setvbuf(stdout, nullptr, _IONBF, 0);
+        namespace fs = std::filesystem;
+        auto arg = [](int i) { return std::filesystem::path(__wargv[i]).string(); };
+        auto lower = [](std::string s) { for (char& c : s) c = char(std::tolower((unsigned char)c)); return s; };
+        int problems = 0;
+        auto expect = [&](bool ok, const std::string& what) { printf("%s %s\n", ok ? "ok  " : "FAIL", what.c_str()); problems += !ok; };
+
+        MpqChain base, source;
+        base.Open(arg(2));
+        source.Open(arg(3));
+        RaceCatalog baseTables, sourceTables;
+        std::string error;
+        if (!baseTables.Load(base, error) || !sourceTables.Load(source, error)) { printf("%s\n", error.c_str()); return 1; }
+        DisplayLooks looks(source);
+        const std::string word = lower(arg(4));
+        std::optional<DisplayLooks::CreatureModel> pick;
+        for (const auto& m : looks.CreatureModels())
+            if (lower(m.path).find(word) != std::string::npos && (source.HasOwn(M2Name(m.path)) || base.HasOwn(M2Name(m.path)))) { pick = m; break; }
+        if (!pick) { printf("no creature model with \"%s\" in its path that either client has\n", word.c_str()); return 1; }
+        printf("importing %s (model %u, %zu skin(s))\n", pick->path.c_str(), pick->id, pick->displays.size());
+
+        ChangeStore store;
+        CreatureModelAdapter adapter;
+        DbcTable displays(base, store, "CreatureDisplayInfo", CreatureDisplayInfoFields(), 16), models(base, store, "CreatureModelData", CreatureModelDataFields(), 28);
+        store.Register(adapter);
+        store.Register(displays);
+        store.Register(models);
+        auto apply = [&](const std::vector<Change>& parts) {
+            for (const Change& c : parts)
+                if (c.domain == adapter.Domain()) adapter.Apply(c);
+                else if (c.domain == displays.Domain()) displays.Apply(c);
+                else models.Apply(c);
+        };
+        const Project project;   // the default id ranges
+        const auto t0 = std::chrono::steady_clock::now();
+        auto parts = ImportCreatureModelChanges(sourceTables, "source", pick->id, pick->displays, source, base, baseTables, adapter, displays, models, project, error);
+        if (parts.empty()) { printf("import: %s\n", error.c_str()); return 1; }
+        apply(parts);
+        store.Commit(parts, "import creature model");
+        const uint32_t mine = adapter.ImportedAs("source", pick->id);
+        const nlohmann::json* p = adapter.Package(mine);
+        expect(p != nullptr, "the package is model " + std::to_string(mine));
+        if (!p) return 1;
+        const std::string path = p->value("path", std::string());
+        printf("  %.0f ms, model path %s, %zu file(s) to copy, %u missing\n", std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(),
+               path.c_str(), p->at("files").size(), p->value("missingFiles", 0u));
+
+        // Rows: new, in the project's ranges, the displays drawing the new model.
+        const auto mr = project.Range("creaturemodeldata.id"), dr = project.Range("creaturedisplayinfo.id");
+        const nlohmann::json& row = models.Row(mine);
+        expect(mine >= mr.first && mine <= mr.last && row.is_object() && row.value("ModelName", std::string()) == path, "model row in its range, named as the package");
+        expect(row.value("AttachedEffectScale", 0.0) != 0 && row.value("WorldEffectScale", 0.0) != 0, "model row has effect scales");
+        const nlohmann::json shown = p->at("added").at("CreatureDisplayInfo");   // a copy: removing the package below frees it
+        bool rowsOk = !shown.empty();
+        for (const nlohmann::json& id : shown)
+        {
+            const nlohmann::json& d = displays.Row(id.get<uint32_t>());
+            rowsOk = rowsOk && id >= dr.first && id <= dr.last && d.is_object() && d.value("ModelID", 0u) == mine && !d.value("ExtendedDisplayInfoID", 0u);
+        }
+        expect(rowsOk, std::to_string(shown.size()) + " skin(s) as new displays of the model, in their range");
+
+        // Files: each one readable where it comes from, and never one over a client file with other bytes.
+        bool readable = true, safe = true;
+        for (const nlohmann::json& f : p->at("files"))
+        {
+            const std::string to = f.at("path"), from = f.at("from");
+            const auto bytes = f.value("fromClient", false) ? base.Read(from) : source.Read(from);
+            readable = readable && bytes.has_value();
+            if (base.HasOwn(to) && (!bytes || base.Read(to) != bytes)) { safe = false; printf("  would overwrite the client's %s\n", to.c_str()); }
+        }
+        expect(readable, "every listed file can be read");
+        expect(safe, "no client file is replaced by other bytes");
+        error.clear();
+        const bool refused = ImportCreatureModelChanges(sourceTables, "source", pick->id, pick->displays, source, base, baseTables, adapter, displays, models, project, error).empty();
+        expect(refused, "a second import is refused (" + error + ")");
+
+        // Export, then the model as the client would load it: exported files over the client's.
+        const fs::path out = fs::temp_directory_path() / "wwe-creature-import-check";
+        std::error_code ec;
+        fs::remove_all(out, ec);
+        std::vector<std::string> notes;
+        const bool exported = ExportCreatureModels(adapter.Packages(), [&](const std::string& c) { return c == "source" ? &source : nullptr; }, base, out, notes, error);
+        for (const std::string& n : notes) printf("  note: %s\n", n.c_str());
+        size_t written = 0;
+        for (const nlohmann::json& f : p->at("files"))
+        {
+            std::string rel = f.at("path");
+            std::replace(rel.begin(), rel.end(), '\\', '/');
+            written += fs::is_regular_file(out / rel, ec);
+        }
+        expect(exported && written == p->at("files").size(), std::to_string(written) + " of " + std::to_string(p->at("files").size()) + " file(s) exported");
+        auto read = [&](const std::string& name) -> std::optional<std::vector<uint8_t>> {
+            std::string rel = name;
+            std::replace(rel.begin(), rel.end(), '\\', '/');
+            if (auto bytes = ReadFileBytes(out / rel)) return bytes;
+            return base.Read(name);
+        };
+        expect(LoadM2(M2Name(path), read).has_value(), "the exported model loads over the client");
+        size_t skins = 0, found = 0;
+        const size_t slash = path.find_last_of('\\');
+        for (const nlohmann::json& id : shown)
+        {
+            const nlohmann::json& d = displays.Row(id.get<uint32_t>());
+            for (int i = 0; i < 3; ++i)
+                if (const std::string t = d.value("TextureVariation[" + std::to_string(i) + "]", std::string()); !t.empty())
+                {
+                    ++skins;
+                    found += read(path.substr(0, slash + 1) + t + ".blp").has_value();
+                }
+        }
+        expect(found == skins, std::to_string(found) + " of " + std::to_string(skins) + " skin texture(s) found beside the model");
+        fs::remove_all(out, ec);
+
+        // Before any export, the editor reads the import's files through the project layer of its own chain: the model
+        // loads under its project path, and its first display looks like it (the project's model row over the client's).
+        base.SetProjectFiles(ProjectFilesLayer(fs::temp_directory_path() / "wwe-creature-import-check-no-assets", adapter.Packages(),
+                                               [&](const std::string& c) { return c == "source" ? &source : nullptr; }, base));
+        expect(base.HasOwn(M2Name(path)) && LoadM2(M2Name(path), [&](const std::string& n) { return base.Read(n); }).has_value(),
+               "the project chain loads the model under " + path + " before export");
+        DisplayLooks projectLooks(base);
+        projectLooks.SetRowOverride([&](int table, uint32_t id) -> const nlohmann::json* { return table == 0 ? displays.Edited(id) : table == 2 ? models.Edited(id) : nullptr; });
+        const auto shownLook = shown.empty() ? std::nullopt : projectLooks.DisplayLook(shown.front().get<uint32_t>());
+        bool skinsRead = shownLook.has_value();
+        if (shownLook)
+            for (const auto& [type, tex] : shownLook->look.textures) skinsRead = skinsRead && base.Read(tex).has_value();
+        expect(shownLook && shownLook->look.model == path && skinsRead, "its first display draws that model with readable skins");
+        base.SetProjectFiles(nullptr);
+
+        // Remove: the package and every row it added go.
+        const auto removal = RemoveCreatureModelChanges(mine, adapter, displays, models);
+        apply(removal);
+        store.Commit(removal, "remove creature model");
+        bool gone = !adapter.Package(mine) && models.Row(mine).is_null();
+        for (const nlohmann::json& id : shown) gone = gone && displays.Row(id.get<uint32_t>()).is_null();
+        expect(gone, "remove takes the package and its rows away");
+        printf("%s\n", problems ? "FAIL" : "OK");
+        return problems ? 1 : 0;
+    }
+
     int RaceModelCheck()
     {
         setvbuf(stdout, nullptr, _IONBF, 0);

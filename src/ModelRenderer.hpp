@@ -80,6 +80,7 @@ public:
         std::vector<std::string> textures;  // fixed textures
         std::vector<std::string> doodadSets; // WMO: its doodad sets by index (MODS names; set 0 always shows)
         DirectX::XMFLOAT3 boundsMin{}, boundsMax{};
+        uint32_t skinSlots = 0;             // bit n (1-3): a batch draws creature skin n (TextureVariation[n - 1])
     };
     std::optional<ModelInfo> Info(const std::string& model, const MpqChain& mpq);
     /// Every loaded object (previews excluded) with its box centre in the world.

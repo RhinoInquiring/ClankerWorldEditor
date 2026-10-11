@@ -784,7 +784,11 @@ std::optional<ModelRenderer::ModelInfo> ModelRenderer::Info(const std::string& m
     if (!mesh) return std::nullopt;
     ModelInfo info{ mesh->skeleton, {}, mesh->textureNames, {}, mesh->boundsMin, mesh->boundsMax };
     for (const auto& set : mesh->doodadSets) info.doodadSets.push_back(set.name);
-    for (const auto& b : mesh->batches) info.geosets.push_back(b.geoset);
+    for (const auto& b : mesh->batches)
+    {
+        info.geosets.push_back(b.geoset);
+        if (b.textureType >= 11 && b.textureType <= 13) info.skinSlots |= 1u << (b.textureType - 10);
+    }
     std::sort(info.geosets.begin(), info.geosets.end());
     info.geosets.erase(std::unique(info.geosets.begin(), info.geosets.end()), info.geosets.end());
     return info;

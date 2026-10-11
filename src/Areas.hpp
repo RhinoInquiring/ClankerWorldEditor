@@ -53,6 +53,8 @@ public:
     /// The project's row of an id without reading the client's file: null when the project has not touched it (a null
     /// json = removed).
     const nlohmann::json* Edited(uint32_t id) const { auto it = m_project.find(id); return it == m_project.end() ? nullptr : &it->second; }
+    /// Every row the project touched (null: removed), by id.
+    const std::map<uint32_t, nlohmann::json>& Edits() const { return m_project; }
 
 protected:
     void Read() const;

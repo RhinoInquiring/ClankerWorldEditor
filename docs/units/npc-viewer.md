@@ -35,7 +35,7 @@ pending asks first.
 | Tab | Edits |
 | --- | --- |
 | Template | `creature_template`: name, subname, cursor, levels, expansion, rank, class, type, faction (its name shown), NPC flags, gossip menu, movement and speeds, aggro range, health / mana / armor / damage / experience multipliers, attack time, regeneration, loot id, money, AI and script name. **All columns** edits any other column as text |
-| Models & gear | `creature_template_model`: display, scale and chance per model (**Add the shown display** adds the one previewed, e.g. picked under View > Skins); `creature_equip_template`: sets with main hand, off hand and ranged items chosen from a searchable list with their icons |
+| Models & gear | `creature_template_model`: display, scale and chance per model (**Add the shown display** adds the one previewed, e.g. picked under View > Skins; **From library...** adds a skin of the project's own from [Creature models](creature-models.md)); `creature_equip_template`: sets with main hand, off hand and ranged items chosen from a searchable list with their icons |
 
 **Duplicate as new NPC** copies the template, its models and its equipment to the next entry of the project's
 `creature_template.entry` range (default 9000000-9099999, File > Project settings); the copy appears in the Catalog to

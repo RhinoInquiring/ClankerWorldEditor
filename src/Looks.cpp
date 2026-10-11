@@ -351,14 +351,37 @@ std::string DisplayLooks::GameObjectModel(uint32_t displayId)
     return row ? m_goDisplay.Str(*row, GODI::ModelName) : std::string();
 }
 
+std::vector<DisplayLooks::CreatureModel> DisplayLooks::CreatureModels()
+{
+    Load();
+    std::vector<CreatureModel> out;
+    std::map<uint32_t, size_t> at;   // CreatureModelData id -> index into out
+    for (uint32_t r = 0; r < m_modelData.Rows(); ++r)
+    {
+        const std::string path = m_modelData.Str(r, CMD::ModelName);
+        if (path.empty() || _strnicmp(path.c_str(), "Character\\", 10) == 0) continue;
+        at[m_modelData.U32(r, 0)] = out.size();
+        out.push_back({ m_modelData.U32(r, 0), path, {} });
+    }
+    for (uint32_t r = 0; r < m_displayInfo.Rows(); ++r)
+        if (!m_displayInfo.U32(r, CDI::ExtendedDisplayInfoID))
+            if (const auto it = at.find(m_displayInfo.U32(r, CDI::ModelID)); it != at.end()) out[it->second].displays.push_back(m_displayInfo.U32(r, 0));
+    std::sort(out.begin(), out.end(), [](const CreatureModel& a, const CreatureModel& b) { return _stricmp(a.path.c_str(), b.path.c_str()) < 0; });
+    return out;
+}
+
 std::optional<DisplayLooks::SpawnModel> DisplayLooks::CreatureLook(const Spawn& s)
 {
     const auto d = Display(s.displayId);
     if (!d) return std::nullopt;
-    const auto model = m_modelData.Find(d->model);
-    if (!model) return std::nullopt;
     SpawnModel m;
-    m.look.model = m_modelData.Str(*model, CMD::ModelName);
+    if (const nlohmann::json* j = m_override ? m_override(2, d->model) : nullptr)   // a model row of the project's own
+    {
+        if (!j->is_object()) return std::nullopt;
+        m.look.model = j->value("ModelName", std::string());
+    }
+    else if (const auto model = m_modelData.Find(d->model)) m.look.model = m_modelData.Str(*model, CMD::ModelName);
+    else return std::nullopt;
     if (m.look.model.empty()) return std::nullopt;
     const float scale = d->scale > 0.01f && d->scale < 100.0f ? d->scale : 1;
     m.scale = scale * (s.size > 0.01f && s.size < 100.0f ? s.size : 1);

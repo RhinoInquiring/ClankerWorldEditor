@@ -24,6 +24,7 @@
 #include "ServerData.hpp"
 #include "Pois.hpp"
 #include "Races.hpp"
+#include "CreatureModels.hpp"
 #include "Triggers.hpp"
 
 #include <d3d11.h>
@@ -44,6 +45,8 @@
 std::optional<std::string> PickFolder(HWND owner, const wchar_t* title);
 /// A picture file (PNG, JPEG, BMP or BLP) from an open dialog.
 std::optional<std::string> PickPicture(HWND owner, const wchar_t* title);
+/// A file of one kind (`patterns` like L"*.m2") from an open dialog; nullopt when cancelled.
+std::optional<std::string> PickFile(HWND owner, const wchar_t* title, const wchar_t* kind, const wchar_t* patterns);
 /// A picture file as RGBA pixels (WIC; BLP through ParseBlp). False when it cannot be read.
 bool ReadPicture(const std::string& path, uint32_t& width, uint32_t& height, std::vector<uint8_t>& rgba);
 
@@ -672,6 +675,11 @@ private:
     void PickTexture(const std::string& path);
     /// The project's reader falls back to the attached sources (assets pasted from other clients).
     void UpdateFallbacks();
+    /// The project's files that sit in no archive (assets, imported models' files from their sources) as a layer of m_mpq,
+    /// read first: rebuilt when the imports or the assets change (m_assetsVersion).
+    void UpdateProjectFiles();
+    uint64_t m_projectFilesKey[2] = { ~0ull, ~0ull };
+    uint64_t m_assetsVersion = 0;   // bumped by whatever writes into the assets folder
     std::string m_catalogKey;             // inputs m_catalogItems was filtered with
 
     // Ghost layers: other versions of the map (other clients, single patch archives).
@@ -811,6 +819,7 @@ private:
         // Editing: the rows as edited, applied together as one undo step. The preview follows the edits.
         nlohmann::json editTemplate;                     // creature_template row (null: the entry has none)
         std::vector<nlohmann::json> editModels, editEquips;   // creature_template_model / creature_equip_template rows
+        std::string libraryFilter;                       // the From library list's filter
         uint64_t editRevision = ~0ull;                   // change store revision the rows were read at
         bool dirty = false;                              // edited and not applied
         std::string columnFilter;
@@ -893,6 +902,61 @@ private:
     void DrawRaceServerTab(const RaceCatalog::Race& race, const nlohmann::json& package);
     /// Builds the preview's look of the selected race and choices (and its renderers, for another source).
     void RefreshRacePreview(bool frame);
+
+    // Creature models window (AppCreatureModels.cpp): the creature models of every source, their skins and
+    // animations, with a preview. The library a project's creatures take their models from.
+    struct CreatureModelsView
+    {
+        struct Source
+        {
+            std::string name;
+            const MpqChain* mpq = nullptr;
+            bool read = false, filesOnly = false;          // filesOnly: no tables this can read, models found by file name
+            std::vector<DisplayLooks::CreatureModel> models;
+            std::unique_ptr<DisplayLooks> looks;
+            std::unique_ptr<RaceCatalog> tables;           // its rows by 3.3.5 names (1.12 or 3.3.5), read when first imported from
+            std::string tablesError;
+        };
+        std::vector<Source> sources;                       // as m_ghosts.Sources(), each read when first shown
+        std::vector<DisplayLooks::CreatureModel> listed;   // the list shown: the source's models (the project's client: its own first)
+        uint64_t listedKey[3] = { ~0ull, ~0ull, ~0ull };   // source, model and display table versions it was built at
+        bool addOpen = false;                              // the Add a model file popup
+        std::string addFile, addFolder;
+        uint32_t pendingSelect = 0;                        // a project model to select once the list has it
+        size_t source = 0;
+        int model = -1;                                    // index into the source's models
+        uint32_t display = 0;                              // the skin shown (0: the bare model)
+        std::string filter;
+        bool onlyNew = false;
+        std::set<std::string> basePaths;                   // the project client's model paths (lower case): "new" is not in it
+        // The preview has renderers of its own, rebuilt for another source (same names, other files).
+        size_t previewSource = ~size_t(0);
+        const MpqChain* previewMpq = nullptr;             // where the preview reads: the source, or `chain`
+        std::unique_ptr<MpqChain> chain;                   // no archives: the source, then the project's client
+        std::unique_ptr<Renderer> renderer;
+        std::unique_ptr<ModelRenderer> models;
+        std::optional<DisplayLooks::SpawnModel> look;
+        std::optional<ModelRenderer::ModelInfo> info;
+        std::shared_ptr<const ModelSkeleton> pose;
+        int sequence = -1;
+        float timeMs = 0, speed = 1;
+        bool paused = false, stale = true;
+        bool hasFile = false, fromClient = false;          // the model file was found; in the project's client, not the source
+        // Skins of the project's own (CreatureDisplayInfo rows it added on a client model): the one being edited is
+        // shown as edited; pictures made into skins sit in the project's assets folder until export copies them.
+        std::unique_ptr<MpqChain> assets;                  // the assets folder as game files (read before the client)
+        bool assetsStale = true;
+        uint32_t edit = 0;                                 // the project skin whose scale is being dragged (0: none)
+        nlohmann::json editRow;
+        std::vector<std::string> folderTextures;           // skin names (BLPs beside the model, without .blp)
+        std::string folderFor;                             // the model path folderTextures was read for
+        ScenePreview scene;
+    } m_creatureModels;
+    bool m_showCreatureModels = false;
+    void DrawCreatureModels();
+    /// Builds the preview of the selected model and skin (and the renderers, for another source).
+    void RefreshCreatureModelPreview();
+    void SetCreatureModelSequence(int sequence);
     void DrawNpcViewer();
     /// Makes a creature template the one the NPC tabs edit (reads its rows); `show` also opens the viewer window.
     void OpenNpc(uint32_t entry, bool show = true);
@@ -1129,6 +1193,7 @@ private:
     DbcTable m_modelRows{ m_mpq, m_store, "CreatureModelData", CreatureModelDataFields(), 28 };
     // Races (AppRaces.cpp): the races the project imports or changes, one package each.
     RaceAdapter m_raceRows;
+    CreatureModelAdapter m_creatureModelRows;   // models imported from other clients (Creature models window)
     // ... and the world database rows its new characters are made from (AppRaces.cpp Server tab).
     TableRowsAdapter m_raceStarts{ m_store, "playercreateinfo", "race", "class" }, m_raceActions{ m_store, "playercreateinfo_action", "race", "class" },
                      m_raceItems{ m_store, "playercreateinfo_item", "race", "class" }, m_raceStats{ m_store, "player_race_stats", "Race" },

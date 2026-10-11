@@ -94,6 +94,10 @@ namespace checks
     int RaceCheck();
     int RaceLookCheck();
     int RaceImportCheck();
+    int CreatureModelCheck();
+    int CreatureFileCheck();
+    int CreatureSkinCheck();
+    int CreatureImportCheck();
     int RaceModelCheck();
     int RaceExportCheck();
     int RaceEditCheck();

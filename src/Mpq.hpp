@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
@@ -147,6 +148,15 @@ public:
     /// Loose files above every archive: <dir>/<game path, '/' separators>, looked up for World\Maps\ paths only
     /// (the project's added map tiles and the WDTs that list them). Empty = none. Set while no loader is reading.
     void SetOverlay(std::filesystem::path dir) { m_overlay = std::move(dir); }
+    /// Files the project adds that sit in no archive (its assets folder, models imported from other clients): read
+    /// before the archives, as the patch will be, and counted as its own. Keyed by lower-case game path (backslashes).
+    /// Swapped whole and safe to swap while other threads read; null = none.
+    struct ProjectFiles
+    {
+        std::function<std::optional<std::vector<uint8_t>>(const std::string& lower)> read;
+        std::function<bool(const std::string& lower)> has;
+    };
+    void SetProjectFiles(std::shared_ptr<const ProjectFiles> files) { m_projectFiles.store(std::move(files)); }
     /// Where a game path lives in the overlay (empty when there is no overlay or the path is not a map file).
     std::filesystem::path OverlayPath(const std::string& name) const;
     /// The file as one archive holds it (index into Names()), ignoring every other archive.
@@ -196,6 +206,7 @@ private:
     mutable std::unordered_map<std::string, std::optional<size_t>> m_mapHomes;   // lower-case map folder -> MapHome
     std::vector<Archive> m_archives;   // highest priority first
     std::vector<const MpqChain*> m_fallbacks;
+    std::atomic<std::shared_ptr<const ProjectFiles>> m_projectFiles;
     std::vector<std::string> m_names;
     std::vector<LayerReport> m_report;
     std::filesystem::path m_overlay;

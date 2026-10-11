@@ -1047,6 +1047,48 @@ void App::DrawNpcGearTab()
     ImGui::EndDisabled();
     ImGui::SetItemTooltip(listed ? "Display %u is listed already: pick another under View > Skins to add it"
                                  : "Adds display %u (pick another under View > Skins first to add that one)", v.displayId);
+    // The project's creature model library (View > Creature models): its skins, imported, added from files or made on
+    // client models.
+    ImGui::SameLine();
+    if (ImGui::Button("From library...")) ImGui::OpenPopup("##library");
+    ImGui::SetItemTooltip("A skin of the project's own (View > Creature models)");
+    if (ImGui::BeginPopup("##library"))
+    {
+        ImGui::SetNextItemWidth(360);
+        ImGui::InputTextWithHint("##libfilter", "Filter by model path", &v.libraryFilter);
+        std::string filter = v.libraryFilter;
+        std::transform(filter.begin(), filter.end(), filter.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+        size_t shown = 0;
+        if (ImGui::BeginListBox("##libskins", { 520, 300 }))
+        {
+            for (const auto& [id, row] : m_displayRows.Edits())
+            {
+                if (!row.is_object() || row.value("ExtendedDisplayInfoID", 0u) || !m_project || !m_project->Owns("creaturedisplayinfo.id", id)) continue;
+                const nlohmann::json& model = m_modelRows.Row(row.value("ModelID", 0u));
+                const std::string path = model.is_object() ? model.value("ModelName", std::string()) : std::string("?");
+                std::string lower = path;
+                std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+                if (!filter.empty() && lower.find(filter) == std::string::npos) continue;
+                ++shown;
+                const std::string skin = row.value("TextureVariation[0]", std::string());
+                const bool already = std::any_of(v.editModels.begin(), v.editModels.end(), [&](const nlohmann::json& m) { return U(Col(m, "CreatureDisplayID")) == id; });
+                if (ImGui::Selectable((std::to_string(id) + "  " + path + (skin.empty() ? "" : "  (" + skin + ")") + (already ? "  - listed" : "")).c_str(), false,
+                                      already ? ImGuiSelectableFlags_Disabled : 0))
+                {
+                    nlohmann::json add = { { "CreatureID", entry }, { "CreatureDisplayID", std::to_string(id) }, { "DisplayScale", "1" },
+                                           { "Probability", "1" }, { "VerifiedBuild", "0" } };
+                    v.editModels.push_back(std::move(add));
+                    changed = true;
+                    SetNpcDisplay(id, 1);
+                    ImGui::CloseCurrentPopup();
+                }
+            }
+            ImGui::EndListBox();
+        }
+        if (!shown) ImGui::TextColored(kQuiet, "No skins of the project's own%s: import or add a model, or make a new skin, under View > Creature models.",
+                                       filter.empty() ? "" : " match");
+        ImGui::EndPopup();
+    }
     float chances = 0;
     for (const auto& m : v.editModels) chances += F(Col(m, "Probability"));
     if (v.editModels.empty()) ImGui::TextColored(kWarn, "No model: the creature cannot spawn.");

@@ -47,12 +47,19 @@ public:
     /// A creature display's skin names (TextureVariation, empty ones left out) and whether it is a humanoid
     /// (CreatureDisplayInfoExtra) display.
     std::vector<std::string> SkinNames(uint32_t displayId, bool* humanoid = nullptr);
+    /// Creature models window: every CreatureModelData model (character models left out) with the non-humanoid
+    /// CreatureDisplayInfo rows drawing it (its skins), by path. Empty when the client has no tables this can read
+    /// (1.12 and 3.3.5 share these columns).
+    struct CreatureModel { uint32_t id = 0; std::string path; std::vector<uint32_t> displays; bool project = false; };   // project: a row the project added
+    std::vector<CreatureModel> CreatureModels();
+    /// A creature display's look (model, skins, display scale); null when it draws nothing.
+    std::optional<SpawnModel> DisplayLook(uint32_t displayId) { Spawn s; s.displayId = displayId; return CreatureLook(s); }
     /// NPC editor: the faction a FactionTemplate id belongs to (Faction.dbc name; empty when unknown).
     std::string FactionName(uint32_t factionTemplate);
     /// An item display's inventory icon as a texture path ("Interface\Icons\....blp"; empty when none).
     std::string ItemIcon(uint32_t itemDisplay);
 
-    /// Rows that win over the client's CreatureDisplayInfo (`table` 0) and CreatureDisplayInfoExtra (1): the project's,
+    /// Rows that win over the client's CreatureDisplayInfo (`table` 0), CreatureDisplayInfoExtra (1) and CreatureModelData (2): the project's,
     /// and the NPC editor's unapplied ones. Returns null when the id is not overridden (a null json: the row is gone).
     using RowOverride = std::function<const nlohmann::json*(int table, uint32_t id)>;
     void SetRowOverride(RowOverride fn) { m_override = std::move(fn); }

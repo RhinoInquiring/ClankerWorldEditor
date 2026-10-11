@@ -671,6 +671,9 @@ std::optional<size_t> MpqChain::MapHome(const std::string& name) const
 
 std::optional<std::vector<uint8_t>> MpqChain::Read(const std::string& name) const
 {
+    if (const auto files = m_projectFiles.load())
+        if (const std::string lower = Lower(Backslashes(name)); files->has(lower))
+            if (auto bytes = files->read(lower)) return bytes;
     if (const auto path = OverlayPath(name); !path.empty())
         if (auto bytes = ReadFileBytes(path)) return bytes;
     if (const auto home = MapHome(name))   // a map's own files: from the layer the map comes from
@@ -694,6 +697,7 @@ std::optional<std::vector<uint8_t>> MpqChain::Read(const std::string& name) cons
 
 bool MpqChain::HasOwn(const std::string& name) const
 {
+    if (const auto files = m_projectFiles.load(); files && files->has(Lower(Backslashes(name)))) return true;
     if (const auto path = OverlayPath(name); !path.empty())
     {
         std::error_code ec;

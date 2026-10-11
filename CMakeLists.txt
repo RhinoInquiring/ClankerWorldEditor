@@ -72,6 +72,8 @@ add_executable(wow-world-editor WIN32
     src/AppPaths.cpp
     src/AppPois.cpp
     src/AppRaces.cpp
+    src/AppCreatureModels.cpp
+    src/CreatureModels.cpp
     src/AppServer.cpp
     src/AppSources.cpp
     src/AppWorldMap.cpp
