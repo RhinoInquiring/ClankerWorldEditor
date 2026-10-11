@@ -39,6 +39,11 @@ MpqStats GetMpqStats();
 void SetCdnAsync(bool on);
 uint64_t CdnArrivals();
 
+/// A long step on the window's thread draws a loading screen: `text`, and a bar at `fraction` (0..1; < 0 = moving
+/// stripes when the end is unknown). Defined in main.cpp; does nothing off the window's thread or inside a frame, and
+/// the same text redraws at most every 50 ms.
+void ShowBusy(const std::string& text, float fraction = -1);
+
 /// The products a CASC install lists in its .build.info (e.g. wow, wow_classic_era, wow_classic_beta); empty when none.
 std::vector<std::string> CascProducts(const std::filesystem::path& install);
 /// A .build.info cell (`column` e.g. "Build Key") of the product's row; empty when there is none.

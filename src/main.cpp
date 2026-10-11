@@ -5,6 +5,7 @@
 #include "Checks.hpp"
 
 #include <imgui.h>
+#include <imgui_internal.h>   // ImGuiContext::WithinFrameScope
 #include <imgui_impl_dx11.h>
 #include <imgui_impl_win32.h>
 
@@ -28,6 +29,7 @@ namespace
     ComPtr<ID3D11RenderTargetView> g_rtv;
     UINT g_resizeWidth = 0, g_resizeHeight = 0;
     App* g_app = nullptr;
+    DWORD g_windowThread = 0;   // set once the window and ImGui are up: ShowBusy draws only there
 
     void CreateTarget()
     {
@@ -80,6 +82,52 @@ namespace
     }
 }
 
+void ShowBusy(const std::string& text, float fraction)
+{
+    static std::chrono::steady_clock::time_point last;
+    static std::string lastText;
+    if (GetCurrentThreadId() != g_windowThread || ImGui::GetCurrentContext()->WithinFrameScope) return;
+    const auto now = std::chrono::steady_clock::now();
+    if (text == lastText && now - last < std::chrono::milliseconds(50)) return;   // a new step always shows
+    last = now;
+    lastText = text;
+
+    // Keep the window answering (no "not responding"); input waits for the editor.
+    MSG msg;
+    while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE))
+    {
+        if (msg.message == WM_QUIT) { PostQuitMessage(int(msg.wParam)); break; }
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+    if (g_resizeWidth && g_resizeHeight)
+    {
+        g_rtv.Reset();
+        g_swapChain->ResizeBuffers(0, g_resizeWidth, g_resizeHeight, DXGI_FORMAT_UNKNOWN, 0);
+        g_resizeWidth = g_resizeHeight = 0;
+        CreateTarget();
+    }
+
+    ImGui_ImplDX11_NewFrame();
+    ImGui_ImplWin32_NewFrame();
+    ImGui::NewFrame();
+    const ImGuiViewport* vp = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(vp->GetCenter(), ImGuiCond_Always, { 0.5f, 0.5f });
+    ImGui::SetNextWindowSize({ 520, 0 });
+    ImGui::Begin("##busy", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoMove);
+    ImGui::TextUnformatted("Loading...");
+    ImGui::TextWrapped("%s", text.c_str());
+    ImGui::ProgressBar(fraction < 0 ? -float(ImGui::GetTime()) : fraction, { -1, 0 }, fraction < 0 ? "" : nullptr);
+    ImGui::End();
+    ImGui::Render();
+
+    const float clear[4] = { 0.08f, 0.09f, 0.10f, 1 };
+    g_context->OMSetRenderTargets(1, g_rtv.GetAddressOf(), nullptr);
+    g_context->ClearRenderTargetView(g_rtv.Get(), clear);
+    ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+    g_swapChain->Present(0, 0);
+}
+
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
 {
     if (const int rc = RunCheck(); rc >= 0) return rc;
@@ -107,6 +155,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
     ImGui_ImplWin32_Init(hwnd);
     ImGui_ImplDX11_Init(g_device.Get(), g_context.Get());
 
+    g_windowThread = GetCurrentThreadId();
     App app;
     if (!app.Init(hwnd, g_device.Get(), g_context.Get(), firstRun)) return 1;
     g_app = &app;
@@ -132,6 +181,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
             CreateTarget();
         }
 
+        app.BetweenFrames();   // long steps the UI asked for (open a project), with a loading screen
         const auto now = std::chrono::steady_clock::now();
         const float dt = std::min(std::chrono::duration<float>(now - last).count(), 0.1f);
         last = now;

@@ -448,6 +448,8 @@ size_t MpqChain::Open(const std::vector<MpqLayer>& layers, const std::vector<std
             ~Timer() { r.ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(); }
         } timer{ report };
         if (!layer.enabled) { report.note = "disabled"; continue; }
+        const std::string busy = "Opening " + fs::path(layer.path).filename().string() + (layer.product.empty() ? "" : ":" + layer.product);
+        ShowBusy(busy, float(layers.size() - 1 - li) / float(layers.size()));
         std::error_code ec;
         if (layer.kind == MpqLayer::Kind::Casc)
         {
@@ -456,6 +458,12 @@ size_t MpqChain::Open(const std::vector<MpqLayer>& layers, const std::vector<std
             args.szLocalPath = layer.path.c_str();
             args.szCodeName = layer.product.empty() ? nullptr : layer.product.c_str();
             args.dwLocaleMask = CASC_LOCALE_ENUS | CASC_LOCALE_ENGB;
+            args.PtrProgressParam = const_cast<std::string*>(&busy);
+            args.PfnProgressCallback = [](void* param, CASC_PROGRESS_MSG, LPCSTR object, DWORD current, DWORD total) {
+                ShowBusy(*static_cast<const std::string*>(param) + (object ? std::string(": ") + object : std::string()),
+                         total ? float(current) / float(total) : -1);
+                return false;
+            };
             HANDLE h = nullptr;
             if (!CascOpenStorageEx(nullptr, &args, false, &h))
             {
@@ -476,8 +484,10 @@ size_t MpqChain::Open(const std::vector<MpqLayer>& layers, const std::vector<std
             HANDLE find = CascFindFirstFile(h, "*", &fd, named ? listfile.string().c_str() : nullptr);
             if (find)
             {
+                size_t listedFiles = 0;
                 do
                 {
+                    if ((++listedFiles & 0xFFFF) == 0) ShowBusy(busy + ": " + std::to_string(listedFiles) + " files listed");
                     if (fd.dwFileDataId == CASC_INVALID_ID) continue;
                     const std::string name = Backslashes(fd.szFileName);
                     if (a.ids.emplace(Lower(name), fd.dwFileDataId).second)

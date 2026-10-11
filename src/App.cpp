@@ -523,8 +523,16 @@ void App::NewProject()
 void App::OpenProjectDialog()
 {
     GuardUnsaved([this] {
-        if (auto dir = PickFolder(m_hwnd, L"Open project folder")) OpenProject(*dir);
+        if (auto dir = PickFolder(m_hwnd, L"Open project folder")) Later([this, dir = *dir] { OpenProject(dir); });
     });
+}
+
+void App::BetweenFrames()
+{
+    if (!m_later) return;
+    const auto step = std::move(m_later);
+    m_later = nullptr;
+    step();
 }
 
 bool App::OpenProject(const std::string& dir)
@@ -533,6 +541,7 @@ bool App::OpenProject(const std::string& dir)
     auto project = Project::Load(dir, error);
     if (!project) { Log("Could not open project: %s", error.c_str()); return false; }
 
+    ShowBusy("Closing the open project", 0);
     CloseProject();
     const size_t archives = m_mpq.Open(project->base.layers, { project->PatchInstallPath() });   // not its own installed patch: what the client had
     m_mpq.SetMapsFromLowestLayer(true);   // each map as its own source has it (the client's), mods' copies are other versions
@@ -550,6 +559,7 @@ bool App::OpenProject(const std::string& dir)
     m_blueprintThumbs.clear();
     for (const auto& e : blueprintErrors) Log("Blueprint not loaded: %s", e.c_str());
     std::vector<std::string> sourceErrors;
+    ShowBusy("Opening compare sources");
     {
         std::vector<std::pair<std::string, std::vector<MpqLayer>>> compare;
         for (const Project::Source& s : project->compare) compare.push_back({ s.name, s.layers });
@@ -559,6 +569,7 @@ bool App::OpenProject(const std::string& dir)
     for (const auto& e : sourceErrors) Log("Source not attached: %s", e.c_str());
     UpdateFallbacks();
     const auto catalogStart = std::chrono::steady_clock::now();
+    ShowBusy("Building the asset catalog");
     m_catalog.Build(m_mpq);
     Log("Catalog: %zu doodads, %zu WMOs, %zu ground textures, %zu other textures (%.0f ms).", m_catalog.Count(Catalog::Kind::Doodad),
         m_catalog.Count(Catalog::Kind::Wmo), m_catalog.Count(Catalog::Kind::GroundTexture), m_catalog.Count(Catalog::Kind::Texture),
@@ -568,9 +579,11 @@ bool App::OpenProject(const std::string& dir)
     m_project = std::move(*project);
     m_loader.Start(&m_mpq);
     m_store.author = m_project->author;
+    ShowBusy("Loading the project's changes");
     if (!m_store.Load(m_project->ChangesDir(), error)) Log("Changes not fully loaded: %s", error.c_str());
     m_terrain.RebuildOverlay();
     RememberProject(m_project->dir.string());
+    ShowBusy("Connecting to the server");
     Log("Opened project '%s': %zu archives, %zu maps, %zu changes.", m_project->name.c_str(), archives, m_maps.size(), m_store.Done().size());
     ConnectServer();
     if (m_project->serverProfile.empty()) OpenSetup();
@@ -4855,7 +4868,7 @@ void App::DrawStartScreen(const ImVec2& origin, const ImVec2& size)
         }
         ImGui::Spacing();
         ImGui::TextColored(kQuiet, "Ctrl+P: every command   Ctrl+/: keyboard shortcuts");
-        if (open) OpenProject(*open);
+        if (open) Later([this, dir = *open] { OpenProject(dir); });
     }
     ImGui::EndChild();
 }
@@ -4989,7 +5002,11 @@ void App::DrawNewProjectModal()
         p.clientDir = m_newClient;
         p.author = m_newAuthor;
         std::string error;
-        if (p.Save(error) && OpenProject(p.dir.string())) ImGui::CloseCurrentPopup();
+        if (p.Save(error))
+        {
+            Later([this, dir = p.dir.string()] { OpenProject(dir); });
+            ImGui::CloseCurrentPopup();
+        }
         else Log("Could not create project: %s", error.c_str());
     }
     ImGui::EndDisabled();

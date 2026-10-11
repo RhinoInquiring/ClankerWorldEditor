@@ -55,6 +55,8 @@ public:
 
     /// Builds the UI for one frame (between ImGui::NewFrame and ImGui::Render) and renders the viewport.
     void Frame(float dt);
+    /// Outside any frame: runs the long step the UI asked for (Later), which may draw loading screens (ShowBusy).
+    void BetweenFrames();
 
     /// The window's close button asks; the editor decides after checking for unsaved changes.
     void RequestClose() { m_closeRequested = true; }
@@ -306,6 +308,9 @@ private:
     void RefreshPathView();
 
     // actions
+    /// Runs `step` after this frame, where it can show a loading screen (opening a project or its sources).
+    void Later(std::function<void()> step) { m_later = std::move(step); }
+    std::function<void()> m_later;
     void NewProject();
     void OpenProjectDialog();
     bool OpenProject(const std::string& dir);

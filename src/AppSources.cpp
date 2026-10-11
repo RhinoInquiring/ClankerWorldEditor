@@ -269,7 +269,7 @@ void App::DrawSources()
                                                          : MpqLayer{ MpqLayer::Kind::Casc, *dir, true, false, "", "", products.front() } } });
         }
     ImGui::SameLine(0, 24);
-    if (ImGui::Button("Apply")) ApplySources();
+    if (ImGui::Button("Apply")) Later([this] { ApplySources(); });
     ImGui::SetItemTooltip("Saves the sources in project.json. A base change reopens the project; compare sources reattach.");
     ImGui::SameLine();
     if (ImGui::Button("Revert")) m_sourcesEdit.clear();

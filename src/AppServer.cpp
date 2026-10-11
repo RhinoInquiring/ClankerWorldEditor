@@ -274,7 +274,7 @@ void App::DrawSetupModal()
         m_project->clientDir = m_setupClient;
         if (!m_project->Save(error)) Log("Project not saved: %s", error.c_str());
         ImGui::CloseCurrentPopup();
-        if (clientChanged) GuardUnsaved([this, dir = m_project->dir.string()] { OpenProject(dir); });   // reopens and connects
+        if (clientChanged) GuardUnsaved([this, dir = m_project->dir.string()] { Later([this, dir] { OpenProject(dir); }); });   // reopens and connects
         else ConnectServer();
     }
     ImGui::EndDisabled();
