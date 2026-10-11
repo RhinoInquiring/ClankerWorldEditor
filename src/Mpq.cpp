@@ -753,6 +753,17 @@ std::optional<std::vector<uint8_t>> MpqChain::ReadCasc(const Archive& a, uint32_
     return cdn.Read(id);   // already downloaded (from the cache, quick) or waiting mode
 }
 
+std::optional<std::vector<uint8_t>> MpqChain::ReadCdn(const std::string& name) const
+{
+    for (const Archive& a : m_archives)
+        if (a.casc)
+        {
+            const auto id = CascId(a.ids, Lower(Backslashes(name)));
+            return id ? a.cdn->Read(*id) : std::nullopt;
+        }
+    return std::nullopt;
+}
+
 std::optional<std::vector<uint8_t>> MpqChain::ReadFrom(size_t archive, const std::string& name) const
 {
     if (archive >= m_archives.size()) return std::nullopt;

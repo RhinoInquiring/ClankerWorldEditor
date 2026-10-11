@@ -364,7 +364,16 @@ namespace checks
         const uint64_t before = CdnArrivals();
         const bool first = mpq.Read(name).has_value();
         printf("first read: %s in %.0f ms\n", first ? "on disk" : "missed (queued)", ms());
-        if (first) return 0;
+        if (first)
+        {
+            // On disk: fetch it from the CDN anyway (a range out of its archive, or the archive already cached)
+            // and compare with the disk copy.
+            const auto disk = mpq.Read(name);
+            const auto cdn = mpq.ReadCdn(name);
+            const bool same = cdn && *cdn == *disk;
+            printf("cdn read: %s, %zu bytes, %.0f ms total\n", !cdn ? "FAILED" : same ? "same as disk" : "DIFFERS from disk", cdn ? cdn->size() : 0, ms());
+            return same ? 0 : 1;
+        }
         while (CdnArrivals() == before && ms() < 300000) Sleep(50);
         printf("arrived after %.0f ms\n", ms());
         const auto second = mpq.Read(name);

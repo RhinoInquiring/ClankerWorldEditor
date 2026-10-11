@@ -32,7 +32,9 @@ set(CASC_BUILD_SHARED_LIB OFF CACHE BOOL "" FORCE)
 set(CASC_BUILD_STATIC_LIB ON CACHE BOOL "" FORCE)
 FetchContent_Declare(casclib   # CASC storages (modern clients' Data\data); master: newest root formats
     GIT_REPOSITORY https://github.com/ladislav-zezula/CascLib.git
-    GIT_TAG 38a34665624b8775bb875274b36191b21c38d97b)
+    GIT_TAG 38a34665624b8775bb875274b36191b21c38d97b
+    # CDN misses fetch just the file's bytes (HTTP range) instead of its whole ~256 MB archive. Re-check on a bump.
+    PATCH_COMMAND ${CMAKE_COMMAND} -DPATCH=${CMAKE_CURRENT_SOURCE_DIR}/cmake/casclib-cdn-range.patch -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/apply-patch.cmake)
 FetchContent_MakeAvailable(imgui stormlib json imguizmo casclib)
 
 add_library(imgui STATIC

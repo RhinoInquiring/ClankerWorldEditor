@@ -46,6 +46,7 @@ Direct3D device. Checks that write files use a temporary folder and remove it.
 | `--anim-check <Data> <model.m2> [...]` | Skeletons animate without flying apart; every animation (incl. `.anim` files) loads and Walk differs from Stand |
 | `--catalog-check <Data> <out.png>` | Catalog build time, search, thumbnails |
 | `--asset-check <Data> <other client> <map> <x> <y>` | Paste from another client, cracks, the asset closure |
+| `--cdn-check <install*product> <game path>` | A file missing on disk misses at once and arrives from the CDN in the background; a file on disk is fetched from the CDN anyway (a range out of its archive) and must match the disk copy byte for byte. Close the editor first: they share the CDN cache |
 | `--casc-to-mpq <install*product> <out dir> [map ...]` | Not a check: converts a CASC client's maps (all, or the named folders) and everything they use to 3.3.5a under `<out dir>\staging`, then packs `<out dir>\<name>.MPQ`; a rerun skips what is staged; `report.txt` lists what was lost |
 | `--render <Data> <map> <x> <y> <out.png> [yaw pitch above fx fz]` | Draws a view to a PNG. WMO-only maps (any x y): fx fz are fractions of the WMO box, above is yards over its middle; with WWE_SERVER=<AC dir> it also checks every creature stands on a WMO floor |
 | `--map-preview <Data> <map> <out.png>` | The Maps panel picture |

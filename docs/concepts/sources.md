@@ -23,7 +23,9 @@ the layers still there in place with their settings, drops the ones gone, and pu
 
 **+ CASC** adds a newer client's storage (an install folder and its product, e.g. `wow_classic_beta`). Its files are
 read as 3.3.5a ones: split tiles merged, newer models and WMOs converted. Files missing from the install come from
-Blizzard's CDN in the background, so a first look is slow and areas fill in as files arrive. For comparing a whole
+Blizzard's CDN in the background, so a first look is slow and areas fill in as files arrive. Each one downloads only
+its own bytes, not the whole archive it sits in; a new client build first fetches that build's index files once
+(about 250 MB). For comparing a whole
 client, convert it once instead and add the MPQ as an MPQ file layer:
 
 ```

@@ -1,0 +1,151 @@
+diff --git a/src/CascFiles.cpp b/src/CascFiles.cpp
+index 9e1e941..f56c308 100644
+--- a/src/CascFiles.cpp
++++ b/src/CascFiles.cpp
+@@ -1178,6 +1178,17 @@ static bool FileAlreadyExists(LPCTSTR szFileName)
+     return (FileSize != 0);
+ }
+ 
++static bool IsLocalCascFile(LPCTSTR szRootPath, CPATH_TYPE PathType, LPBYTE pbEKey)
++{
++    CASC_PATH<TCHAR> LocalPath;
++
++    if(szRootPath == NULL)
++        return false;
++    LocalPath.Create(szRootPath, GetSubFolder(PathType), NULL);
++    LocalPath.AppendEKey(pbEKey);
++    return FileAlreadyExists(LocalPath);
++}
++
+ static DWORD RibbitDownloadFile(LPCTSTR szCdnHostUrl, LPCTSTR szProduct, LPCTSTR szFileName, CASC_PATH<TCHAR> & LocalPath, CASC_BLOB & FileData)
+ {
+     CASC_PATH<TCHAR> LocalFile;
+@@ -1283,11 +1294,21 @@ static DWORD HttpDownloadFile(
+             }
+         }
+ 
++        else
++        {
++            // Only a part: ask the server for just that range; the response holds it from offset 0
++            pRemStream->Base.Socket.rangeOffset = *PtrByteOffset;
++            pRemStream->Base.Socket.rangeLength = cbReadSize;
++            dwErrCode = ERROR_SUCCESS;
++        }
++
+         // Shall we read something?
+         if((dwErrCode == ERROR_SUCCESS) && (cbReadSize != 0) && (pbFileData = CASC_ALLOC<BYTE>(cbReadSize)) != NULL)
+         {
++            ULONGLONG ReadOffset = 0;
++
+             // Read all required data from the remote file
+-            if(FileStream_Read(pRemStream, PtrByteOffset, pbFileData, cbReadSize))
++            if(FileStream_Read(pRemStream, &ReadOffset, pbFileData, cbReadSize))
+                 dwErrCode = SaveLocalFile(szLocalName, pbFileData, cbReadSize);
+ 
+             // Free the data buffer
+@@ -1328,7 +1349,10 @@ DWORD FetchCascFile(
+     CPATH_TYPE PathType,
+     LPBYTE pbEKey,
+     LPCTSTR szExtension,
+-    CASC_PATH<TCHAR> & LocalPath)
++    CASC_PATH<TCHAR> & LocalPath,
++    LPBYTE pbRemoteKey = NULL,              // Download this remote file's bytes [ByteOffset, ByteOffset + cbReadSize) as pbEKey
++    ULONGLONG ByteOffset = 0,
++    DWORD cbReadSize = 0)
+ {
+     LPCTSTR szCdnServers = hs->szCdnServers;
+     DWORD dwErrCode = ERROR_SUCCESS;
+@@ -1357,11 +1381,11 @@ DWORD FetchCascFile(
+ 
+             // Construct the full remote URL path
+             RemotePath.Create(szCdnServer, hs->szCdnPath, GetSubFolder(PathType), NULL);
+-            RemotePath.AppendEKey(pbEKey);
++            RemotePath.AppendEKey(pbRemoteKey ? pbRemoteKey : pbEKey);
+             RemotePath.AppendString(szExtension, false);
+ 
+             // Attempt to download the file
+-            dwErrCode = HttpDownloadFile(RemotePath, LocalPath, NULL, 0, 0);
++            dwErrCode = HttpDownloadFile(RemotePath, LocalPath, pbRemoteKey ? &ByteOffset : NULL, cbReadSize, 0);
+ 
+             // Stop on low memory condition, as it will most likely
+             // end up with low memory on next download
+@@ -1393,11 +1417,24 @@ DWORD FetchCascFile(TCascStorage * hs, CPATH_TYPE PathType, LPBYTE pbEKey, LPCTS
+             pArchiveInfo->EncodedSize = pEKeyEntry->EncodedSize;
+ 
+             // Fill-in the archive key
++            LPBYTE pbFileKey = pbEKey;
+             pbArchiveKey = pbEKey = hs->ArchivesKey.pbData + (MD5_HASH_SIZE * pArchiveInfo->ArchiveIndex);
+             memcpy(pArchiveInfo->ArchiveKey, pbArchiveKey, MD5_HASH_SIZE);
+ 
+             // Remap the path type to "data"
+             PathType = PathTypeData;
++
++            // Online, archive not downloaded yet: fetch only this file's bytes from it (an HTTP range),
++            // kept as a loose file named by its own key. Falls back to the whole archive below.
++            if((hs->dwFeatures & CASC_FEATURE_ONLINE) && hs->szRootPath != NULL && pArchiveInfo->EncodedSize != 0 &&
++               !IsLocalCascFile(hs->szDataPath, PathTypeData, pbArchiveKey) && !IsLocalCascFile(hs->szRootPath, PathTypeData, pbArchiveKey))
++            {
++                if(FetchCascFile(hs, hs->szRootPath, PathTypeData, pbFileKey, szExtension, LocalPath, pbArchiveKey, pArchiveInfo->ArchiveOffs, pArchiveInfo->EncodedSize) == ERROR_SUCCESS)
++                {
++                    memset(pArchiveInfo, 0, sizeof(CASC_ARCHIVE_INFO));   // a loose file now: offset 0, size from the file
++                    return ERROR_SUCCESS;
++                }
++            }
+         }
+         else
+         {
+diff --git a/src/common/FileStream.cpp b/src/common/FileStream.cpp
+index d0ac85d..14a3db3 100644
+--- a/src/common/FileStream.cpp
++++ b/src/common/FileStream.cpp
+@@ -678,7 +678,7 @@ static bool BaseHttp_Download(TFileStream * pStream)
+     const char * request_mask = "GET %s HTTP/1.1\r\nHost: %s\r\nConnection: Keep-Alive\r\n\r\n";
+     char * server_response;
+     char * fileName = pStream->Base.Socket.fileName;
+-    char request[0x100];
++    char request[0x200];
+     size_t request_length = 0;
+     DWORD dwErrCode = ERROR_SUCCESS;
+ 
+@@ -699,7 +699,14 @@ static bool BaseHttp_Download(TFileStream * pStream)
+         }
+ 
+         // Send the request and receive decoded response
+-        request_length = CascStrPrintf(request, _countof(request), request_mask, fileName, pStream->Base.Socket.hostName);
++        if(pStream->Base.Socket.rangeLength != 0)
++        {
++            ULONGLONG RangeEnd = pStream->Base.Socket.rangeOffset + pStream->Base.Socket.rangeLength - 1;
++            request_mask = "GET %s HTTP/1.1\r\nHost: %s\r\nRange: bytes=%llu-%llu\r\nConnection: Keep-Alive\r\n\r\n";
++            request_length = CascStrPrintf(request, _countof(request), request_mask, fileName, pStream->Base.Socket.hostName, pStream->Base.Socket.rangeOffset, RangeEnd);
++        }
++        else
++            request_length = CascStrPrintf(request, _countof(request), request_mask, fileName, pStream->Base.Socket.hostName);
+         server_response = pStream->Base.Socket.pSocket->ReadResponse(request, request_length, MimeResponse);
+         if(server_response != NULL)
+         {
+diff --git a/src/common/FileStream.h b/src/common/FileStream.h
+index d6aa879..0362dab 100644
+--- a/src/common/FileStream.h
++++ b/src/common/FileStream.h
+@@ -178,6 +178,8 @@ union TBaseProviderData
+         char * fileName;                    // Name of the remote resource
+         size_t fileDataLength;              // Length of the file data, in bytes
+         size_t fileDataPos;                 // Current position in the data
++        ULONGLONG rangeOffset;              // Download only this part of the remote file (rangeLength != 0)
++        DWORD rangeLength;
+     } Socket;
+ };
+ 
+diff --git a/src/common/Mime.cpp b/src/common/Mime.cpp
+index d3d975f..aef1309 100644
+--- a/src/common/Mime.cpp
++++ b/src/common/Mime.cpp
+@@ -655,7 +655,7 @@ DWORD CASC_MIME::Load(char * data, CASC_MIME_RESPONSE & MimeResponse)
+     if(MimeResponse.http_presence == FieldPresencePresent)
+     {
+         // Avoid parsing of failed HTTP requests
+-        if(MimeResponse.http_code != 200)
++        if(MimeResponse.http_code != 200 && MimeResponse.http_code != 206)
+             return ERROR_FILE_NOT_FOUND;
+ 
+         // Directly setup the root item

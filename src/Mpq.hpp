@@ -151,6 +151,8 @@ public:
     /// The layer an archive came from (index into what Open was given).
     size_t ArchiveLayer(size_t archive) const { return archive < m_archives.size() ? m_archives[archive].layer : 0; }
     bool Has(size_t archive, const std::string& name) const;
+    /// The file from the first CASC layer's CDN, skipping its disk copy (a check: compare with Read).
+    std::optional<std::vector<uint8_t>> ReadCdn(const std::string& name) const;
 
     /// Every file name the archives' listfiles know, once each (case-insensitive), with the archive it resolves to.
     struct Entry { std::string name; size_t archive; };
