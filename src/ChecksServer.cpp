@@ -1437,6 +1437,8 @@ namespace checks
         expect(count("SELECT COUNT(*) FROM playercreateinfo_skills WHERE raceMask = " + bit + " AND skill = 109") == 1 &&
                    count("SELECT COUNT(*) FROM playercreateinfo_skills WHERE raceMask = " + bit + " AND skill = 98") == 0,
                "its own mask's language is Orcish (109), not the donor's Common");
+        expect(count("SELECT COUNT(*) FROM playercreateinfo_skills WHERE raceMask = " + bit + " AND `rank` > 16") == 0,
+               "every skill row's rank is a step AzerothCore takes (16 at most; 300 drops the row)");
         // One class's start moved; the other classes' kept.
         apply({ SetRaceStart(race, 1, 0, 12, -8949.95f, -132.49f, 83.53f, 0.5f, t) }, "start");
         expect(count("SELECT COUNT(*) FROM playercreateinfo WHERE race = " + r + " AND class = 1 AND zone = 12 AND ABS(position_x + 8949.95) < 0.01") == 1 &&
@@ -1449,6 +1451,26 @@ namespace checks
         expect(count("SELECT COUNT(*) FROM playercreateinfo WHERE race = " + r) == 3, "redo writes them again");
         store.Undo();
         expect(inDb() == 0, "and undo takes them away again");
+
+        // Race masks: the race gets the donor's quests, items, zone spells and race conditions, and loses them on revert.
+        {
+            const std::string d = std::to_string(RaceBit(donor));
+            auto withBoth = [&](const char* table, const char* column) {
+                return count(std::string("SELECT COUNT(*) FROM ") + table + " WHERE (`" + column + "` & " + d + ") != 0 AND (`" + column + "` & " + bit + ") != 0");
+            };
+            auto withDonor = [&](const char* table, const char* column) {
+                return count(std::string("SELECT COUNT(*) FROM ") + table + " WHERE (`" + column + "` & " + d + ") != 0");
+            };
+            const unsigned long quests = withDonor("quest_template", "AllowableRaces"), before = withBoth("quest_template", "AllowableRaces");
+            bool ran = true;
+            for (const std::string& s : RaceMaskSql({ { RaceBit(donor), RaceBit(race) } }, false)) ran = ran && db.Query(s, error).has_value();
+            expect(ran && quests && withBoth("quest_template", "AllowableRaces") == quests && withBoth("item_template", "AllowableRace") == withDonor("item_template", "AllowableRace"),
+                   "race masks: all " + std::to_string(quests) + " of the donor's quests and its items take race " + r + " " + error);
+            for (const std::string& s : RaceMaskSql({ { RaceBit(donor), RaceBit(race) } }, false)) ran = ran && db.Query(s, error).has_value();
+            expect(ran && withBoth("quest_template", "AllowableRaces") == quests, "running them again changes nothing");
+            for (const std::string& s : RaceMaskSql({ { RaceBit(donor), RaceBit(race) } }, true)) ran = ran && db.Query(s, error).has_value();
+            expect(ran && withBoth("quest_template", "AllowableRaces") == before, "revert leaves them as they were (" + std::to_string(before) + " had both)");
+        }
         printf("%d problem(s)\n", problems);
         return problems ? 1 : 0;
     }

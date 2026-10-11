@@ -211,6 +211,12 @@ std::vector<uint8_t> MapPreview(const std::vector<std::vector<int16_t>>& wdl, in
 
 /// An uncompressed BLP2 (ARGB8888, 8-bit alpha, no mipmaps; the client ships such files) from RGBA rows.
 std::vector<uint8_t> WriteBlp(uint32_t width, uint32_t height, const uint8_t* rgba);
+/// A palettized BLP2 (256 colours, median cut; 8-bit alpha only when a pixel is not opaque) with every mip, as
+/// Blizzard's character textures are: the 3.3.5 client composites a character's skin, face, facial hair, scalp and
+/// underwear only from these.
+std::vector<uint8_t> WriteIndexedBlp(uint32_t width, uint32_t height, const uint8_t* rgba);
+/// True for a palettized BLP2.
+bool IsIndexedBlp(const std::vector<uint8_t>& data);
 
 std::string Base64Encode(const uint8_t* data, size_t size);
 std::vector<uint8_t> Base64Decode(const std::string& text);

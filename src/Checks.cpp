@@ -126,6 +126,7 @@ int RunCheck()
         { L"--race-check", 3, checks::RaceCheck },
         { L"--race-look", 6, checks::RaceLookCheck },
         { L"--race-import-check", 5, checks::RaceImportCheck },
+        { L"--race-model-check", 3, checks::RaceModelCheck },
         { L"--race-export-check", 5, checks::RaceExportCheck },
         { L"--race-edit-check", 3, checks::RaceEditCheck },
         { L"--race-server-check", 3, checks::RaceServerCheck },

@@ -174,8 +174,45 @@ std::vector<Change> ImportRaceChanges(const RaceCatalog& source, const std::stri
 /// only NPCs wear it; 3.3.5: 0x1 = players may choose it) and marks it done ("sectionFlags"). False when already done.
 bool FixClassicSectionFlags(nlohmann::json& package);
 
+/// A skill of the client's SkillLine.dbc: category 6 weapons, 7 class, 8 armour, 9 secondary, 10 languages,
+/// 11 professions, 12 hidden; `gated`: SkillRaceClassInfo has a row of it (without one AzerothCore gives it to nobody).
+struct SkillInfo { uint32_t id = 0, category = 0; std::string name; bool gated = false; };
+std::vector<SkillInfo> ReadSkills(const MpqChain& mpq);
+const char* SkillCategoryName(uint32_t category);
+
+/// The races the project imported that are playable, each with its donor (CreatorDonor) as race-mask bits: (donor bit,
+/// race bit). A race takes its donor's place wherever a race mask gates something.
+std::vector<std::pair<uint32_t, uint32_t>> ImportedRaceMasks(const RaceCatalog& project, const std::map<uint32_t, nlohmann::json>& packages);
+/// World database statements giving each race its donor's place in race masks (quests, items, zone spells, race
+/// conditions): `revert` takes it away again. Safe to run again: a row that has the race already is left alone.
+std::vector<std::string> RaceMaskSql(const std::vector<std::pair<uint32_t, uint32_t>>& bits, bool revert);
+
+/// A character model row made playable: the columns a 1.12 row lacks (mount height, geometry box, the world and attached
+/// effect scales; at 0 the client draws buffs, heals and level-up at no size) from the client's row of the same model
+/// (a renamed Character\Race<id>\... model counts as its original), else effect scales of 1; and the player-model flag
+/// 0x800 every stock playable model has. False when the row needed nothing.
+bool FillPlayerModelRow(nlohmann::json& row, const RaceCatalog& client);
+/// The changes doing that to the model rows a project race's import added.
+std::vector<Change> FixRaceModelRows(uint32_t race, const RaceAdapter& races, const DbcTable& models, const RaceCatalog& client);
+
+/// The changes putting a project race's models (.m2, .skin, .anim) back at the path its source client had them, out of
+/// Character\Race<id>\ (where an import put them because the client has other files of those names), and its model rows
+/// with them. The client may tell a character's race from its model's path when it rebuilds one (a transform ending):
+/// a Race<id> folder matches no race. Overrides the client's files of those names. Empty when none is renamed.
+std::vector<Change> UseSourceModelPaths(uint32_t race, const RaceAdapter& races, const DbcTable& models);
+
+/// The changes moving a project race's character displays past 65535 into the project's "race.display.id" range:
+/// AzerothCore keeps a player's display id in 16 bits, so 90000 reaches the client as 24464 (an Ice Troll). Empty when
+/// none needs it, or (with `error`) when the range is full or a display is not the project's.
+std::vector<Change> RenumberRaceDisplays(uint32_t race, const RaceAdapter& races, const DbcTable& displays, const Project& ranges, std::string& error);
+
 /// The changes removing a project race the project added: its package and the display and model rows its import added.
 std::vector<Change> RemoveRaceChanges(uint32_t race, const RaceAdapter& races, const DbcTable& displays, const DbcTable& models);
+
+/// A character model whose attachment lookup covers every attachment id it has (at least the 50 stock characters
+/// have): 1.12 conversions can keep a shorter one, and the client finds attachments only through it (spell effects at
+/// the missing points never show). Unchanged when already complete or not an MD20.
+std::vector<uint8_t> FixM2AttachmentLookup(std::vector<uint8_t> m2);
 
 /// A model with fixed texture names replaced (old -> new, case-insensitive; names appended to the file).
 std::vector<uint8_t> RenameM2Textures(std::vector<uint8_t> m2, const std::map<std::string, std::string>& names);
@@ -190,7 +227,10 @@ std::vector<uint8_t> RenameM2Textures(std::vector<uint8_t> m2, const std::map<st
 bool ExportRaces(const RaceCatalog& project, const std::map<uint32_t, nlohmann::json>& packages,
                  const std::function<const MpqChain*(const std::string& client)>& source, const std::vector<std::filesystem::path>& dbcDirs,
                  const std::filesystem::path& clientOut, std::vector<std::string>& notes, std::string& error,
-                 const MpqChain* client = nullptr, const std::filesystem::path& assets = {});
+                 const MpqChain* client = nullptr, const std::filesystem::path& assets = {},
+                 const std::map<uint32_t, std::set<uint32_t>>& raceSkills = {});
+/// `raceSkills`: the skills each project race is given (playercreateinfo_skills of its own bit); export puts the race in
+/// SkillRaceClassInfo and SkillLineAbility for them too (rows of a mask of 0 take every race already).
 
 /// The client's character creator script (Interface\GlueXML\CharacterCreate.lua, given as `clientLua`) with the
 /// project's playable races added: a button for every playable race (the client's XML has ten), laid out per faction,

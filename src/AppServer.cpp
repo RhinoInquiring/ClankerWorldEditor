@@ -86,7 +86,20 @@ bool App::SyncServerRows()
         if (std::string error; !spawns->Sync(error)) { Log("%s spawns not written to the database: %s", spawns->Table(), error.c_str()); ok = false; }
     for (TableRowsAdapter* table : TableAdapters())
         if (std::string error; !table->Sync(error)) { Log("%s not written to the database: %s", table->Table().c_str(), error.c_str()); ok = false; }
+    // Imported races take their donor's place in the world's race masks (quests, items, zone spells, race conditions).
+    for (const std::string& sql : RaceMaskSql(ProjectRaceMasks(), false))
+        if (std::string error; !m_db.Query(sql, error)) { Log("Race masks not written to the database: %s", error.c_str()); ok = false; break; }
     return ok;
+}
+
+std::vector<std::pair<uint32_t, uint32_t>> App::ProjectRaceMasks()
+{
+    if (m_raceRows.Packages().empty()) return {};
+    RaceCatalog races;
+    std::string error;
+    if (!races.Load(m_mpq, error)) return {};
+    for (const auto& [id, package] : m_raceRows.Packages()) races.Apply(id, package);
+    return ImportedRaceMasks(races, m_raceRows.Packages());
 }
 
 void App::InstallToServer()

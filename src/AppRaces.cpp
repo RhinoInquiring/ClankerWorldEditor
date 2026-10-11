@@ -20,6 +20,12 @@ const ImVec4 kWarn{ 1.00f, 0.66f, 0.25f, 1.00f };
 const ImVec4 kNew{ 0.45f, 0.85f, 0.55f, 1.00f };
 const ImVec4 kProject{ 0.45f, 0.70f, 1.00f, 1.00f };
 
+std::string Lower(std::string s)
+{
+    for (char& c : s) c = char(std::tolower((unsigned char)c));
+    return s;
+}
+
 /// A race name without the game's colour codes (|cAARRGGBB ... |r), as some clients write them.
 std::string Plain(const std::string& name)
 {
@@ -574,6 +580,65 @@ void App::DrawRaceEditor(const RaceCatalog::Race& race)
         ImGui::TextColored(kQuiet, "Imported from %s, race %u there.", from.value("client", std::string("?")).c_str(), from.value("race", 0u));
         if (!p.contains("files"))
             ImGui::TextColored(kWarn, "Imported before its files were listed: remove it and import it again so export brings its models and textures.");
+        // Imported before model rows were filled for 3.3.5 (1.12 rows have no effect scales: buffs and heals drawn at no size).
+        if (package)
+        {
+            nlohmann::json probe;
+            bool stale = false;
+            const nlohmann::json added = package->value("added", nlohmann::json::object());   // a local: a temporary dies before the loop
+            for (const nlohmann::json& id : ChangeStore::List(added, "CreatureModelData"))
+                if (const nlohmann::json* m = m_modelRows.Edited(id.get<uint32_t>()); m && m->is_object())
+                    stale = stale || FillPlayerModelRow(probe = *m, base);
+            if (stale)
+            {
+                ImGui::TextColored(kWarn, "Its model rows lack what 3.3.5 needs (effect scales of 0 draw buffs, heals and level-up at no size; no\n"
+                                          "player-model flag), as 1.12 rows do.");
+                if (ImGui::Button("Fill its model rows for 3.3.5"))
+                    if (std::vector<Change> parts = FixRaceModelRows(race.id, m_raceRows, m_modelRows, base); !parts.empty())
+                        commit(std::move(parts), "fill model rows of race " + Plain(race.name));
+            }
+        }
+        // Models renamed into Character\Race<id>\ (the client has other files of their names): the client may tell the race
+        // from the model's path when it rebuilds a character (a transform ending), so they can go back to the source's path.
+        {
+            const std::string prefix = "character\\race" + std::to_string(race.id) + "\\";
+            bool renamedModel = false;
+            for (const nlohmann::json& f : ChangeStore::List(p, "files"))
+            {
+                const std::string path = Lower(f.value("path", std::string()));
+                renamedModel = renamedModel || (path.rfind(prefix, 0) == 0 && path.size() > 3 && path.compare(path.size() - 3, 3, ".m2") == 0);
+            }
+            if (renamedModel)
+            {
+                ImGui::TextColored(kWarn, "Its models are under Character\\Race%u\\ (the client has other files of their names). Coming back from a\n"
+                                          "form the client may take the race from the model's path, and that folder names none.", race.id);
+                if (ImGui::Button("Put its models back at their own path"))
+                    if (std::vector<Change> parts = UseSourceModelPaths(race.id, m_raceRows, m_modelRows); !parts.empty())
+                    {
+                        commit(std::move(parts), "source model paths of race " + Plain(race.name));
+                        v.editRace = 0;   // read the package again
+                    }
+                ImGui::SetItemTooltip("Export then puts them at the path its source client had (Character\\Goblin\\... for a goblin), over the\n"
+                                      "client's own files of those names: NPCs using those models show this race's instead.");
+            }
+        }
+        // Imported when race displays came from the 90000 range: AzerothCore keeps a player's display in 16 bits.
+        if (package && (row.value("MaleDisplayID", 0u) >= 65536 || row.value("FemaleDisplayID", 0u) >= 65536))
+        {
+            ImGui::TextColored(kWarn, "Its displays (%u / %u) are past 65535: AzerothCore keeps a player's display in 16 bits, so in game it\n"
+                                      "shows another model (90000 is an Ice Troll).", row.value("MaleDisplayID", 0u), row.value("FemaleDisplayID", 0u));
+            if (ImGui::Button("Move its displays under 65536"))
+            {
+                std::string error;
+                std::vector<Change> parts = RenumberRaceDisplays(race.id, m_raceRows, m_displayRows, *m_project, error);
+                if (parts.empty()) Log("Race displays: %s", error.empty() ? "nothing to move" : error.c_str());
+                else
+                {
+                    commit(std::move(parts), "renumber displays of race " + Plain(race.name));
+                    v.editRace = 0;   // read the package again
+                }
+            }
+        }
         // Imported from a 1.12 client before imports converted its CharSections flags: the creator offers none of its looks.
         if (!p.contains("sectionFlags"))
             for (RacesView::Source& s : v.sources)
@@ -984,6 +1049,13 @@ void App::DrawRaceServerTab(const RaceCatalog::Race& race, const nlohmann::json&
 {
     RacesView& v = m_races;
     const RaceCatalog& base = v.project;
+    if (package.contains("source"))
+        if (const RaceCatalog::Race* donor = base.Find(CreatorDonor(base, m_raceRows.Packages(), race.id)))
+            ImGui::TextColored(kQuiet, "Which skills, skill spells and starting reputations it may have follow %s (the Creator tab's donor):\n"
+                                       "export adds it wherever %s is in SkillRaceClassInfo, SkillLineAbility and Faction.",
+                               Plain(donor->name).c_str(), Plain(donor->name).c_str());
+    ImGui::TextColored(kWarn, "The worldserver reads these rows (and the skill tables export changes) only when it starts: after a change,\n"
+                              "Build patch MPQ and install into client and server, then restart the worldserver before making a character.");
     if (!m_db.Connected())
     {
         ImGui::TextColored(kQuiet, "These rows live in the world database: connect the server (Server panel).");
@@ -1121,67 +1193,190 @@ void App::DrawRaceServerTab(const RaceCatalog::Race& race, const nlohmann::json&
         if (changed) commit({ m_raceStats.MakeChange(race.id, stats, { row }, "stats of " + Plain(race.name)) }, "stats of " + Plain(race.name));
     }
 
-    // Extra items: given on top of the starting outfit (a negative amount takes one away).
-    ImGui::SeparatorText("Extra starting items");
-    const std::vector<nlohmann::json> items = m_raceItems.Rows(race.id);
-    int removeItem = -1;
-    for (size_t i = 0; i < items.size(); ++i)
+    // Languages and skills: playercreateinfo_skills rows of its own mask bit (every class unless a class mask is set).
+    // Export also lets the race have them in SkillRaceClassInfo and SkillLineAbility, or AzerothCore would drop them.
+    if (v.skills.empty()) v.skills = ReadSkills(m_mpq);
+    const std::vector<nlohmann::json> skills = m_raceSkills.Rows(RaceBit(race.id));
+    auto skillInfo = [&](uint32_t id) -> const SkillInfo* {
+        for (const SkillInfo& s : v.skills)
+            if (s.id == id) return &s;
+        return nullptr;
+    };
+    auto hasSkill = [&](uint32_t id) {
+        return std::any_of(skills.begin(), skills.end(), [&](const nlohmann::json& s) { return uint32_t(num(s, "skill")) == id; });
+    };
+    auto setSkills = [&](const std::vector<nlohmann::json>& rows, const std::string& label) {
+        commit({ m_raceSkills.MakeChange(RaceBit(race.id), skills, rows, label) }, label + " of " + Plain(race.name));
+    };
+    auto skillRow = [&](uint32_t id, uint32_t rank, const std::string& comment) {
+        return nlohmann::json{ { "raceMask", std::to_string(RaceBit(race.id)) }, { "classMask", "0" }, { "skill", std::to_string(id) },
+                               { "rank", std::to_string(rank) }, { "comment", comment } };
+    };
+    auto withoutSkill = [&](uint32_t id) {
+        std::vector<nlohmann::json> rows;
+        for (const nlohmann::json& s : skills)
+            if (uint32_t(num(s, "skill")) != id) rows.push_back(s);
+        return rows;
+    };
+    if (race.id > 32)
+        ImGui::TextColored(kWarn, "Race %u has no bit in a 32-bit race mask: no skills, languages or spells of its own.", race.id);
+    else
     {
-        ImGui::PushID(int(i));
-        const uint32_t entry = uint32_t(num(items[i], "itemid"));
-        const NpcView::Item& item = NpcItem(entry);
-        if (ImGui::SmallButton("Remove")) removeItem = int(i);
-        ImGui::SameLine();
-        ImGui::Text("%s  x%d  %s", ClassName(uint32_t(num(items[i], "class"))), int(num(items[i], "amount")), item.found ? item.name.c_str() : std::to_string(entry).c_str());
-        if (!item.found)
+        ImGui::SeparatorText("Languages");
+        // Three even columns, each as wide as the panel allows.
+        if (ImGui::BeginTable("##languages", 3, ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_PadOuterX))
         {
-            ImGui::SameLine();
-            ImGui::TextColored(kWarn, "not on your server");
-        }
-        ImGui::PopID();
-    }
-    if (removeItem >= 0)
-    {
-        std::vector<nlohmann::json> rows = items;
-        rows.erase(rows.begin() + removeItem);
-        commit({ m_raceItems.MakeChange(race.id, items, rows, "extra item") }, "extra item of " + Plain(race.name));
-    }
-    if (!classes.empty())
-    {
-        if (std::find(classes.begin(), classes.end(), v.editClass) == classes.end()) v.editClass = classes.front();
-        ImGui::SetNextItemWidth(140);
-        if (ImGui::BeginCombo("##itemclass", ClassName(v.editClass)))
-        {
-            for (uint32_t c : classes)
-                if (ImGui::Selectable(ClassName(c), c == v.editClass)) v.editClass = c;
-            ImGui::EndCombo();
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Add an extra item")) ImGui::OpenPopup("##extraitem");
-        ImGui::SetNextWindowSize({ 440, 420 });
-        if (ImGui::BeginPopup("##extraitem"))
-        {
-            if (const auto chosen = ItemSearch("Any item: name or entry", "1 = 1"); chosen && *chosen)
+            for (const SkillInfo& s : v.skills)
             {
-                std::vector<nlohmann::json> rows = items;
-                rows.push_back({ { "race", std::to_string(race.id) }, { "class", std::to_string(v.editClass) }, { "itemid", std::to_string(*chosen) },
-                                 { "amount", "1" }, { "Note", NpcItem(*chosen).name } });
-                commit({ m_raceItems.MakeChange(race.id, items, rows, "extra item") }, "extra item of " + Plain(race.name));
-                ImGui::CloseCurrentPopup();
+                if (s.category != 10) continue;
+                ImGui::TableNextColumn();
+                ImGui::PushID(int(s.id));
+                bool on = hasSkill(s.id);
+                if (ImGui::Checkbox(s.name.c_str(), &on))
+                {
+                    std::vector<nlohmann::json> rows = withoutSkill(s.id);
+                    if (on) rows.push_back(skillRow(s.id, 0, "language"));
+                    setSkills(rows, on ? "language " + s.name : "no language " + s.name);
+                }
+                ImGui::PopID();
             }
+            ImGui::EndTable();
+        }
+        const uint32_t language = LanguageSkill(race.row.value("BaseLanguage", 0u));
+        if (language && !hasSkill(language))
+            ImGui::TextColored(kWarn, "Not its base language (%s, Identity tab): its characters speak a language they do not know.",
+                               base.LanguageName(race.row.value("BaseLanguage", 0u)).c_str());
+
+        ImGui::SeparatorText("Skills");
+        int removeSkill = -1;
+        if (ImGui::BeginTable("##skills", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit))
+        {
+            ImGui::TableSetupColumn("Skill", ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableSetupColumn("Kind");
+            ImGui::TableSetupColumn("Classes");
+            ImGui::TableSetupColumn("");
+            ImGui::TableHeadersRow();
+            for (const nlohmann::json& row : skills)
+            {
+                const uint32_t id = uint32_t(num(row, "skill")), classMask = uint32_t(num(row, "classMask"));
+                const SkillInfo* s = skillInfo(id);
+                if (s && s->category == 10) continue;   // languages above
+                ImGui::PushID(int(id));
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                ImGui::Text("%s", s ? s->name.c_str() : std::to_string(id).c_str());
+                if (s && !s->gated)
+                {
+                    ImGui::SameLine();
+                    ImGui::TextColored(kWarn, "(no SkillRaceClassInfo row: the server gives it to nobody)");
+                }
+                ImGui::TableNextColumn();
+                ImGui::TextColored(kQuiet, "%s", s ? SkillCategoryName(s->category) : "?");
+                ImGui::TableNextColumn();
+                std::string names;
+                for (uint32_t c = 1; c <= 11; ++c)
+                    if (classMask & (1u << (c - 1))) names += (names.empty() ? "" : ", ") + std::string(ClassName(c));
+                ImGui::TextUnformatted(classMask ? names.c_str() : "every class");
+                ImGui::TableNextColumn();
+                if (ImGui::SmallButton("Remove")) removeSkill = int(id);
+                ImGui::PopID();
+            }
+            ImGui::EndTable();
+        }
+        if (removeSkill >= 0) setSkills(withoutSkill(uint32_t(removeSkill)), "no skill " + std::to_string(removeSkill));
+        if (ImGui::Button("Add a skill")) ImGui::OpenPopup("##addskill");
+        ImGui::SetItemTooltip("Given to every class of it. Weapon and armour skills a class cannot use stay unused.");
+        ImGui::SetNextWindowSize({ 380, 420 });
+        if (ImGui::BeginPopup("##addskill"))
+        {
+            ImGui::SetNextItemWidth(-1);
+            if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
+            ImGui::InputTextWithHint("##skillfilter", "Skill name", &v.skillFilter);
+            ImGui::BeginChild("##skilllist");
+            for (const SkillInfo& s : v.skills)
+            {
+                if (s.category == 10 || hasSkill(s.id)) continue;
+                if (!v.skillFilter.empty() && Lower(s.name).find(Lower(v.skillFilter)) == std::string::npos) continue;
+                ImGui::PushID(int(s.id));
+                if (ImGui::Selectable((std::string(SkillCategoryName(s.category)) + ": " + s.name).c_str()))
+                {
+                    std::vector<nlohmann::json> rows = skills;
+                    rows.push_back(skillRow(s.id, 0, s.name));
+                    setSkills(rows, "skill " + s.name);
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::PopID();
+            }
+            ImGui::EndChild();
             ImGui::EndPopup();
         }
     }
 
-    // What else it has: counts, and its language.
-    ImGui::SeparatorText("Skills, spells, action bars");
-    const std::vector<nlohmann::json> skills = m_raceSkills.Rows(RaceBit(race.id));
-    const uint32_t language = LanguageSkill(race.row.value("BaseLanguage", 0u));
-    const bool speaks = std::any_of(skills.begin(), skills.end(), [&](const nlohmann::json& s) { return uint32_t(num(s, "skill")) == language; });
-    ImGui::Text("%zu skill(s) and %zu spell(s) of its own mask bit, %zu action bar button(s)", skills.size(), m_raceSpells.Rows(RaceBit(race.id)).size(),
-                m_raceActions.Rows(race.id).size());
-    if (language && !speaks)
-        ImGui::TextColored(kWarn, "No skill of its base language (%s, skill %u): its characters cannot speak it. Copying server rows adds it.",
-                           base.LanguageName(race.row.value("BaseLanguage", 0u)).c_str(), language);
-    if (race.id > 32) ImGui::TextColored(kWarn, "Race %u has no bit in a 32-bit race mask: no skills or spells of its own.", race.id);
+    // Starting items in the bags (playercreateinfo_item; the worn outfit is the Starting items tab): class 0 = every
+    // class of it. A negative amount takes an item away.
+    const std::vector<nlohmann::json> items = m_raceItems.Rows(race.id);
+    auto itemList = [&](uint32_t cls, const char* id) {
+        std::vector<nlohmann::json> rows = items;
+        bool changed = false;
+        size_t shown = 0;
+        for (auto it = rows.begin(); it != rows.end();)
+        {
+            if (uint32_t(num(*it, "class")) != cls) { ++it; continue; }
+            ++shown;
+            const uint32_t entry = uint32_t(num(*it, "itemid"));
+            ImGui::PushID(int(entry));
+            const NpcView::Item& item = NpcItem(entry);
+            const bool remove = ImGui::SmallButton("Remove");
+            ImGui::SameLine();
+            int amount = int(num(*it, "amount"));
+            ImGui::SetNextItemWidth(70);
+            ImGui::InputInt("##amount", &amount, 0);
+            if (ImGui::IsItemDeactivatedAfterEdit() && amount) { (*it)["amount"] = std::to_string(amount); changed = true; }
+            ImGui::SameLine();
+            ImGui::Text("%s", item.found ? item.name.c_str() : std::to_string(entry).c_str());
+            if (!item.found)
+            {
+                ImGui::SameLine();
+                ImGui::TextColored(kWarn, "not on your server");
+            }
+            ImGui::PopID();
+            if (remove) { it = rows.erase(it); changed = true; }
+            else ++it;
+        }
+        if (!shown) ImGui::TextColored(kQuiet, "None.");
+        if (ImGui::Button(cls ? "Add an item for this class" : "Add an item for every class")) ImGui::OpenPopup(id);
+        ImGui::SetNextWindowSize({ 440, 420 });
+        if (ImGui::BeginPopup(id))
+        {
+            if (const auto chosen = ItemSearch("Any item: name or entry", "1 = 1"); chosen && *chosen)
+            {
+                rows.push_back({ { "race", std::to_string(race.id) }, { "class", std::to_string(cls) }, { "itemid", std::to_string(*chosen) },
+                                 { "amount", "1" }, { "Note", NpcItem(*chosen).name } });
+                changed = true;
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
+        if (changed) commit({ m_raceItems.MakeChange(race.id, items, rows, "starting items") }, "starting items of " + Plain(race.name));
+    };
+    ImGui::SeparatorText("Items for every class");
+    ImGui::TextColored(kQuiet, "Put in the bags of every new character of it (the worn outfit is the Starting items tab).");
+    itemList(0, "##itemsall");
+    ImGui::SeparatorText("Items for one class");
+    if (classes.empty()) ImGui::TextColored(kQuiet, "No classes (Classes tab).");
+    else
+    {
+        if (std::find(classes.begin(), classes.end(), v.itemClass) == classes.end()) v.itemClass = classes.front();
+        ImGui::SetNextItemWidth(160);
+        if (ImGui::BeginCombo("Class##itemclass", ClassName(v.itemClass)))
+        {
+            for (uint32_t c : classes)
+                if (ImGui::Selectable(ClassName(c), c == v.itemClass)) v.itemClass = c;
+            ImGui::EndCombo();
+        }
+        itemList(v.itemClass, "##itemsclass");
+    }
+
+    ImGui::SeparatorText("Spells, action bars");
+    ImGui::Text("%zu spell(s) of its own mask bit, %zu action bar button(s)", m_raceSpells.Rows(RaceBit(race.id)).size(), m_raceActions.Rows(race.id).size());
 }

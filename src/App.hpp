@@ -485,6 +485,8 @@ private:
     void StartServerData();
     /// Writes every project row (spawns, table rows) into the connected database; false when one failed (logged).
     bool SyncServerRows();
+    /// The project's imported playable races with their donors, as race-mask bits (ImportedRaceMasks).
+    std::vector<std::pair<uint32_t, uint32_t>> ProjectRaceMasks();
     /// The server's side of installing the patch: out/server/dbc into <server>\Data\dbc (the server's originals kept
     /// once in server-build\original-dbc and put back when the project stops changing a table), then the project's
     /// rows into the database.
@@ -869,6 +871,9 @@ private:
         uint32_t editSex = 0, editClass = 0, editDonor = 0;
         int pickSlot = -1;                               // the outfit slot the item search fills
         uint32_t serverDonor = 0;                        // the race the Server tab copies rows from
+        std::vector<SkillInfo> skills;                   // the client's SkillLine (Server tab), read on first use
+        std::string skillFilter;
+        uint32_t itemClass = 0;                          // the class the Server tab's per-class items show
         // The preview has renderers of its own: a source's files never mix with another's of the same name.
         const MpqChain* previewMpq = nullptr;
         std::unique_ptr<Renderer> renderer;

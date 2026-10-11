@@ -155,7 +155,10 @@ namespace
         return r;
     }
     /// CharSections.Flags of 1.12 (1: only NPCs wear it) as 3.3.5 means it (0x1: players may choose it).
-    uint32_t ClassicSectionFlags(uint32_t flags) { return (flags & 1) ? 0u : 1u; }
+    /// CharSections.Flags of 1.12 (1: only NPCs wear it) as 3.3.5 means it: 0x1 players may choose it, and every stock
+    /// player row but a face's also has 0x10 (all but Death Knight-only rows), which the client looks for when it
+    /// rebuilds a character after a transform (without it: another race's skin, no Features).
+    uint32_t ClassicSectionFlags(uint32_t flags, uint32_t section) { return (flags & 1) ? 0u : section == 1 ? 1u : 0x11u; }
 
     RaceCatalog::Section SectionFrom(const nlohmann::json& j)
     {
@@ -320,7 +323,7 @@ bool RaceCatalog::Load(const MpqChain& mpq, std::string& error)
     for (const nlohmann::json& j : Rows(races, l->races)) m_races.push_back(RaceFrom(j, m_layout == Layout::Wrath));
     for (nlohmann::json& j : Rows(ReadDbc(mpq, "CharSections"), l->sections))
     {
-        if (m_layout == Layout::Classic) j["Flags"] = ClassicSectionFlags(U(j, "Flags"));
+        if (m_layout == Layout::Classic) j["Flags"] = ClassicSectionFlags(U(j, "Flags"), U(j, "BaseSection"));
         m_sections.push_back(SectionFrom(j));
     }
     for (const nlohmann::json& j : Rows(ReadDbc(mpq, "CharHairGeosets"), l->hair)) m_hair.push_back(HairFrom(j));
@@ -665,10 +668,12 @@ std::vector<Change> ImportRaceChanges(const RaceCatalog& source, const std::stri
             nlohmann::json row = nlohmann::json::object();
             for (const DbcField& f : CreatureModelDataFields()) row[f.name] = model.contains(f.name) ? model[f.name] : f.type == 's' ? nlohmann::json("") : nlohmann::json(0);
             row["ID"] = modelId;
+            FillPlayerModelRow(row, project);   // 1.12 rows lack the effect scales (0: buffs drawn at no size)
             rows.push_back(models.MakeChange(modelId, nullptr, row, "import race"));
             added["CreatureModelData"].push_back(modelId);
         }
-        const uint32_t displayId = next("CreatureDisplayInfo", "creaturedisplayinfo.id", [&](uint32_t id) { return !displays.Row(id).is_null(); });
+        // A player's display: under 65536 (AzerothCore keeps it in 16 bits; 90000 shows as display 24464).
+        const uint32_t displayId = next("CreatureDisplayInfo", "race.display.id", [&](uint32_t id) { return !displays.Row(id).is_null(); });
         if (!displayId) return {};
         nlohmann::json row = nlohmann::json::object();
         for (const DbcField& f : CreatureDisplayInfoFields()) row[f.name] = display.contains(f.name) ? display[f.name] : f.type == 's' ? nlohmann::json("") : nlohmann::json(0);
@@ -997,26 +1002,72 @@ std::pair<std::vector<uint8_t>, std::vector<uint8_t>> CreatorIcons(uint32_t widt
     return { WriteBlp(kSize, kSize, square.data()), WriteBlp(kSize, kSize, circle.data()) };
 }
 
+std::vector<uint8_t> FixM2AttachmentLookup(std::vector<uint8_t> m2)
+{
+    // MD20 v264: attachments (40 bytes each, id first) at 0xF0, the id -> attachment lookup (int16) at 0xF8. A model
+    // converted from 1.12 can keep a lookup shorter than its ids (Turtle's goblin stops at 35 though it has 36-49), and the
+    // client finds an attachment only through it: spell effects at those points never show. Rebuilt to every id (at
+    // least the 50 stock characters have), appended to the file.
+    if (m2.size() < 0x100 || std::memcmp(m2.data(), "MD20", 4) != 0) return m2;
+    auto u32 = [&](size_t at) { uint32_t v = 0; std::memcpy(&v, m2.data() + at, 4); return v; };
+    const uint32_t count = u32(0xF0), at = u32(0xF4), lookupCount = u32(0xF8), lookupAt = u32(0xFC);
+    if (!count || size_t(at) + size_t(count) * 40 > m2.size()) return m2;
+    uint32_t top = 49;
+    for (uint32_t i = 0; i < count; ++i) top = std::max(top, u32(at + i * 40));
+    if (top > 255) return m2;   // not attachment ids as characters have them: leave it
+    std::vector<int16_t> lookup(top + 1, -1);
+    for (uint32_t i = 0; i < count; ++i)
+        if (int16_t& slot = lookup[u32(at + i * 40)]; slot < 0) slot = int16_t(i);
+    if (lookupCount == lookup.size() && size_t(lookupAt) + lookup.size() * 2 <= m2.size() &&
+        std::memcmp(m2.data() + lookupAt, lookup.data(), lookup.size() * 2) == 0)
+        return m2;
+    while (m2.size() % 16) m2.push_back(0);
+    const uint32_t newAt = uint32_t(m2.size()), newCount = uint32_t(lookup.size());
+    m2.insert(m2.end(), reinterpret_cast<const uint8_t*>(lookup.data()), reinterpret_cast<const uint8_t*>(lookup.data()) + lookup.size() * 2);
+    std::memcpy(m2.data() + 0xF8, &newCount, 4);
+    std::memcpy(m2.data() + 0xFC, &newAt, 4);
+    return m2;
+}
+
 bool ExportRaces(const RaceCatalog& project, const std::map<uint32_t, nlohmann::json>& packages,
                  const std::function<const MpqChain*(const std::string& client)>& source, const std::vector<std::filesystem::path>& dbcDirs,
                  const std::filesystem::path& clientOut, std::vector<std::string>& notes, std::string& error,
-                 const MpqChain* client, const std::filesystem::path& assets)
+                 const MpqChain* client, const std::filesystem::path& assets, const std::map<uint32_t, std::set<uint32_t>>& raceSkills)
 {
     namespace fs = std::filesystem;
     std::error_code ec;
     if (packages.empty())   // nothing of ours: no race tables left over from an earlier export either
     {
         for (const fs::path& dir : dbcDirs)
-            for (const char* table : RaceCatalog::kTables) fs::remove(dir / (std::string(table) + ".dbc"), ec);
+            for (const char* table : { "ChrRaces", "CharSections", "CharHairGeosets", "CharacterFacialHairStyles", "CharBaseInfo", "CharStartOutfit",
+                                       "SkillRaceClassInfo", "SkillLineAbility", "Faction" })
+                fs::remove(dir / (std::string(table) + ".dbc"), ec);
         return true;
     }
     const Layouts& l = Wrath();
     const std::map<std::string, const DbcLayout*> layouts = { { "ChrRaces", &l.races }, { "CharSections", &l.sections }, { "CharHairGeosets", &l.hair },
                                                               { "CharacterFacialHairStyles", &l.facial }, { "CharBaseInfo", &l.baseInfo },
                                                               { "CharStartOutfit", &l.outfits } };
+    // An underwear row players may choose with no texture (1.12 races without underwear art, Turtle's female goblin)
+    // gets a transparent one: the 3.3.5 creator cannot build the body texture around a missing file and shows the
+    // model's own skin instead. Stock 3.3.5 never ships such a row.
+    const std::string blank = "Character\\WowWorldEditor\\BlankUnderwear.blp";
+    bool blankUsed = false;
     for (const char* table : RaceCatalog::kTables)
     {
         std::vector<nlohmann::json> rows = project.TableRows(table);
+        if (std::string(table) == "CharSections")
+            for (nlohmann::json& r : rows)
+            {
+                if ((U(r, "Flags") & 1) && U(r, "BaseSection") == 4 && S(r, "TextureName[0]").empty() && S(r, "TextureName[1]").empty())
+                {
+                    r["TextureName[0]"] = blank;
+                    blankUsed = true;
+                }
+                // A player row of a look other than a face with only 0x1: stock gives every such row 0x10 too (all but
+                // Death Knight-only ones), and the client wants it when it rebuilds a character after a transform.
+                if (U(r, "Flags") == 1 && U(r, "BaseSection") != 1 && packages.count(U(r, "RaceID"))) r["Flags"] = 0x11u;
+            }
         if (std::string(table) == "CharSections")   // the client's cache takes each race / sex / section / variation as one run
             std::stable_sort(rows.begin(), rows.end(), [](const nlohmann::json& a, const nlohmann::json& b) {
                 auto key = [](const nlohmann::json& r) { return std::tuple(U(r, "RaceID"), U(r, "SexID"), U(r, "BaseSection"), U(r, "VariationIndex"), U(r, "ColorIndex")); };
@@ -1031,6 +1082,21 @@ bool ExportRaces(const RaceCatalog& project, const std::map<uint32_t, nlohmann::
             if (!f) { error = "Cannot write " + (dir / (std::string(table) + ".dbc")).string(); return false; }
         }
     }
+    // The textures the client composites into a character's body (every CharSections texture but a hair row's first,
+    // which is drawn on the hair itself): it takes only palettized BLPs, so others are converted as they are copied.
+    std::set<std::string> composited;
+    for (const auto& [race, p] : packages)
+        for (const nlohmann::json& s : ChangeStore::List(p, "CharSections"))
+            for (int i = U(s, "BaseSection") == 3 ? 1 : 0; i < 3; ++i)
+                if (const std::string t = S(s, "TextureName[" + std::to_string(i) + "]"); !t.empty()) composited.insert(Lower(t));
+    if (blankUsed)
+    {
+        const std::vector<uint8_t> pixels(128 * 64 * 4, 0);   // pelvis size (128 x 64), fully transparent
+        const std::vector<uint8_t> bytes = WriteIndexedBlp(128, 64, pixels.data());
+        const fs::path target = clientOut / "Character" / "WowWorldEditor" / "BlankUnderwear.blp";
+        fs::create_directories(target.parent_path(), ec);
+        std::ofstream(target, std::ios::binary).write(reinterpret_cast<const char*>(bytes.data()), std::streamsize(bytes.size()));
+    }
     // Each race's files, from the client it came from.
     for (const auto& [race, p] : packages)
     {
@@ -1041,7 +1107,7 @@ bool ExportRaces(const RaceCatalog& project, const std::map<uint32_t, nlohmann::
         if (files.empty()) continue;
         const MpqChain* from = source(client);
         if (!from) { notes.push_back("race " + std::to_string(race) + ": its client \"" + client + "\" is not a source now: its " + std::to_string(files.size()) + " file(s) were not copied"); continue; }
-        size_t lost = 0;
+        size_t lost = 0, indexed = 0;
         for (const nlohmann::json& f : files)
         {
             auto bytes = from->Read(S(f, "from"));
@@ -1052,6 +1118,15 @@ bool ExportRaces(const RaceCatalog& project, const std::map<uint32_t, nlohmann::
                 for (const auto& [a, b] : f["textures"].items()) names[a] = b.get<std::string>();
                 *bytes = RenameM2Textures(std::move(*bytes), names);
             }
+            if (const std::string path = Lower(S(f, "path")); path.size() > 3 && path.compare(path.size() - 3, 3, ".m2") == 0)
+                *bytes = FixM2AttachmentLookup(std::move(*bytes));
+            if (composited.count(Lower(S(f, "path"))) && !IsIndexedBlp(*bytes))
+                if (const auto image = ParseBlp(*bytes))
+                    if (const std::vector<uint8_t> rgba = BlpPixels(*image); !rgba.empty())
+                    {
+                        *bytes = WriteIndexedBlp(image->width, image->height, rgba.data());
+                        ++indexed;
+                    }
             std::string rel = S(f, "path");
             std::replace(rel.begin(), rel.end(), '\\', '/');
             const fs::path target = clientOut / fs::path(rel);
@@ -1060,9 +1135,113 @@ bool ExportRaces(const RaceCatalog& project, const std::map<uint32_t, nlohmann::
             out.write(reinterpret_cast<const char*>(bytes->data()), std::streamsize(bytes->size()));
             if (!out) { error = "Cannot write " + target.string(); return false; }
         }
+        if (indexed) notes.push_back("race " + std::to_string(race) + ": " + std::to_string(indexed) + " body texture(s) made palettized (the client composites characters only from those)");
         if (lost) notes.push_back("race " + std::to_string(race) + ": " + std::to_string(lost) + " file(s) could not be read from " + client);
     }
     if (!client) return true;
+
+    // Race masks: what a character may have is gated by its race's bit in these tables, on the server and the client
+    // (AzerothCore drops every playercreateinfo_skills row SkillRaceClassInfo does not allow, learns skill spells by
+    // SkillLineAbility, and sets starting reputations by Faction). A race the project imported takes its donor's place:
+    // wherever a mask has the donor's bit it gets its own too. Masks of 0 or all bits already include it.
+    // (table, skill column or -1, mask columns)
+    static const std::tuple<const char*, int, std::vector<uint32_t>> kMasks[] = { { "SkillRaceClassInfo", 1, { 2 } }, { "SkillLineAbility", 1, { 3 } },
+                                                                                  { "Faction", -1, { 2, 3, 4, 5 } } };
+    const std::vector<std::pair<uint32_t, uint32_t>> bits = ImportedRaceMasks(project, packages);
+    for (const auto& [donor, own] : bits)
+        notes.push_back("race mask " + std::to_string(own) + ": skills, skill spells and starting reputations as mask " + std::to_string(donor) +
+                        " has them (SkillRaceClassInfo, SkillLineAbility, Faction; quests, items and zone spells in out/server/race_masks.sql)");
+    // A skill a race is given (the Server tab) is allowed it too, with the skill's spells; a mask of 0 takes every race already.
+    std::map<uint32_t, uint32_t> skillBits;   // skill -> race bits
+    for (const auto& [race, skills] : raceSkills)
+        if (packages.count(race))
+            for (uint32_t skill : skills) skillBits[skill] |= RaceBit(race);
+    for (const auto& [table, skillField, fields] : kMasks)
+    {
+        const std::string file = std::string(table) + ".dbc";
+        auto bytes = bits.empty() && (skillField < 0 || skillBits.empty()) ? std::nullopt : client->Read("DBFilesClient\\" + file);
+        if (!bytes || bytes->size() < 20)
+        {
+            for (const fs::path& dir : dbcDirs) fs::remove(dir / file, ec);   // none to change: the client's own table stands
+            continue;
+        }
+        uint32_t rows = 0, recordSize = 0;
+        std::memcpy(&rows, bytes->data() + 4, 4);
+        std::memcpy(&recordSize, bytes->data() + 12, 4);
+        for (uint32_t i = 0; i < rows && 20 + size_t(i + 1) * recordSize <= bytes->size(); ++i)
+        {
+            uint8_t* record = bytes->data() + 20 + size_t(i) * recordSize;
+            uint32_t skill = 0;
+            if (skillField >= 0) std::memcpy(&skill, record + skillField * 4, 4);
+            const auto picked = skillBits.find(skill);
+            for (uint32_t f : fields)
+            {
+                uint32_t mask = 0;
+                std::memcpy(&mask, record + f * 4, 4);
+                for (const auto& [donor, own] : bits)
+                    if (mask & donor) mask |= own;
+                if (mask && picked != skillBits.end()) mask |= picked->second;
+                std::memcpy(record + f * 4, &mask, 4);
+            }
+        }
+        for (const fs::path& dir : dbcDirs)
+        {
+            fs::create_directories(dir, ec);
+            std::ofstream out(dir / file, std::ios::binary);
+            out.write(reinterpret_cast<const char*>(bytes->data()), std::streamsize(bytes->size()));
+            if (!out) { error = "Cannot write " + (dir / file).string(); return false; }
+        }
+    }
+
+    // Random names (NameGen.dbc; the client makes them, the server is not asked): a race with none takes the names its
+    // source client has for it, else its donor's. The layout is the same from 2.0 on (Turtle's too): ID, Name, RaceID, Sex.
+    {
+        const DbcLayout layout = LayoutBuilder{}.Col("ID", 0).Col("Name", 1, 's').Col("RaceID", 2).Col("Sex", 3).Done(16, 4);
+        const Dbc names = ReadDbc(*client, "NameGen");
+        if (names.RecordSize() == layout.recordSize)
+        {
+            std::vector<nlohmann::json> rows = Rows(names, layout);
+            std::set<uint32_t> named;
+            uint32_t last = 0;
+            for (const nlohmann::json& r : rows) { named.insert(U(r, "RaceID")); last = std::max(last, U(r, "ID")); }
+            bool added = false;
+            for (const auto& [race, p] : packages)
+            {
+                const RaceCatalog::Race* r = project.Find(race);
+                if (!r || (r->flags & 1) || named.count(race)) continue;
+                std::vector<nlohmann::json> take;
+                const nlohmann::json from = p.value("source", nlohmann::json::object());
+                const std::string clientName = from.value("client", std::string());
+                if (const MpqChain* chain = clientName.empty() ? nullptr : source(clientName))
+                    if (const Dbc theirs = ReadDbc(*chain, "NameGen"); theirs.RecordSize() == layout.recordSize)
+                        for (const nlohmann::json& n : Rows(theirs, layout))
+                            if (U(n, "RaceID") == from.value("race", 0u)) take.push_back(n);
+                const bool own = !take.empty();
+                const uint32_t donor = CreatorDonor(project, packages, race);
+                if (take.empty())
+                    for (const nlohmann::json& n : rows)
+                        if (U(n, "RaceID") == donor) take.push_back(n);
+                for (nlohmann::json n : take)
+                {
+                    n["ID"] = ++last;
+                    n["RaceID"] = race;
+                    rows.push_back(std::move(n));
+                    added = true;
+                }
+                notes.push_back("race " + std::to_string(race) + ": " + std::to_string(take.size()) + " random names, " +
+                                (own ? "its own from " + clientName : "race " + std::to_string(donor) + "'s") + " (NameGen)");
+            }
+            if (added)
+            {
+                const std::vector<uint8_t> bytes = WriteDbcRows(rows, layout);
+                const fs::path target = clientOut / "DBFilesClient" / "NameGen.dbc";
+                fs::create_directories(target.parent_path(), ec);
+                std::ofstream out(target, std::ios::binary);
+                out.write(reinterpret_cast<const char*>(bytes.data()), std::streamsize(bytes.size()));
+                if (!out) { error = "Cannot write " + target.string(); return false; }
+            }
+        }
+    }
 
     // The character creator: a race's own creator scene from its client when players lack it, then the script.
     auto write = [&](const std::string& path, const std::vector<uint8_t>& bytes) {
@@ -1109,10 +1288,173 @@ bool ExportRaces(const RaceCatalog& project, const std::map<uint32_t, nlohmann::
     return script.empty() || write("Interface\\GlueXML\\CharacterCreate.lua", std::vector<uint8_t>(script.begin(), script.end()));
 }
 
+std::vector<SkillInfo> ReadSkills(const MpqChain& mpq)
+{
+    // SkillLine 3.3.5: ID, CategoryID, SkillCostsID, DisplayName_lang (enUS at 3); SkillRaceClassInfo: ID, SkillID, ...
+    const Dbc lines = ReadDbc(mpq, "SkillLine"), gates = ReadDbc(mpq, "SkillRaceClassInfo");
+    std::set<uint32_t> gated;
+    for (uint32_t i = 0; i < gates.Rows(); ++i) gated.insert(gates.U32(i, 1));
+    std::vector<SkillInfo> out;
+    for (uint32_t i = 0; i < lines.Rows(); ++i)
+        if (std::string name = lines.Str(i, 3); !name.empty())
+            out.push_back({ lines.U32(i, 0), lines.U32(i, 1), std::move(name), gated.count(lines.U32(i, 0)) != 0 });
+    std::sort(out.begin(), out.end(), [](const SkillInfo& a, const SkillInfo& b) { return std::tie(a.category, a.name) < std::tie(b.category, b.name); });
+    return out;
+}
+
+const char* SkillCategoryName(uint32_t category)
+{
+    switch (category)
+    {
+    case 5: return "Attributes";
+    case 6: return "Weapons";
+    case 7: return "Class";
+    case 8: return "Armour";
+    case 9: return "Secondary";
+    case 10: return "Languages";
+    case 11: return "Professions";
+    case 12: return "Hidden";
+    default: return "Other";
+    }
+}
+
+std::vector<std::pair<uint32_t, uint32_t>> ImportedRaceMasks(const RaceCatalog& project, const std::map<uint32_t, nlohmann::json>& packages)
+{
+    std::vector<std::pair<uint32_t, uint32_t>> bits;
+    for (const auto& [race, p] : packages)
+    {
+        const RaceCatalog::Race* r = project.Find(race);
+        const uint32_t donor = CreatorDonor(project, packages, race);
+        if (p.contains("source") && r && !(r->flags & 1) && RaceBit(race) && RaceBit(donor)) bits.push_back({ RaceBit(donor), RaceBit(race) });
+    }
+    return bits;
+}
+
+std::vector<std::string> RaceMaskSql(const std::vector<std::pair<uint32_t, uint32_t>>& bits, bool revert)
+{
+    // (table, mask column, extra condition). UPDATE IGNORE: the mask is part of spell_area's and conditions' keys.
+    // ponytail: revert takes the race from every row with the donor's bit, also one that had both before (stock never
+    // gives an unplayable race's bit alone); list the rows changed if that ever matters.
+    static const std::tuple<const char*, const char*, const char*> kColumns[] = {
+        { "quest_template", "AllowableRaces", "" }, { "item_template", "AllowableRace", "" }, { "spell_area", "racemask", "" },
+        { "conditions", "ConditionValue1", " AND ConditionTypeOrReference = 16" } };
+    std::vector<std::string> out;
+    for (const auto& [donor, own] : bits)
+        for (const auto& [table, column, also] : kColumns)
+        {
+            const std::string c = std::string("`") + column + "`", d = std::to_string(donor), o = std::to_string(own);
+            out.push_back(revert ? "UPDATE IGNORE " + std::string(table) + " SET " + c + " = " + c + " & ~" + o + " WHERE (" + c + " & " + d + ") != 0" + also
+                                 : "UPDATE IGNORE " + std::string(table) + " SET " + c + " = " + c + " | " + o + " WHERE (" + c + " & " + d + ") != 0 AND (" +
+                                       c + " & " + o + ") = 0" + also);
+        }
+    return out;
+}
+
+std::vector<Change> UseSourceModelPaths(uint32_t race, const RaceAdapter& races, const DbcTable& models)
+{
+    const nlohmann::json* package = races.Package(race);
+    if (!package || !package->contains("files")) return {};
+    nlohmann::json p = *package;
+    const std::string prefix = "character\\race" + std::to_string(race) + "\\";
+    auto isModel = [](const std::string& lower) {
+        for (const char* ext : { ".m2", ".skin", ".anim", ".mdx" })
+            if (lower.size() > std::strlen(ext) && lower.compare(lower.size() - std::strlen(ext), std::strlen(ext), ext) == 0) return true;
+        return false;
+    };
+    bool moved = false;
+    for (nlohmann::json& f : p["files"])
+        if (const std::string path = Lower(S(f, "path")); path.rfind(prefix, 0) == 0 && isModel(path)) { f["path"] = S(f, "from"); moved = true; }
+    if (!moved) return {};
+    std::vector<Change> out;
+    const nlohmann::json added = p.value("added", nlohmann::json::object());
+    for (const nlohmann::json& id : ChangeStore::List(added, "CreatureModelData"))
+        if (const nlohmann::json* row = models.Edited(id.get<uint32_t>()); row && row->is_object())
+            if (const std::string name = S(*row, "ModelName"); Lower(name).rfind(prefix, 0) == 0)
+            {
+                nlohmann::json now = *row;
+                now["ModelName"] = "Character\\" + name.substr(prefix.size());
+                out.push_back(models.MakeChange(id.get<uint32_t>(), *row, now, "source model paths"));
+            }
+    out.push_back(races.MakeChange(race, p, "source model paths"));
+    return out;
+}
+
+bool FillPlayerModelRow(nlohmann::json& row, const RaceCatalog& client)
+{
+    bool changed = false;
+    if (!(U(row, "Flags") & 0x800)) { row["Flags"] = U(row, "Flags") | 0x800u; changed = true; }
+    auto f = [&](const char* key) { const auto it = row.find(key); return it != row.end() && it->is_number() ? it->get<double>() : 0.0; };
+    if (f("WorldEffectScale") != 0 || f("AttachedEffectScale") != 0) return changed;
+    // The model's own name: Character\Race9\Goblin\Male\... was Character\Goblin\Male\...
+    std::string name = S(row, "ModelName");
+    if (Lower(name).rfind("character\\race", 0) == 0)
+        if (const size_t slash = name.find('\\', 10); slash != std::string::npos) name = "Character" + name.substr(slash);
+    static const char* const kColumns[] = { "MountHeight", "GeoBoxMinX", "GeoBoxMinY", "GeoBoxMinZ", "GeoBoxMaxX", "GeoBoxMaxY", "GeoBoxMaxZ",
+                                            "WorldEffectScale", "AttachedEffectScale", "MissileCollisionRadius", "MissileCollisionPush", "MissileCollisionRaise" };
+    const nlohmann::json same = client.ModelRow(client.ModelId(name));
+    if (same.is_object() && same.value("AttachedEffectScale", 0.0) != 0)
+        for (const char* c : kColumns) row[c] = same.value(c, 0.0);
+    else
+    {
+        row["WorldEffectScale"] = 1.0;
+        row["AttachedEffectScale"] = 1.0;
+    }
+    return true;
+}
+
+std::vector<Change> FixRaceModelRows(uint32_t race, const RaceAdapter& races, const DbcTable& models, const RaceCatalog& client)
+{
+    const nlohmann::json* p = races.Package(race);
+    if (!p) return {};
+    std::vector<Change> out;
+    const nlohmann::json added = p->value("added", nlohmann::json::object());   // a local: a temporary dies before the loop
+    for (const nlohmann::json& id : ChangeStore::List(added, "CreatureModelData"))
+        if (const nlohmann::json* row = models.Edited(id.get<uint32_t>()); row && row->is_object())
+            if (nlohmann::json now = *row; FillPlayerModelRow(now, client)) out.push_back(models.MakeChange(id.get<uint32_t>(), *row, now, "fill model rows"));
+    return out;
+}
+
+std::vector<Change> RenumberRaceDisplays(uint32_t race, const RaceAdapter& races, const DbcTable& displays, const Project& ranges, std::string& error)
+{
+    const nlohmann::json* package = races.Package(race);
+    if (!package) return {};
+    nlohmann::json p = *package;
+    std::vector<Change> out;
+    std::map<uint32_t, uint32_t> moved;   // old display -> new
+    std::set<uint32_t> taken;
+    const Project::IdRange range = ranges.Range("race.display.id");
+    for (const char* key : { "MaleDisplayID", "FemaleDisplayID" })
+    {
+        const uint32_t id = U(p["ChrRaces"], key);
+        if (id < 65536) continue;
+        if (!moved.count(id))
+        {
+            const nlohmann::json* row = displays.Edited(id);
+            if (!row || row->is_null()) { error = "display " + std::to_string(id) + " is not one the project added"; return {}; }
+            uint32_t to = 0;
+            for (uint32_t i = range.first; i && i <= range.last && !to; ++i)
+                if (displays.Row(i).is_null() && !taken.count(i)) to = i;
+            if (!to) { error = "the race.display.id range is full"; return {}; }
+            taken.insert(to);
+            nlohmann::json now = *row;
+            now["ID"] = to;
+            out.push_back(displays.MakeChange(to, nullptr, now, "renumber race displays"));
+            out.push_back(displays.MakeChange(id, *row, nullptr, "renumber race displays"));
+            moved[id] = to;
+        }
+        p["ChrRaces"][key] = moved[id];
+    }
+    if (moved.empty()) return {};
+    for (nlohmann::json& id : p["added"]["CreatureDisplayInfo"])
+        if (const auto it = moved.find(id.get<uint32_t>()); it != moved.end()) id = it->second;
+    out.push_back(races.MakeChange(race, p, "renumber race displays"));
+    return out;
+}
+
 bool FixClassicSectionFlags(nlohmann::json& package)
 {
     if (package.contains("sectionFlags")) return false;
-    for (nlohmann::json& s : package["CharSections"]) s["Flags"] = ClassicSectionFlags(U(s, "Flags"));
+    for (nlohmann::json& s : package["CharSections"]) s["Flags"] = ClassicSectionFlags(U(s, "Flags"), U(s, "BaseSection"));
     package["sectionFlags"] = "3.3.5";
     return true;
 }
@@ -1278,7 +1620,7 @@ std::vector<Change> CopyRaceServerRows(uint32_t race, uint32_t donor, const std:
         skills.push_back(std::move(row));
     }
     if (language && std::none_of(skills.begin(), skills.end(), [&](const nlohmann::json& s) { return num(s, "skill") == language; }))
-        skills.push_back({ { "raceMask", std::to_string(bit) }, { "classMask", "0" }, { "skill", std::to_string(language) }, { "rank", "300" },
+        skills.push_back({ { "raceMask", std::to_string(bit) }, { "classMask", "0" }, { "skill", std::to_string(language) }, { "rank", "0" },
                            { "comment", "language" } });
     out.push_back(t.skills.MakeChange(bit, t.skills.Rows(bit), skills, "race server rows"));
     std::vector<nlohmann::json> spells;

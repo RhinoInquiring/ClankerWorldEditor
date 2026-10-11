@@ -728,10 +728,68 @@ void App::Export(bool playTest)
         else if (size_t a, c, d; spawns->Counts(a, c, d), a + c + d)
             Log("Spawns: out/server/%s_spawns.sql (+%zu, ~%zu, -%zu) and %s_spawns_revert.sql.", spawns->Table(), a, c, d, spawns->Table());
     }
+    // Starting skills the editor once wrote with rank 300 (languages): AzerothCore takes rank as a skill step of at most 16
+    // and drops the row ("Skill rank value 300 ... is too high"), so the race got no language. Rank 0, as stock's.
+    if (m_db.Connected())
+        for (const auto& [id, package] : m_raceRows.Packages())
+        {
+            const std::vector<nlohmann::json> rows = m_raceSkills.Rows(RaceBit(id));
+            std::vector<nlohmann::json> fixed = rows;
+            bool changed = false;
+            for (nlohmann::json& r : fixed)
+                if (const auto it = r.find("rank"); it != r.end() && it->is_string() && std::strtoul(it->get<std::string>().c_str(), nullptr, 10) > 16)
+                {
+                    r["rank"] = "0";
+                    changed = true;
+                }
+            if (!changed) continue;
+            Change c = m_raceSkills.MakeChange(RaceBit(id), rows, fixed, "skill ranks");
+            m_raceSkills.Apply(c);
+            m_store.Commit(std::move(c));
+            Save(true);
+            Log("Races: race %u's starting skills had ranks past 16 (AzerothCore drops those rows): set to 0.", id);
+        }
     for (const TableRowsAdapter* table : TableAdapters())
     {
         if (!table->ExportSql(m_project->dir / "out" / "server", error)) Log("%s", error.c_str());
         else if (const size_t n = table->Count()) Log("out/server/%s.sql (%zu changed) and %s_revert.sql.", table->Table().c_str(), n, table->Table().c_str());
+    }
+    {
+        // Imported races in the world's race masks (written to the database on connect and install too).
+        const fs::path dir = m_project->dir / "out" / "server";
+        const auto bits = ProjectRaceMasks();
+        std::error_code ec;
+        if (bits.empty()) { fs::remove(dir / "race_masks.sql", ec); fs::remove(dir / "race_masks_revert.sql", ec); }
+        else
+        {
+            fs::create_directories(dir, ec);
+            std::ofstream apply(dir / "race_masks.sql"), revert(dir / "race_masks_revert.sql");
+            apply << "-- wow-world-editor: imported races take their donor's place in race masks (world database). Restart worldserver after applying.\n";
+            revert << "-- wow-world-editor: takes the imported races out of those race masks again.\n";
+            for (const std::string& s : RaceMaskSql(bits, false)) apply << s << ";\n";
+            for (const std::string& s : RaceMaskSql(bits, true)) revert << s << ";\n";
+            Log("out/server/race_masks.sql: %zu imported race(s) in quest, item, zone spell and condition race masks.", bits.size());
+        }
+    }
+    // Race model rows from before imports filled them for 3.3.5 (1.12 rows: effect scales of 0, no player-model flag, so
+    // buffs show at no size and a transform's end rebuilds the character with another race's looks): filled now, one change.
+    if (!m_raceRows.Packages().empty())
+    {
+        RaceCatalog client;
+        std::string raceError;
+        if (client.Load(m_mpq, raceError))
+        {
+            std::vector<Change> parts;
+            for (const auto& [id, package] : m_raceRows.Packages())
+                for (Change& c : FixRaceModelRows(id, m_raceRows, m_modelRows, client)) parts.push_back(std::move(c));
+            if (!parts.empty())
+            {
+                for (const Change& c : parts) m_modelRows.Apply(c);
+                Log("Races: %zu character model row(s) filled for 3.3.5 (effect scales, player-model flag).", parts.size());
+                m_store.Commit(std::move(parts), "fill race model rows");
+                Save(true);   // export already saved; keep the fix with it
+            }
+        }
     }
     for (const DbcTable* table : DbcTables())
     {
@@ -755,8 +813,13 @@ void App::Export(bool playTest)
                     if (s.name == client) return s.mpq;
                 return nullptr;
             };
+            // The skills each project race is given (Server tab): export lets the race have them in the client's skill tables.
+            std::map<uint32_t, std::set<uint32_t>> raceSkills;
+            for (const auto& [id, package] : m_raceRows.Packages())
+                for (const nlohmann::json& row : m_raceSkills.Rows(RaceBit(id)))
+                    if (const auto it = row.find("skill"); it != row.end() && it->is_string()) raceSkills[id].insert(uint32_t(std::stoul(it->get<std::string>())));
             if (!ExportRaces(races, m_raceRows.Packages(), sourceNamed, { out / "DBFilesClient", m_project->dir / "out" / "server" / "dbc" }, out, notes, error,
-                             &m_mpq, m_project->AssetsDir()))
+                             &m_mpq, m_project->AssetsDir(), raceSkills))
                 Log("Races: %s", error.c_str());
             else if (!m_raceRows.Packages().empty())
                 Log("Races: %zu race(s) of the project in DBFilesClient and out/server/dbc (ChrRaces, CharSections, CharHairGeosets, "

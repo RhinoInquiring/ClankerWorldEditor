@@ -40,7 +40,8 @@ struct Project
                                                 { "soundemitter.id", { 20000, 20999 } },                 // SoundEmitters.dbc (client max 2549)
                                                 { "map.id", { 800, 999 } },                              // Map.dbc (client max 724)
                                                 { "mapdifficulty.id", { 1000, 1099 } },                  // MapDifficulty.dbc
-                                                { "race.id", { 22, 31 } },                  // ChrRaces: stock uses 1-21; 32-bit race masks end at 32
+                                                { "race.id", { 22, 31 } },                  // ChrRaces: stock uses 1-21; past 21 the client breaks (see docs/concepts/client-versions.md)
+                                                { "race.display.id", { 60000, 60999 } },    // CreatureDisplayInfo of player races: AzerothCore keeps a player's display in 16 bits
                                                 { "charsections.id", { 600000, 699999 } },  // CharSections (client max ~9000)
                                                 { "charhairgeosets.id", { 9000, 9999 } },   // CharHairGeosets (client max ~340)
                                                 { "charstartoutfit.id", { 9000, 9999 } },   // CharStartOutfit (client max ~126 rows)

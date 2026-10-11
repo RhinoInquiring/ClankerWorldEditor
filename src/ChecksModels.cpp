@@ -1400,7 +1400,7 @@ namespace checks
         for (uint32_t sex = 0; sex < 2; ++sex)
         {
             const uint32_t display = p->at("ChrRaces").value(sex ? "FemaleDisplayID" : "MaleDisplayID", 0u);
-            const Project::IdRange r = project.Range("creaturedisplayinfo.id");
+            const Project::IdRange r = project.Range("race.display.id");
             const nlohmann::json* row = t.displays.Edited(display);
             const uint32_t model = row && row->is_object() ? row->value("ModelID", 0u) : 0;
             const nlohmann::json& modelRow = t.models.Row(model);
@@ -1600,6 +1600,41 @@ namespace checks
     /// listed, clashing ones renamed), exports it into a temp folder as Export does, and opens the client with that folder
     /// over it: the race reads back with the same choices, its model loads, its character composites from files the
     /// client and the export hold, the other races are as they were, CharSections is sorted, the server gets the same tables.
+    /// `--race-model-check <project dir>`: reads a project's changes (nothing written) and, for each of its races, the
+    /// model rows its import added and whether they still need filling for 3.3.5 (what the race editor's button offers).
+    int RaceModelCheck()
+    {
+        setvbuf(stdout, nullptr, _IONBF, 0);
+        std::string error;
+        const auto project = Project::Load(std::filesystem::path(__wargv[2]), error);
+        if (!project) { printf("%s\n", error.c_str()); return 1; }
+        MpqChain mpq;
+        mpq.Open(project->base.layers, { project->PatchInstallPath() });
+        mpq.SetMapsFromLowestLayer(true);
+        RaceProjectTables t(mpq);
+        if (!t.store.Load(project->ChangesDir(), error)) { printf("changes: %s\n", error.c_str()); return 1; }
+        RaceCatalog client;
+        if (!client.Load(mpq, error)) { printf("%s\n", error.c_str()); return 1; }
+        int stale = 0;
+        for (const auto& [race, p] : t.races.Packages())
+        {
+            printf("race %u (%s): added models", race, p["ChrRaces"].value("Name_lang", std::string()).c_str());
+            const nlohmann::json added = p.value("added", nlohmann::json::object());
+            for (const nlohmann::json& id : ChangeStore::List(added, "CreatureModelData"))
+            {
+                const nlohmann::json* m = t.models.Edited(id.get<uint32_t>());
+                nlohmann::json probe = m && m->is_object() ? *m : nlohmann::json();
+                const bool needs = probe.is_object() && FillPlayerModelRow(probe, client);
+                stale += needs;
+                printf(" %u[%s%s]", id.get<uint32_t>(), m ? (m->is_object() ? "row" : "removed") : "none", needs ? ", needs filling" : "");
+                if (m && m->is_object()) printf(" flags %s scale %s", (*m)["Flags"].dump().c_str(), m->value("AttachedEffectScale", nlohmann::json()).dump().c_str());
+            }
+            printf("\n");
+        }
+        printf("%d row(s) need filling\n", stale);
+        return 0;
+    }
+
     int RaceExportCheck()
     {
         if (__argc < 5 || !__wargv) return 2;
@@ -1628,6 +1663,24 @@ namespace checks
         t.Apply(parts);
         t.store.Commit(parts, "import race");
         const nlohmann::json p = *t.races.Package(target);
+        expect(p["ChrRaces"].value("MaleDisplayID", 0u) < 65536 && p["ChrRaces"].value("FemaleDisplayID", 0u) < 65536,
+               "its displays fit a player's 16 bits (" + std::to_string(p["ChrRaces"].value("MaleDisplayID", 0u)) + ")");
+        {
+            // An import from before: displays in 90000s; moving them keeps the rows, drops the old ids, updates the race.
+            Project old = project;
+            old.idRanges["race.display.id"] = { 90000, 90999 };
+            RaceProjectTables t2(base);
+            auto parts2 = ImportRaceChanges(sourceRaces, "source", sourceRace, target, baseRaces, t2.races, t2.displays, t2.models, old, error, {}, &source, &base);
+            t2.Apply(parts2);
+            const uint32_t before = (*t2.races.Package(target))["ChrRaces"].value("MaleDisplayID", 0u);
+            auto moves = RenumberRaceDisplays(target, t2.races, t2.displays, project, error);
+            t2.Apply(moves);
+            const nlohmann::json& q = (*t2.races.Package(target))["ChrRaces"];
+            const uint32_t after = q.value("MaleDisplayID", 0u);
+            expect(before >= 65536 && after < 65536 && t2.displays.Row(before).is_null() && t2.displays.Row(after).value("ModelID", 0u) != 0 &&
+                       q.value("FemaleDisplayID", 0u) < 65536,
+                   "an old import's displays moved under 65536 (" + std::to_string(before) + " -> " + std::to_string(after) + ")");
+        }
         size_t renamed = 0;
         for (const nlohmann::json& f : p.at("files")) renamed += f.value("path", std::string()) != f.value("from", std::string());
         printf("import as race %u: %zu file(s) to copy, %zu renamed, %zu named but missing in the source, %.0f ms\n", target, p.at("files").size(), renamed,
@@ -1643,7 +1696,7 @@ namespace checks
         for (const auto& [id, package] : t.races.Packages()) projectRaces.Apply(id, package);
         std::vector<std::string> notes;
         expect(ExportRaces(projectRaces, t.races.Packages(), [&](const std::string& c) { return c == "source" ? &source : nullptr; },
-                           { client / "DBFilesClient", server }, client, notes, error, &base),
+                           { client / "DBFilesClient", server }, client, notes, error, &base, {}, { { target, { 673u } } }),
                "race tables and files exported " + error);
         for (const std::string& n : notes) printf("     note: %s\n", n.c_str());
         {
@@ -1665,6 +1718,127 @@ namespace checks
             auto has = [&](const std::string& f) { return base.HasInstalled(f); };
             expect(CreatorScript(text, projectRaces, t.races.Packages(), has) == CreatorScript(head, projectRaces, t.races.Packages(), has),
                    "an export over an earlier export's script adds the races once");
+        }
+        {
+            // Race masks: every row of the donor's has the race's bit too, on the client and the server.
+            const uint32_t donor = CreatorDonor(projectRaces, t.races.Packages(), target);
+            for (const auto& [table, field] : { std::pair{ "SkillRaceClassInfo", 2u }, std::pair{ "SkillLineAbility", 3u }, std::pair{ "Faction", 2u } })
+            {
+                const auto bytes = ReadFileBytes(client / "DBFilesClient" / (std::string(table) + ".dbc"));
+                const auto server = ReadFileBytes(dir / "server" / "dbc" / (std::string(table) + ".dbc"));
+                size_t donorRows = 0, both = 0;
+                if (bytes && bytes->size() > 20)
+                {
+                    uint32_t rows = 0, size = 0;
+                    std::memcpy(&rows, bytes->data() + 4, 4);
+                    std::memcpy(&size, bytes->data() + 12, 4);
+                    for (uint32_t i = 0; i < rows; ++i)
+                    {
+                        uint32_t mask = 0;
+                        std::memcpy(&mask, bytes->data() + 20 + size_t(i) * size + field * 4, 4);
+                        if (mask & RaceBit(donor)) { ++donorRows; both += (mask & RaceBit(target)) != 0; }
+                    }
+                }
+                expect(donorRows && both == donorRows && server && *server == *bytes,
+                       std::string(table) + ": " + std::to_string(both) + " of race " + std::to_string(donor) + "'s " + std::to_string(donorRows) +
+                           " rows have race " + std::to_string(target) + " too, server the same");
+            }
+        }
+        {
+            // Model rows filled for 3.3.5 (effect scales, player flag) and random names for the race.
+            bool filled = true;
+            const nlohmann::json added = p.value("added", nlohmann::json::object());
+            for (const nlohmann::json& id : ChangeStore::List(added, "CreatureModelData"))
+                if (const nlohmann::json* m = t.models.Edited(id.get<uint32_t>()))
+                    filled = filled && m->value("AttachedEffectScale", 0.0) > 0 && m->value("WorldEffectScale", 0.0) > 0 && (m->value("Flags", 0u) & 0x800);
+            expect(filled, "its model rows have effect scales and the player-model flag");
+            Dbc names;
+            size_t own = 0;
+            if (const auto bytes = ReadFileBytes(client / "DBFilesClient" / "NameGen.dbc"); bytes && names.Load(*bytes))
+                for (uint32_t i = 0; i < names.Rows(); ++i) own += names.U32(i, 2) == target;
+            expect(own > 0, std::to_string(own) + " random names for race " + std::to_string(target));
+        }
+        {
+            // Every exported race model finds each of its attachments through its lookup (by id).
+            size_t models = 0, complete = 0;
+            for (const nlohmann::json& f : p.at("files"))
+            {
+                std::string rel = f.value("path", std::string());
+                if (rel.size() < 3 || _stricmp(rel.c_str() + rel.size() - 3, ".m2") != 0) continue;
+                std::replace(rel.begin(), rel.end(), '\\', '/');
+                const auto m2 = ReadFileBytes(client / fs::path(rel));
+                if (!m2 || m2->size() < 0x100 || std::memcmp(m2->data(), "MD20", 4) != 0) continue;
+                ++models;
+                auto u32 = [&](size_t at) { uint32_t v = 0; std::memcpy(&v, m2->data() + at, 4); return v; };
+                const uint32_t count = u32(0xF0), at = u32(0xF4), lookupCount = u32(0xF8), lookupAt = u32(0xFC);
+                bool ok = lookupCount >= 50;
+                for (uint32_t i = 0; i < count && ok; ++i)
+                {
+                    const uint32_t id = u32(at + i * 40);
+                    int16_t slot = -1;
+                    if (id < lookupCount) std::memcpy(&slot, m2->data() + lookupAt + id * 2, 2);
+                    ok = slot >= 0 && u32(at + uint32_t(slot) * 40) == id;
+                }
+                complete += ok;
+            }
+            expect(models && complete == models, std::to_string(complete) + " of " + std::to_string(models) + " race models find every attachment by id");
+        }
+        if (renamed)
+        {
+            // Models back at the source's path: the rows and the package's model files, textures still renamed.
+            RaceProjectTables t3(base);
+            auto parts3 = ImportRaceChanges(sourceRaces, "source", sourceRace, target, baseRaces, t3.races, t3.displays, t3.models, project, error, {}, &source, &base);
+            t3.Apply(parts3);
+            t3.Apply(UseSourceModelPaths(target, t3.races, t3.models));
+            const nlohmann::json& q = *t3.races.Package(target);
+            const std::string prefix = "character\\race" + std::to_string(target) + "\\";
+            size_t models = 0, back = 0, textures = 0;
+            for (const nlohmann::json& f : q.at("files"))
+            {
+                std::string path = f.value("path", std::string());
+                for (char& ch : path) ch = char(std::tolower((unsigned char)ch));
+                const bool m2 = path.size() > 3 && path.compare(path.size() - 3, 3, ".m2") == 0;
+                models += m2;
+                back += m2 && path.rfind(prefix, 0) != 0;
+                textures += path.size() > 4 && path.compare(path.size() - 4, 4, ".blp") == 0 && path.rfind(prefix, 0) == 0;
+            }
+            bool rows = true;
+            const nlohmann::json added3 = q.value("added", nlohmann::json::object());
+            for (const nlohmann::json& id : ChangeStore::List(added3, "CreatureModelData"))
+            {
+                std::string name = t3.models.Row(id.get<uint32_t>()).value("ModelName", std::string());
+                for (char& ch : name) ch = char(std::tolower((unsigned char)ch));
+                rows = rows && name.rfind(prefix, 0) != 0;
+            }
+            expect(models && back == models && rows, "models back at the source's path: " + std::to_string(back) + " of " + std::to_string(models) +
+                                                         " models, their rows too; " + std::to_string(textures) + " renamed texture(s) stay");
+        }
+        {
+            // A picked skill the donor lacks (Gutterspeak, 673): its gate rows take the race; rows of every race (0) stay 0.
+            const auto bytes = ReadFileBytes(client / "DBFilesClient" / "SkillRaceClassInfo.dbc");
+            const auto stock = base.Read("DBFilesClient\\SkillRaceClassInfo.dbc");
+            size_t rows673 = 0, withRace = 0, zeroKept = 0, zeros = 0;
+            if (bytes && stock && bytes->size() == stock->size() && bytes->size() > 20)
+            {
+                uint32_t rows = 0, size = 0;
+                std::memcpy(&rows, bytes->data() + 4, 4);
+                std::memcpy(&size, bytes->data() + 12, 4);
+                for (uint32_t i = 0; i < rows; ++i)
+                {
+                    uint32_t skill = 0, mask = 0, was = 0;
+                    std::memcpy(&skill, bytes->data() + 20 + size_t(i) * size + 4, 4);
+                    std::memcpy(&mask, bytes->data() + 20 + size_t(i) * size + 8, 4);
+                    std::memcpy(&was, stock->data() + 20 + size_t(i) * size + 8, 4);
+                    if (skill == 673 && was) { ++rows673; withRace += (mask & RaceBit(target)) != 0; }
+                    if (!was) { ++zeros; zeroKept += mask == 0; }
+                }
+            }
+            expect(rows673 && withRace == rows673 && zeroKept == zeros,
+                   "a picked skill (Gutterspeak): " + std::to_string(withRace) + " of its " + std::to_string(rows673) + " gate rows take the race; " +
+                       std::to_string(zeros) + " every-race rows untouched");
+            size_t languages = 0;
+            for (const SkillInfo& s : ReadSkills(base)) languages += s.category == 10;
+            expect(languages >= 10, std::to_string(languages) + " languages in the client's skill list");
         }
         size_t present = 0;
         for (const nlohmann::json& f : p.at("files"))
@@ -1692,6 +1866,10 @@ namespace checks
             size_t player = 0, sourcePlayer = 0;
             for (const RaceCatalog::Section& s : back.Sections()) player += s.race == target && (s.flags & 1);
             for (const RaceCatalog::Section& s : sourceRaces.Sections()) sourcePlayer += s.race == sourceRace && (s.flags & 1);
+            size_t looks = 0, stockLike = 0;   // player rows but faces carry 0x10 as stock's do (Death Knight-only ones aside)
+            for (const RaceCatalog::Section& s : back.Sections())
+                if (s.race == target && (s.flags & 1) && !(s.flags & 4) && s.type != 1) { ++looks; stockLike += (s.flags & 0x10) != 0; }
+            expect(looks && stockLike == looks, std::to_string(stockLike) + " of " + std::to_string(looks) + " skin, hair, facial hair and underwear rows carry 0x10 like stock's");
             expect(player && player == sourcePlayer, std::to_string(player) + " looks players may choose, as in the source (" +
                                                          RaceCatalog::LayoutName(sourceRaces.Format()) + ")");
         }

@@ -7,7 +7,9 @@
 #include <cstdio>
 #include <cstring>
 #include <iterator>
+#include <climits>
 #include <map>
+#include <unordered_map>
 
 namespace
 {
@@ -2084,6 +2086,129 @@ bool FormatsSelfTest()
     if (!WdtBigAlpha(wdt) || !WdtHasTile(wdt, 30, 41) || WdtHasTile(wdt, 31, 41)) return false;
     const auto wdl = WdlSetTile(BlankWdl(), 30, 41, &*blankBack);
     return !wdl.empty() && !ParseWdl(wdl)[41 * 64 + 30].empty();
+}
+
+std::vector<uint8_t> WriteIndexedBlp(uint32_t width, uint32_t height, const uint8_t* rgba)
+{
+    // Median cut over the distinct colours (weighted by use) down to 256 boxes; each box's mean is a palette entry.
+    struct Colour { uint8_t c[3]; uint32_t n; };
+    std::unordered_map<uint32_t, uint32_t> uses;
+    const size_t pixels = size_t(width) * height;
+    bool alpha = false;
+    for (size_t p = 0; p < pixels; ++p)
+    {
+        ++uses[rgba[p * 4] | rgba[p * 4 + 1] << 8 | rgba[p * 4 + 2] << 16];
+        alpha = alpha || rgba[p * 4 + 3] != 255;
+    }
+    std::vector<Colour> colours;
+    for (const auto& [key, n] : uses) colours.push_back({ { uint8_t(key), uint8_t(key >> 8), uint8_t(key >> 16) }, n });
+    std::vector<std::pair<size_t, size_t>> boxes{ { 0, colours.size() } };   // [begin, end) into colours
+    auto widest = [&](const std::pair<size_t, size_t>& b, int& channel) {
+        int best = -1;
+        for (int k = 0; k < 3; ++k)
+        {
+            uint8_t lo = 255, hi = 0;
+            for (size_t i = b.first; i < b.second; ++i) { lo = std::min(lo, colours[i].c[k]); hi = std::max(hi, colours[i].c[k]); }
+            if (hi - lo > best) { best = hi - lo; channel = k; }
+        }
+        return best;
+    };
+    while (boxes.size() < 256)
+    {
+        size_t pick = boxes.size();
+        int channel = 0, range = 0;
+        for (size_t b = 0; b < boxes.size(); ++b)
+            if (int k = 0; boxes[b].second - boxes[b].first > 1)
+                if (const int r = widest(boxes[b], k); r > range) { range = r; channel = k; pick = b; }
+        if (pick == boxes.size()) break;   // every box is one colour
+        auto [first, last] = boxes[pick];
+        std::sort(colours.begin() + first, colours.begin() + last, [&](const Colour& a, const Colour& b) { return a.c[channel] < b.c[channel]; });
+        uint64_t total = 0, half = 0;
+        for (size_t i = first; i < last; ++i) total += colours[i].n;
+        size_t split = first + 1;
+        for (size_t i = first; i < last - 1; ++i)
+            if ((half += colours[i].n) * 2 >= total) { split = i + 1; break; }
+        boxes[pick] = { first, split };
+        boxes.push_back({ split, last });
+    }
+    std::vector<std::array<uint8_t, 3>> palette;
+    for (const auto& [first, last] : boxes)
+    {
+        uint64_t sum[3] = {}, n = 0;
+        for (size_t i = first; i < last; ++i)
+        {
+            for (int k = 0; k < 3; ++k) sum[k] += uint64_t(colours[i].c[k]) * colours[i].n;
+            n += colours[i].n;
+        }
+        palette.push_back({ uint8_t(sum[0] / n), uint8_t(sum[1] / n), uint8_t(sum[2] / n) });
+    }
+    // Nearest palette entry, cached per 15-bit colour.
+    std::vector<int16_t> nearest(32768, -1);
+    auto index = [&](const uint8_t* px) {
+        const uint32_t key = (px[0] >> 3) | (px[1] >> 3) << 5 | (px[2] >> 3) << 10;
+        if (nearest[key] < 0)
+        {
+            int best = 0, bestD = INT32_MAX;
+            for (size_t i = 0; i < palette.size(); ++i)
+            {
+                const int dr = int(palette[i][0]) - px[0], dg = int(palette[i][1]) - px[1], db = int(palette[i][2]) - px[2];
+                if (const int d = dr * dr + dg * dg + db * db; d < bestD) { bestD = d; best = int(i); }
+            }
+            nearest[key] = int16_t(best);
+        }
+        return uint8_t(nearest[key]);
+    };
+    // Header and palette (1172 bytes, as Blizzard's), then each mip: indices, then alpha when there is any.
+    std::vector<uint8_t> out(148 + 1024, 0);
+    std::memcpy(out.data(), "BLP2", 4);
+    const uint32_t type = 1;
+    std::memcpy(out.data() + 4, &type, 4);
+    out[8] = 1;                    // compression: palette
+    out[9] = alpha ? 8 : 0;        // alpha depth
+    out[10] = 8;                   // alpha type
+    out[11] = 1;                   // mipmaps
+    std::memcpy(out.data() + 12, &width, 4);
+    std::memcpy(out.data() + 16, &height, 4);
+    for (size_t i = 0; i < palette.size(); ++i)
+    {
+        out[148 + i * 4 + 0] = palette[i][2];
+        out[148 + i * 4 + 1] = palette[i][1];
+        out[148 + i * 4 + 2] = palette[i][0];
+    }
+    std::vector<uint8_t> mip(rgba, rgba + pixels * 4);
+    uint32_t w = width, h = height;
+    for (int level = 0; level < 16; ++level)
+    {
+        const uint32_t offset = uint32_t(out.size());
+        for (size_t p = 0; p < size_t(w) * h; ++p) out.push_back(index(&mip[p * 4]));
+        if (alpha)
+            for (size_t p = 0; p < size_t(w) * h; ++p) out.push_back(mip[p * 4 + 3]);
+        const uint32_t size = uint32_t(out.size()) - offset;
+        std::memcpy(out.data() + 20 + level * 4, &offset, 4);
+        std::memcpy(out.data() + 84 + level * 4, &size, 4);
+        if (w == 1 && h == 1) break;
+        // The next mip: 2 x 2 boxes averaged.
+        const uint32_t nw = std::max(1u, w / 2), nh = std::max(1u, h / 2);
+        std::vector<uint8_t> next(size_t(nw) * nh * 4);
+        for (uint32_t y = 0; y < nh; ++y)
+            for (uint32_t x = 0; x < nw; ++x)
+                for (int k = 0; k < 4; ++k)
+                {
+                    uint32_t s = 0, n = 0;
+                    for (uint32_t dy = 0; dy < 2 && y * 2 + dy < h; ++dy)
+                        for (uint32_t dx = 0; dx < 2 && x * 2 + dx < w; ++dx, ++n) s += mip[((size_t(y) * 2 + dy) * w + x * 2 + dx) * 4 + k];
+                    next[(size_t(y) * nw + x) * 4 + k] = uint8_t(s / n);
+                }
+        mip = std::move(next);
+        w = nw;
+        h = nh;
+    }
+    return out;
+}
+
+bool IsIndexedBlp(const std::vector<uint8_t>& data)
+{
+    return data.size() > 8 && std::memcmp(data.data(), "BLP2", 4) == 0 && data[8] == 1;
 }
 
 std::vector<uint8_t> WriteBlp(uint32_t width, uint32_t height, const uint8_t* rgba)
