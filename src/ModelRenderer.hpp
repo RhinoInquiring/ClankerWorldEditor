@@ -119,6 +119,7 @@ private:
             bool rawLiquid = false;                                             // magma / slime: texture colours as they are
             int16_t uvAnim = -1, weight = -1, color = -1;                       // texture animation links (ModelSkeleton)
             bool twoSided = true;                                               // false: back faces hidden
+            bool envMap = false;                                                // texture coordinates from the normal (reflections)
             std::string textureName;                                            // to load it again when it arrives later (CDN)
         };
         Com<ID3D11Buffer> vertices, indices;
@@ -187,7 +188,7 @@ private:
     Com<ID3D11SamplerState> m_sampler;
     Com<ID3D11RasterizerState> m_noCull, m_cullBack;
     Com<ID3D11DepthStencilState> m_depth, m_depthNoWrite;
-    Com<ID3D11BlendState> m_alphaBlend, m_additive;
+    Com<ID3D11BlendState> m_alphaBlend, m_additive, m_modulate;   // m_modulate: destination x source (x 2 when the shader says so)
 
     std::unordered_map<std::string, std::unique_ptr<GpuMesh>> m_meshes;   // null entry = failed to load
     std::unordered_map<std::string, Instance> m_instances;               // key: kind, unique id, position

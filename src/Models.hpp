@@ -70,7 +70,7 @@ float BatchAlpha(const ModelSkeleton& skeleton, int weight, int color, uint32_t 
 
 struct ModelMesh
 {
-    enum class Blend { Opaque, AlphaTest, AlphaBlend, Additive };
+    enum class Blend { Opaque, AlphaTest, AlphaBlend, Additive, Mod, Mod2x };   // Mod: colour x texture; Mod2x: x 2 (grey keeps it)
     struct Batch
     {
         uint32_t indexStart = 0, indexCount = 0;
@@ -81,6 +81,8 @@ struct ModelMesh
         int16_t uvAnim = -1, weight = -1, color = -1;   // M2: texture transform, transparency weight, colour (ModelSkeleton), -1 = none
         Blend blend = Blend::Opaque;
         bool twoSided = false;
+        uint16_t m2Blend = 0;       // M2 render flag blend: 0 opaque, 1 alpha key, 2 alpha, 3 add, 4 alpha add, 5 mod, 6 mod2x
+        bool envMap = false;        // M2: texture coordinates from the normal (sphere map: reflections), not the mesh's UVs
     };
     std::vector<ModelVertex> vertices;
     std::vector<uint32_t> indices;

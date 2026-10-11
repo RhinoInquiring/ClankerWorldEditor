@@ -121,7 +121,7 @@ namespace
     }
 
     // M2 (version 264) layout, offsets into the MD20 header.
-    constexpr size_t kM2Vertices = 0x3C, kM2Textures = 0x50, kM2RenderFlags = 0x70, kM2TexLookup = 0x80;
+    constexpr size_t kM2Vertices = 0x3C, kM2Textures = 0x50, kM2RenderFlags = 0x70, kM2TexLookup = 0x80, kM2TexCoordLookup = 0x88;
 
     struct M2Vertex { float pos[3]; uint8_t weights[4], bones[4]; float normal[3]; float uv[2][2]; };
     struct M2Texture { uint32_t type, flags; M2Array name; };
@@ -417,6 +417,7 @@ std::optional<ModelMesh> ParseM2(const std::vector<uint8_t>& file, const std::ve
     const auto flags = Elements<M2RenderFlag>(d, kM2RenderFlags);
     const auto texLookup = Elements<uint16_t>(d, kM2TexLookup);
     const auto weightLookup = Elements<uint16_t>(d, kM2TransparencyLookup), uvLookup = Elements<uint16_t>(d, kM2TexTransformLookup);
+    const auto coordLookup = Elements<int16_t>(d, kM2TexCoordLookup);   // -1: sphere-mapped from the normal
     const auto skinVerts = Elements<uint16_t>(skin, 4);
     const auto triangles = Elements<uint16_t>(skin, 12);
     const auto submeshes = Elements<SkinSubmesh>(skin, 28);
@@ -462,12 +463,15 @@ std::optional<ModelMesh> ParseM2(const std::vector<uint8_t>& file, const std::ve
         out.color = b.color;
         if (b.weightCombo < weightLookup.size() && weightLookup[b.weightCombo] != 0xFFFF) out.weight = int16_t(weightLookup[b.weightCombo]);
         if (b.transformCombo < uvLookup.size() && uvLookup[b.transformCombo] != 0xFFFF) out.uvAnim = int16_t(uvLookup[b.transformCombo]);
+        out.envMap = b.uvCombo < coordLookup.size() && coordLookup[b.uvCombo] < 0;
         if (b.material < flags.size())
         {
             const M2RenderFlag& f = flags[b.material];
             out.twoSided = (f.flags & 0x4) != 0;
+            out.m2Blend = f.blend;
             out.blend = f.blend == 0 ? ModelMesh::Blend::Opaque : f.blend == 1 ? ModelMesh::Blend::AlphaTest
-                      : f.blend == 2 ? ModelMesh::Blend::AlphaBlend : ModelMesh::Blend::Additive;
+                      : f.blend == 2 ? ModelMesh::Blend::AlphaBlend : f.blend == 5 ? ModelMesh::Blend::Mod
+                      : f.blend == 6 ? ModelMesh::Blend::Mod2x : ModelMesh::Blend::Additive;
         }
         mesh.batches.push_back(std::move(out));
     }

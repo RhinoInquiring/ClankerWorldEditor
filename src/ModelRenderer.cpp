@@ -22,7 +22,8 @@ namespace
 cbuffer Frame : register(b0) { float4x4 viewProj; float4 lightDir; float4 ambient; float4 diffuse; float4 fogColor; float4 fog; };   // ambient.w: game light on
 // mode x: alpha test threshold (0 = off); y: liquid opacity (0 = not a liquid); z: 1 = liquid keeps its texture colours;
 // w: opacity (texture animation). uvAnim: uv' = (uv - 0.5) * xy + 0.5 + zw (scrolling water, waterfalls).
-cbuffer Batch : register(b1) { float4 mode; float4 uvAnim; };
+// extra x: 1 = texture coordinates from the normal (sphere map); y: 1 modulate, 2 modulate x 2 (blend: dest x src x 2).
+cbuffer Batch : register(b1) { float4 mode; float4 uvAnim; float4 extra; };
 cbuffer Skin : register(b2) { uint4 skin; };     // x: first palette entry of this run's mesh
 struct Bone { row_major float4x4 m; };
 StructuredBuffer<Bone> bones : register(t1);
@@ -37,7 +38,13 @@ VsOut VsMain(VsIn i)
     VsOut o;
     o.pos = mul(mul(mul(float4(i.pos, 1), pose), world), viewProj);
     o.nrm = mul(mul(i.nrm, (float3x3)pose), (float3x3)world);
-    o.uv = (i.uv - 0.5) * uvAnim.xy + 0.5 + uvAnim.zw;
+    float2 uv = i.uv;
+    if (extra.x > 0.5)   // a reflection: the normal as seen by the camera picks the texel
+    {
+        float3 nv = normalize(mul(o.nrm, (float3x3)viewProj) + 1e-6);
+        uv = nv.xy * float2(0.5, -0.5) + 0.5;
+    }
+    o.uv = (uv - 0.5) * uvAnim.xy + 0.5 + uvAnim.zw;
     return o;
 }
 Texture2D tex : register(t0);
@@ -47,6 +54,8 @@ float4 PsMain(VsOut i, bool front : SV_IsFrontFace) : SV_TARGET
     float4 c = tex.Sample(samp, i.uv);
     if (mode.x > 0) clip(c.a - mode.x);
     c.a *= mode.w;
+    if (extra.y > 0.5)   // modulate: fades to the neutral colour (white, or grey for x 2) as its opacity drops; not lit
+        return float4(extra.y < 1.5 ? lerp(1, c.rgb, c.a) * 0.5 : lerp(0.5, c.rgb, c.a), 1);
     if (mode.y > 0)   // a liquid: blue tinted by the grey ripple texture, like terrain water (magma and slime keep their colours)
         return float4(mode.z > 0.5 ? c.rgb : float3(0.2, 0.38, 0.46) * (0.65 + 0.9 * dot(c.rgb, 0.3333)), mode.y);
     float3 n = normalize(i.nrm);
@@ -100,7 +109,7 @@ bool ModelRenderer::Init(ID3D11Device* device, ID3D11DeviceContext* context, Ren
 
     D3D11_BUFFER_DESC cb{ sizeof(FrameConstants), D3D11_USAGE_DYNAMIC, D3D11_BIND_CONSTANT_BUFFER, D3D11_CPU_ACCESS_WRITE };
     device->CreateBuffer(&cb, nullptr, &m_frameCb);
-    cb.ByteWidth = 32;
+    cb.ByteWidth = 48;
     device->CreateBuffer(&cb, nullptr, &m_batchCb);
     cb.ByteWidth = 16;
     device->CreateBuffer(&cb, nullptr, &m_skinCb);
@@ -145,6 +154,12 @@ bool ModelRenderer::Init(ID3D11Device* device, ID3D11DeviceContext* context, Ren
     device->CreateBlendState(&bd, &m_alphaBlend);
     rt.DestBlend = D3D11_BLEND_ONE;
     device->CreateBlendState(&bd, &m_additive);
+    // Modulate: dest x src + src x dest = dest x src x 2; the shader halves plain modulate. Alpha left as it was.
+    rt.SrcBlend = D3D11_BLEND_DEST_COLOR;
+    rt.DestBlend = D3D11_BLEND_SRC_COLOR;
+    rt.SrcBlendAlpha = D3D11_BLEND_ZERO;
+    rt.DestBlendAlpha = D3D11_BLEND_ONE;
+    device->CreateBlendState(&bd, &m_modulate);
     return m_vs && m_ps && m_layout;
 }
 
@@ -197,6 +212,7 @@ ModelRenderer::GpuMesh* ModelRenderer::Mesh(const std::string& name, bool wmo, c
         gpu->batches.back().uvAnim = b.uvAnim;
         gpu->batches.back().weight = b.weight;
         gpu->batches.back().color = b.color;
+        gpu->batches.back().envMap = b.envMap;
         gpu->batches.back().textureName = b.texture;
         if (!b.texture.empty() && std::find(gpu->textureNames.begin(), gpu->textureNames.end(), b.texture) == gpu->textureNames.end())
             gpu->textureNames.push_back(b.texture);
@@ -606,9 +622,9 @@ void ModelRenderer::Submit(const std::vector<Run>& runs, FXMMATRIX viewProj, boo
         memcpy(mapped.pData, &fc, sizeof fc);
         m_context->Unmap(m_frameCb.Get(), 0);
     }
-    float current[8] = { -1, -1, -1, -1, -1, -1, -1, -1 };
-    auto setMode = [&](float alphaTest, float liquid = 0, float raw = 0, float alpha = 1, XMFLOAT4 uv = { 1, 1, 0, 0 }) {
-        const float v[8] = { alphaTest, liquid, raw, alpha, uv.x, uv.y, uv.z, uv.w };
+    float current[12] = { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 };
+    auto setMode = [&](float alphaTest, float liquid = 0, float raw = 0, float alpha = 1, XMFLOAT4 uv = { 1, 1, 0, 0 }, float envMap = 0, float modulate = 0) {
+        const float v[12] = { alphaTest, liquid, raw, alpha, uv.x, uv.y, uv.z, uv.w, envMap, modulate, 0, 0 };
         if (!memcmp(v, current, sizeof v)) return;
         memcpy(current, v, sizeof v);
         if (SUCCEEDED(m_context->Map(m_batchCb.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
@@ -689,7 +705,8 @@ void ModelRenderer::Submit(const std::vector<Run>& runs, FXMMATRIX viewProj, boo
             setBase(base == boneBase.end() ? 0 : base->second);
             for (const auto& b : run.mesh->batches)
             {
-                const bool blended = b.blend == ModelMesh::Blend::AlphaBlend || b.blend == ModelMesh::Blend::Additive;
+                const bool modulate = b.blend == ModelMesh::Blend::Mod || b.blend == ModelMesh::Blend::Mod2x;
+                const bool blended = b.blend == ModelMesh::Blend::AlphaBlend || b.blend == ModelMesh::Blend::Additive || modulate;
                 if (blended != (pass == 1)) continue;
                 const Look* look = run.look;
                 if (look && !look->geosets.empty() && !std::binary_search(look->geosets.begin(), look->geosets.end(), b.geoset)) continue;
@@ -701,8 +718,9 @@ void ModelRenderer::Submit(const std::vector<Run>& runs, FXMMATRIX viewProj, boo
                 const float alpha = skel && (b.weight >= 0 || b.color >= 0) ? BatchAlpha(*skel, b.weight, b.color, time) : 1.0f;
                 const XMFLOAT4 uv = skel && b.uvAnim >= 0 ? UvTransform(*skel, b.uvAnim, time) : XMFLOAT4{ 1, 1, 0, 0 };
                 if (alpha <= 0.001f) continue;
-                setMode(b.blend == ModelMesh::Blend::AlphaTest ? 0.5f : 0.0f, b.liquid ? (b.rawLiquid ? 1.0f : 0.72f) : 0.0f, b.rawLiquid ? 1.0f : 0.0f, alpha, uv);
-                m_context->OMSetBlendState(!blended ? nullptr : b.blend == ModelMesh::Blend::Additive ? m_additive.Get() : m_alphaBlend.Get(),
+                setMode(b.blend == ModelMesh::Blend::AlphaTest ? 0.5f : 0.0f, b.liquid ? (b.rawLiquid ? 1.0f : 0.72f) : 0.0f, b.rawLiquid ? 1.0f : 0.0f, alpha, uv,
+                        b.envMap ? 1.0f : 0.0f, b.blend == ModelMesh::Blend::Mod ? 1.0f : b.blend == ModelMesh::Blend::Mod2x ? 2.0f : 0.0f);
+                m_context->OMSetBlendState(!blended ? nullptr : modulate ? m_modulate.Get() : b.blend == ModelMesh::Blend::Additive ? m_additive.Get() : m_alphaBlend.Get(),
                                            nullptr, 0xffffffff);
                 m_context->RSSetState(b.twoSided ? m_noCull.Get() : m_cullBack.Get());
                 m_context->PSSetShaderResources(0, 1, &texture);
