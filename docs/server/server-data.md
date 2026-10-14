@@ -12,7 +12,11 @@ the maps the project exports.
 For each map the project changes (terrain, objects, water, roads):
 
 1. **Stages** a client that holds only that map: its final tiles (the project's export where edited, the client's
-   elsewhere), every building and model they place, and the few DBC files the tools read.
+   elsewhere), every building and model they place, and the few DBC files the tools read. The tools read 3.3.5a
+   shapes only, so newer-client models and WMOs (an export for a WXL client keeps them) are converted for the staged
+   client (`Downport`): the server gets the same collision whichever client the export is for.
+   `--serverdata-check` with `WWE_MD21=1` puts the map's doodads in the export as chunked models and still expects
+   the server's own files.
 2. Runs **AzerothCore's own tools** from the server folder on it: `map_extractor`, `vmap4_extractor`,
    `vmap4_assembler`, then `mmaps_generator` for the edited tiles and their neighbours (or every tile, with
    *Rebuild the whole navmesh*). The tools see only that map, so a continent takes under a minute, not the hours a

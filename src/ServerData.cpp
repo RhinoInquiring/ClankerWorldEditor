@@ -1,5 +1,6 @@
 #include "ServerData.hpp"
 
+#include "Downport.hpp"
 #include "Formats.hpp"
 #include "Models.hpp"
 
@@ -181,10 +182,20 @@ bool ServerDataJob::BuildMap(const Options& o, const ServerMap& map, MpqChain& c
     if (ec) { Log("Cannot make " + o.work.string() + ": " + ec.message()); return false; }
 
     // The files: the project's export first, then the sources.
-    auto read = [&](const std::string& name) -> std::optional<std::vector<uint8_t>> {
+    auto file = [&](const std::string& name) -> std::optional<std::vector<uint8_t>> {
         if (Lower(name) == "dbfilesclient\\gameobjectdisplayinfo.dbc") return EmptyDbc(19);
         if (auto f = ReadFile(o.exported / name)) return f;
         return chain.Read(name);
+    };
+    // The extractors read 3.3.5a shapes only: newer models and WMOs (a WXL export keeps them) are converted here, so the
+    // server gets the same collision whichever client the export is for.
+    auto read = [&](const std::string& name) -> std::optional<std::vector<uint8_t>> {
+        auto f = file(name);
+        if (!f || !IsNewerFormat(name, *f)) return f;
+        std::vector<std::string> notes;
+        std::vector<uint8_t> converted = Downport(name, *f, [&](uint32_t id) { return chain.NameOf(id); }, file, notes);
+        if (converted.empty()) { Log("Cannot convert " + name + " for the extractors: " + (notes.empty() ? "unknown" : notes.back())); return f; }
+        return converted;
     };
 
     SetStatus("[" + map.directory + "] Listing the map's tiles and models...");

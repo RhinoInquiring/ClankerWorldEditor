@@ -974,6 +974,39 @@ namespace checks
             snprintf(file, sizeof file, "%03u%02d%02d.map", m.id, std::stoi(y), std::stoi(x));
             raised = file;
         }
+        // WWE_MD21=1: every tile doodad in the export as a chunked (MD21) model, as a WXL export keeps newer ones; the job
+        // must convert them for the extractors, so the server's files still come out the same.
+        if (std::getenv("WWE_MD21"))
+        {
+            MpqChain chain;
+            chain.Open(arg(2));
+            const std::string mapPath = "World\\Maps\\" + m.directory + "\\" + m.directory;
+            std::set<std::string> models;
+            if (const auto wdt = chain.Read(mapPath + ".wdt"))
+            {
+                const std::vector<bool> present = WdtTiles(*wdt);
+                for (int k = 0; k < 4096; ++k)
+                    if (present[size_t(k)])
+                        if (const auto bytes = chain.Read(mapPath + "_" + std::to_string(k % 64) + "_" + std::to_string(k / 64) + ".adt"))
+                            if (const auto adt = ParseAdt(*bytes, false))
+                                for (const DoodadPlacement& d : adt->doodads) models.insert(M2Name(d.model));
+            }
+            for (const std::string& name : models)
+            {
+                const auto body = chain.Read(name);
+                if (!body) continue;
+                std::vector<uint8_t> md21 = { 'M', 'D', '2', '1', 0, 0, 0, 0 };
+                const uint32_t size = uint32_t(body->size());
+                std::memcpy(md21.data() + 4, &size, 4);
+                md21.insert(md21.end(), body->begin(), body->end());
+                std::string rel = name;
+                std::replace(rel.begin(), rel.end(), '\\', '/');
+                const std::filesystem::path dest = o.exported / std::filesystem::path(rel);
+                std::filesystem::create_directories(dest.parent_path(), ec);
+                std::ofstream(dest, std::ios::binary).write(reinterpret_cast<const char*>(md21.data()), std::streamsize(md21.size()));
+            }
+            printf("export holds %zu doodad model(s) as MD21\n", models.size());
+        }
         ServerDataJob job;
         const auto t0 = std::chrono::steady_clock::now();
         job.Start(o, { m });
