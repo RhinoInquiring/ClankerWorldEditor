@@ -38,6 +38,23 @@ lists in `report.txt` what was converted with a loss (particles, newer shaders).
 use the same CDN cache. A rerun after an interruption skips what is already written; a new client build needs the
 `staging` folder deleted first.
 
+### For a WXL client
+
+File > Project settings > **Export for: WXL client** keeps what WXL's extensions read as it is, and still converts
+what they would lose part of (`WxlReadsAsIs`, `Downport.cpp`):
+
+| Newer file | WXL client export | Why |
+| --- | --- | --- |
+| Chunked model (`MD21`), its skins and `.anim` files | Kept (particles, newer shaders stay) | wxl-modern-m2 reads them |
+| Model with an external skeleton (`SKID`) | Converted | wxl-modern-m2 refuses it |
+| WMO root and its groups | Kept | wxl-modern-wmo reads them (four-layer materials stay) |
+| WMO with `MODI` doodads, `GFID` groups, a `MOSI` skybox, or a group with `MLIQ` water or `MOVX` triangles | Converted | wxl-modern-wmo leaves those out |
+
+Kept files name their textures by FileDataID, so the export also writes `DBFilesClient\TextureFilePath.db2` and
+`ModelFilePath.db2`: wxl-db2's tables (WDC1, `{id, path}` rows, the layout WarcraftXL's DB2Gen writes), holding the
+ids the kept files use, merged over the client's own tables when it has them. Players need wxl-db2,
+wxl-modern-m2 and wxl-modern-wmo.
+
 ## Roles
 
 - **Project base**: what you edit, export against and see. It starts as your client folder and can stack more on top

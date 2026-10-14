@@ -1,5 +1,7 @@
 #include "Downport.hpp"
 
+#include "Models.hpp"
+
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
@@ -529,6 +531,80 @@ std::vector<uint8_t> Downport(const std::string& name, std::vector<uint8_t> byte
     }
     if (ends(".wmo")) return !IsNewerFormat(name, bytes) ? bytes : IsWmoGroup(bytes) ? DownportWmoGroup(bytes, notes, name) : DownportWmoRoot(bytes, nameOf, notes, name);
     return bytes;
+}
+
+namespace
+{
+    /// Each top-level chunk of a chunked (MD21) M2: magic at `pos`, body after it.
+    template <class Fn>
+    void EachM2Chunk(const std::vector<uint8_t>& d, Fn&& fn)
+    {
+        for (size_t pos = 0; pos + 8 <= d.size();)
+        {
+            uint32_t size = 0;
+            ReadAt(d, pos + 4, size);
+            if (size > d.size() - pos - 8) break;
+            fn(pos, size);
+            pos += 8 + size;
+        }
+    }
+}
+
+bool WxlReadsAsIs(const std::string& name, const std::vector<uint8_t>& d, const ReadGameFile& read)
+{
+    const std::string lower = Lower(name);
+    if (lower.ends_with(".m2"))
+    {
+        if (!Magic(d, 0, "MD21")) return false;
+        bool skeleton = false;   // wxl-modern-m2 refuses a model with an external skeleton
+        EachM2Chunk(d, [&](size_t pos, uint32_t) { skeleton |= Magic(d, pos, "SKID"); });
+        return !skeleton;
+    }
+    if (!lower.ends_with(".wmo") || IsWmoGroup(d)) return false;
+    // wxl-modern-wmo leaves out MODI doodads, GFID groups, the MOSI skybox, and groups' MLIQ water and MOVX triangles.
+    const Chunks c = ReadChunks(d, 0, d.size());
+    const auto* modd = First(c, Tag("MODD"));
+    if (First(c, Tag("GFID")) || First(c, Tag("MOSI")) || (First(c, Tag("MODI")) && modd && !modd->empty())) return false;
+    uint32_t groups = 0;
+    float bounds[6];
+    if (!WmoRootInfo(d, groups, bounds)) return false;
+    for (uint32_t g = 0; g < groups; ++g)
+    {
+        const auto group = read ? read(WmoGroupFile(name, d, g)) : std::nullopt;
+        if (!group) continue;
+        const auto top = ReadChunks(*group, 0, group->size());
+        const auto* mogp = First(top, Tag("MOGP"));
+        if (!mogp || mogp->size() < 68) continue;
+        const auto inner = ReadChunks(*mogp, 68, mogp->size());
+        if (First(inner, Tag("MLIQ")) || First(inner, Tag("MOVX"))) return false;
+    }
+    return true;
+}
+
+std::vector<uint32_t> WxlFileIds(const std::string& name, const std::vector<uint8_t>& d)
+{
+    std::vector<uint32_t> ids;
+    auto add = [&](uint32_t id) { if (id) ids.push_back(id); };
+    if (Magic(d, 0, "MD21"))
+        EachM2Chunk(d, [&](size_t pos, uint32_t size) {
+            if (Magic(d, pos, "TXID"))
+                for (size_t at = pos + 8; at + 4 <= pos + 8 + size; at += 4) { uint32_t id = 0; ReadAt(d, at, id); add(id); }
+        });
+    else if (Lower(name).ends_with(".wmo") && !IsWmoGroup(d))
+    {
+        const Chunks c = ReadChunks(d, 0, d.size());
+        const auto* momt = First(c, Tag("MOMT"));
+        if (!momt || First(c, Tag("MOTX"))) return ids;   // with MOTX, the texture fields are name offsets
+        for (size_t at = 0; at + 64 <= momt->size(); at += 64)
+        {
+            uint32_t shader = 0, id = 0;
+            ReadAt(*momt, at + 4, shader);
+            for (size_t field : { 0x0C, 0x18, 0x24 }) { ReadAt(*momt, at + field, id); add(id); }
+            if (shader == 23)   // four layers: diffuse D, environment, heights A..D
+                for (size_t field = 0x28; field <= 0x3C; field += 4) { ReadAt(*momt, at + field, id); add(id); }
+        }
+    }
+    return ids;
 }
 
 bool DownportSelfTest()

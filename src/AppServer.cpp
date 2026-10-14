@@ -378,7 +378,7 @@ void App::RunChecks()
     if (!error.empty()) m_problems.push_back({ Problem::Severity::Error, "Terrain", error });
     m_terrain.TakeDroppedEffects();   // counted per tile in the problems instead
     SetCdnAsync(false);   // complete: wait for CDN files
-    const AssetReport assets = CopyMissingAssets(m_mpq, tiles, out);
+    const AssetReport assets = CopyMissingAssets(m_mpq, tiles, out, false, m_project->wxlExport ? ExportTarget::Wxl : ExportTarget::Client335);
     SetCdnAsync(true);
     for (const auto& missing : assets.missing)
         m_problems.push_back({ Problem::Severity::Error, "Assets", "Referenced by an edited tile, found in no client: " + missing });
@@ -493,6 +493,7 @@ void App::OpenProjectSettings()
     if (!m_project) return;
     m_settingsName = m_project->name;
     m_settingsAuthor = m_project->author;
+    m_settingsWxl = m_project->wxlExport;
     m_settingsRanges = m_project->idRanges;
     m_settingsUse.clear();
     for (const SpawnAdapter* spawns : { &m_creatures, &m_gameobjects })
@@ -514,6 +515,14 @@ void App::DrawProjectSettingsModal()
     ImGui::SetNextItemWidth(field);
     ImGui::InputText("Author", &m_settingsAuthor);
     ImGui::TextColored(kQuiet, "Client: %s", m_project->clientDir.c_str());
+
+    ImGui::SeparatorText("Export for");
+    if (ImGui::RadioButton("3.3.5a client", !m_settingsWxl)) m_settingsWxl = false;
+    ImGui::SetItemTooltip("Files from newer clients are converted to 3.3.5a shapes (particles and newer shaders are lost).");
+    ImGui::SameLine();
+    if (ImGui::RadioButton("WXL client", m_settingsWxl)) m_settingsWxl = true;
+    ImGui::SetItemTooltip("Files from newer clients that wxl-modern-m2 / wxl-modern-wmo read ship as they are, with "
+                          "TextureFilePath.db2 / ModelFilePath.db2 for wxl-db2; the rest are converted. Players need those extensions.");
 
     ImGui::SeparatorText("ID ranges");
     ImGui::TextWrapped("New rows take ids from these ranges only, and an id never changes once a change records it. "
@@ -595,6 +604,7 @@ void App::DrawProjectSettingsModal()
     {
         m_project->name = m_settingsName;
         m_project->author = m_settingsAuthor;
+        m_project->wxlExport = m_settingsWxl;
         m_project->idRanges = m_settingsRanges;
         if (std::string error; m_project->Save(error)) Log("Project settings saved.");
         else Log("%s", error.c_str());

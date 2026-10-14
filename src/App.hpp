@@ -1064,6 +1064,7 @@ private:
     bool m_setupOpen = false;
     bool m_settingsOpen = false;                       // Project settings dialog (AppServer.cpp)
     std::string m_settingsName, m_settingsAuthor;
+    bool m_settingsWxl = false;
     std::map<std::string, Project::IdRange> m_settingsRanges;
     std::map<std::string, SpawnAdapter::RangeUse> m_settingsUse;
     ServerProfile m_setup;                   // the wizard's working copy

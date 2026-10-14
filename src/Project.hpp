@@ -58,6 +58,9 @@ struct Project
     /// The patch MPQ the project builds (out/<name>) and installs (client Data, in the locale folder for a
     /// patch-<locale>-X name). patch-enUS-Z loads after every patch-X, so the project's files win over the modules'.
     std::string patchName = "patch-enUS-Z.MPQ";
+    /// Export for a WXL client: newer-client files its extensions read ship as they are, with wxl-db2's FileDataID
+    /// tables (Assets.hpp ExportTarget). Off: everything converted for a plain 3.3.5a client.
+    bool wxlExport = false;
     std::filesystem::path PatchOutPath() const { return dir / "out" / patchName; }
     /// Where the client looks for it: Data\<locale>\ for patch-<locale>-X.MPQ, else Data\.
     std::filesystem::path PatchInstallPath() const;

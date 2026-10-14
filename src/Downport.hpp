@@ -24,5 +24,15 @@ std::vector<uint8_t> Downport(const std::string& name, std::vector<uint8_t> byte
 /// True when the file needs Downport (a newer format than 3.3.5a's).
 bool IsNewerFormat(const std::string& name, const std::vector<uint8_t>& bytes);
 
+/// For a WXL client: true when its extensions (wxl-modern-m2, wxl-modern-wmo) read this newer file as it is, losing
+/// nothing — an MD21 model without an external skeleton, or a WMO root without MODI doodads, GFID groups or a MOSI
+/// skybox whose groups have no MLIQ water or MOVX triangles (`read` fetches the groups). Skins, .anim files and WMO
+/// groups follow their model or root.
+bool WxlReadsAsIs(const std::string& name, const std::vector<uint8_t>& bytes, const ReadGameFile& read);
+
+/// The FileDataIDs WXL resolves through wxl.fdid in a file kept as it is: an MD21 model's TXID textures, a modern WMO
+/// root's MOMT textures (all nine for the four-layer shader 23).
+std::vector<uint32_t> WxlFileIds(const std::string& name, const std::vector<uint8_t>& bytes);
+
 /// Runs the converters on synthetic files; false on the first wrong result.
 bool DownportSelfTest();

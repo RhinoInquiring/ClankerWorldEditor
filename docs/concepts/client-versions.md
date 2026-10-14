@@ -13,7 +13,7 @@ everything past that point (the windows, export, the server) only ever sees 3.3.
 | --- | --- | --- | --- |
 | 1.12 (5875) | Race tables: `ChrRaces`, `CharSections`, `CharHairGeosets`, `CharacterFacialHairStyles`, `CharBaseInfo`, `CharStartOutfit`, `CreatureDisplayInfo`, `CreatureModelData` | `Races.cpp` (`Classic()` layouts, `RaceCatalog::Load`) | Read in the 1.12 layout, named as 3.3.5 names them; see the meaning rules below |
 | 1.12 | Models (M2 v256), textures | outside the editor: wow-upport | The converted archives are added as a source (`MPQs-upported\...`) |
-| Newer (CASC: Classic, retail) | M2 (MD21), skins, `.anim`, WMO (FileDataIDs), split ADT, WDT | `Downport.cpp`, `MergeSplitAdt`, `DowngradeWdt` (`Formats.cpp`) | On read and on export (`CopyMissingAssets`, `--casc-to-mpq`) |
+| Newer (CASC: Classic, retail) | M2 (MD21), skins, `.anim`, WMO (FileDataIDs), split ADT, WDT | `Downport.cpp`, `MergeSplitAdt`, `DowngradeWdt` (`Formats.cpp`) | On read and on export (`CopyMissingAssets`, `--casc-to-mpq`); an export for a WXL client keeps what WXL reads ([sources](sources.md#for-a-wxl-client)) |
 | Newer | DB2 tables | not yet | |
 | 2.4.3, 4.x, 5.x clients (MPQ) | anything | not yet | |
 

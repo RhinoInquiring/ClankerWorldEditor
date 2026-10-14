@@ -723,11 +723,15 @@ void App::Export(bool playTest)
     if (const size_t dropped = m_terrain.TakeDroppedEffects())
         Log("%zu texture layer(s) had ground effects this client does not know (from another map); exported without them.", dropped);
     SetCdnAsync(false);   // the patch must be complete: wait for CDN files
-    const AssetReport assets = CopyMissingAssets(m_mpq, tiles, out);
+    AssetReport assets = CopyMissingAssets(m_mpq, tiles, out, false, m_project->wxlExport ? ExportTarget::Wxl : ExportTarget::Client335);
     SetCdnAsync(true);
     if (!assets.copied.empty()) Log("Added %zu file(s) from other clients that this client lacks (e.g. %s).", assets.copied.size(), assets.copied[0].c_str());
+    if (!assets.kept.empty()) Log("WXL: %zu newer-client file(s) kept as they are.", assets.kept.size());
     if (!assets.converted.empty()) Log("Converted %zu newer-client file(s) to 3.3.5a; %zu change(s) noted in Problems.", assets.converted.size(), assets.notes.size());
-    for (const auto& n : assets.notes) m_problems.push_back({ Problem::Severity::Warning, "Assets", "3.3.5a conversion: " + n });
+    if (m_project->wxlExport)
+        for (const std::string& table : WriteFileIdTables(m_mpq, assets.fileIds, out, assets.notes))
+            Log("WXL: %s names %zu FileDataID(s) for wxl-db2 (with the client's own rows).", table.c_str(), assets.fileIds.size());
+    for (const auto& n : assets.notes) m_problems.push_back({ Problem::Severity::Warning, "Assets", (m_project->wxlExport ? "WXL export: " : "3.3.5a conversion: ") + n });
     for (const SpawnAdapter* spawns : { &m_creatures, &m_gameobjects })
     {
         if (!spawns->ExportSql(m_project->dir / "out" / "server", error)) Log("%s", error.c_str());

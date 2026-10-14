@@ -13,6 +13,7 @@ bool Project::Save(std::string& error) const
     nlohmann::json j = { { "name", name }, { "clientDir", clientDir }, { "author", author }, { "format", 1 } };
     if (!serverProfile.empty()) j["serverProfile"] = serverProfile;
     j["patchName"] = patchName;
+    if (wxlExport) j["wxlExport"] = true;
     for (const auto& [kind, r] : idRanges) j["idRanges"][kind] = { r.first, r.last };
     auto source = [](const Source& s) {
         nlohmann::json layers = nlohmann::json::array();
@@ -48,6 +49,7 @@ std::optional<Project> Project::Load(const fs::path& dir, std::string& error)
         p.author = j.value("author", "");
         p.serverProfile = j.value("serverProfile", "");
         p.patchName = j.value("patchName", p.patchName);
+        p.wxlExport = j.value("wxlExport", false);
         if (j.contains("idRanges"))
             for (const auto& [kind, r] : j["idRanges"].items()) p.idRanges[kind] = { r.at(0).get<uint32_t>(), r.at(1).get<uint32_t>() };
         else   // format before ranges: an open start per table

@@ -498,7 +498,8 @@ namespace checks
         std::vector<std::filesystem::path> tiles;
         terrain.Export(out, error, &tiles);
         const auto t0 = std::chrono::steady_clock::now();
-        const AssetReport report = CopyMissingAssets(mpq, tiles, out);
+        const bool wxl = std::getenv("WWE_WXL") != nullptr;   // WWE_WXL=1: export for a WXL client
+        AssetReport report = CopyMissingAssets(mpq, tiles, out, false, wxl ? ExportTarget::Wxl : ExportTarget::Client335);
         const float ms = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - t0).count();
         printf("pasted %zu chunks, %zu doodads, %zu WMOs from the other client; exported %zu tile(s)\n", clip.chunks.size(), clip.doodads.size(),
                clip.wmos.size(), tiles.size());
@@ -506,6 +507,37 @@ namespace checks
         for (size_t i = 0; i < report.copied.size() && i < 12; ++i) printf("  + %s\n", report.copied[i].c_str());
         for (const auto& m : report.missing) printf("  ! %s\n", m.c_str());
         printf("converted for 3.3.5a: %zu file(s)\n", report.converted.size());
+        // WXL: the kept files and the FileDataID tables, read back as wxl-db2 would.
+        std::map<uint32_t, std::string> table;
+        size_t badKept = 0;
+        if (wxl)
+        {
+            const auto tables = WriteFileIdTables(mpq, report.fileIds, out, report.notes);
+            for (const std::string& t : tables)
+            {
+                std::string rel = t;
+                std::replace(rel.begin(), rel.end(), '\\', '/');
+                const auto rows = ReadFileIdTable(ReadFileBytes(out / std::filesystem::path(rel)).value_or(std::vector<uint8_t>{}));
+                if (!rows) { ++badKept; printf("  unreadable table: %s\n", t.c_str()); continue; }
+                table.insert(rows->begin(), rows->end());
+            }
+            printf("WXL: %zu file(s) kept as they are, %zu FileDataID(s) in %zu table(s)\n", report.kept.size(), table.size(), tables.size());
+            for (size_t i = 0; i < report.kept.size() && i < 12; ++i) printf("  = %s\n", report.kept[i].c_str());
+            for (const auto& [id, path] : report.fileIds)
+                if (const auto it = table.find(id); it == table.end() || it->second != path) { ++badKept; printf("  table lacks %u -> %s\n", id, path.c_str()); }
+            for (const std::string& k : report.kept)   // what WXL is handed must be what it reads
+            {
+                std::string rel = k;
+                std::replace(rel.begin(), rel.end(), '\\', '/');
+                const auto b = ReadFileBytes(out / std::filesystem::path(rel)).value_or(std::vector<uint8_t>{});
+                const std::string lower = Catalog::Normalize(k);
+                const bool group = lower.size() > 8 && lower[lower.size() - 8] == '_' && std::isdigit((unsigned char)lower[lower.size() - 5]);
+                if ((lower.ends_with(".m2") || (lower.ends_with(".wmo") && !group)) && !WxlReadsAsIs(k, b, [&](const std::string& n) { return mpq.Read(n); }))
+                { ++badKept; printf("  WXL cannot read: %s\n", k.c_str()); }
+            }
+        }
+        // FileDataIDs resolve only through the written tables in WXL, as in the client.
+        const auto nameOf = [&](uint32_t id) { const auto it = table.find(id); return it == table.end() ? std::string() : it->second; };
         for (size_t i = 0; i < report.notes.size() && i < 20; ++i) printf("  ~ %s\n", report.notes[i].c_str());
         if (report.notes.size() > 20) printf("  ~ ... %zu more\n", report.notes.size() - 20);
         size_t stillNewer = 0;   // every converted file must now be in 3.3.5a shape
@@ -540,7 +572,7 @@ namespace checks
         {
             auto [name, bytes] = std::move(todo.back());
             todo.pop_back();
-            for (const std::string& r : AssetReferences(mpq, name, bytes))
+            for (const std::string& r : FileReferences(mpq, name, bytes, nameOf))
             {
                 if (!seen.insert(Catalog::Normalize(r)).second) continue;
                 auto b = resolve(r);
@@ -553,7 +585,7 @@ namespace checks
         }
         std::filesystem::remove_all(out, ec);
         printf("verification: %zu references resolve from the base client plus the export, %zu unresolved\n", checked, unresolved);
-        return unresolved || stillNewer ? 1 : 0;
+        return unresolved || stillNewer || badKept ? 1 : 0;
     }
 
     /// `--render <data dir> <map> <x> <y> <out.png> [yaw] [pitch] [height above ground] [fx] [fz]`:
