@@ -131,6 +131,8 @@ public:
     /// The file from the highest-priority archive that has it, else from the fallback chains (other clients),
     /// so assets pasted from another client still load.
     std::optional<std::vector<uint8_t>> Read(const std::string& name) const;
+    /// The same without the project's own files (SetProjectFiles): what the file was before the project changed it.
+    std::optional<std::vector<uint8_t>> ReadBase(const std::string& name) const;
     /// True when this chain's own archives have the file (fallbacks not consulted).
     bool HasOwn(const std::string& name) const;
     /// The layer (index into what Open was given) whose archive serves the file; overlay and fallbacks not consulted.

@@ -50,7 +50,8 @@ public:
     bool HasTile(int key) const { return m_tileInstances.count(key) != 0; }
     std::vector<int> TileKeys() const;
 
-    struct DrawSettings { bool doodads = true, wmos = true; float distance = 600.0f; int layer = 0; };
+    /// `attached`: a WMO's own doodads count as part of it (Pick); off: only building surfaces.
+    struct DrawSettings { bool doodads = true, wmos = true; float distance = 600.0f; int layer = 0; bool attached = true; };
     void Draw(DirectX::FXMMATRIX viewProj, const DirectX::XMFLOAT3& eye, const DrawSettings& settings);
 
     /// Nearest object along a ray (triangle-exact), within `maxDistance`; previews (negative tile keys) are skipped.
@@ -60,6 +61,20 @@ public:
     std::optional<Hit> PickTile(int key, DirectX::FXMVECTOR origin, DirectX::FXMVECTOR dir, float maxDistance) const;
     /// The eight corners of an object's model box in the world; false when it is not loaded.
     bool Corners(bool wmo, uint32_t uid, DirectX::XMFLOAT3 corners[8]) const;
+    /// The nearest of one WMO placement's own doodads (index into its mesh's doodad list) along a ray.
+    struct DoodadHit { uint32_t index; float distance; };
+    std::optional<DoodadHit> PickDoodad(uint32_t wmoUid, DirectX::FXMVECTOR origin, DirectX::FXMVECTOR dir, float maxDistance) const;
+    /// The corners of one of a WMO placement's doodads; false when it is not drawn.
+    bool DoodadCorners(uint32_t wmoUid, uint32_t index, DirectX::XMFLOAT3 corners[8]) const;
+    /// Swaps a loaded WMO's doodads and sets (an edit in progress or applied); tiles placing it show it once added
+    /// again. False when the WMO is not loaded.
+    bool SetWmoDoodads(const std::string& wmo, std::vector<ModelMesh::Doodad> doodads, std::vector<ModelMesh::DoodadSet> sets);
+    /// Drops a model so its file is read again on next use (its file changed), with every tile that draws it: returns
+    /// those tile keys, to be added again.
+    std::vector<int> Forget(const std::string& name);
+    /// The group of one WMO placement under a ray (its own triangles, not its doodads): group index, distance.
+    struct GroupHit { uint16_t group; float distance; };
+    std::optional<GroupHit> PickWmoGroup(uint32_t wmoUid, DirectX::FXMVECTOR origin, DirectX::FXMVECTOR dir, float maxDistance) const;
     /// Where an M2 attachment point (helmet 11, hands 1 / 2, ...) sits in the model, posed at its first animation
     /// frame: attachment offset x bone pose, in editor axes. Null when the model or the point is missing.
     /// `pose` / `timeMs`: posed by that skeleton at that time instead (the NPC viewer).
@@ -116,6 +131,7 @@ private:
         {
             uint32_t start, count; ID3D11ShaderResourceView* texture; ModelMesh::Blend blend; uint32_t textureType; uint16_t geoset;
             uint16_t liquid = 0;                                                // WMO liquid: LiquidType id
+            uint16_t group = 0;                                                 // WMO: its group
             const std::vector<ID3D11ShaderResourceView*>* frames = nullptr;   // its animation (owned by Renderer)
             bool rawLiquid = false;                                             // magma / slime: texture colours as they are
             int16_t uvAnim = -1, weight = -1, color = -1;                       // texture animation links (ModelSkeleton)
@@ -149,6 +165,7 @@ private:
         uint32_t uid = 0;
         const Look* look = nullptr;   // null: the model's own textures, every submesh
         bool attached = false;        // a WMO's doodad: picks as its WMO, no outline or box select of its own
+        int32_t doodad = -1;          // attached: its index in the WMO's doodad list
     };
     /// A ModelLook resolved to GPU textures (shared by every instance with the same look).
     struct Look

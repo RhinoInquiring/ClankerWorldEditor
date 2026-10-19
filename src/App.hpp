@@ -26,6 +26,7 @@
 #include "Races.hpp"
 #include "CreatureModels.hpp"
 #include "Triggers.hpp"
+#include "WmoEdit.hpp"
 
 #include <d3d11.h>
 #include <chrono>
@@ -447,6 +448,69 @@ private:
     std::optional<Transformable> LightTransform();
     std::optional<Transformable> SoundTransform();
     std::optional<Transformable> RoadTransform();
+    std::optional<Transformable> InteriorTransform();
+
+    // A WMO's own doodads (AppInterior.cpp): the furniture inside one building placement, edited in the Objects tool.
+    struct Interior
+    {
+        uint32_t wmoUid = 0;          // the placement being edited
+        std::string wmo;              // its model: the WMO whose doodads change (a project copy, or the original in place)
+        WmoDoodads live;              // what the viewport shows: the saved doodads plus the edit in progress
+        WmoDoodads start;             // as they were when a handle drag began
+        std::vector<uint32_t> ids;    // drawn doodad index -> id
+        std::set<uint32_t> sel;       // selected ids
+        std::optional<uint32_t> hover;
+        uint32_t set = 0;             // the set the list shows and new doodads join
+        std::optional<DirectX::XMFLOAT3> point;   // where an added doodad would stand (building floor or ground)
+        char filter[64] = {};
+        char newSet[20] = {};
+        bool groups = false;                       // picking and moving the building's groups instead of its doodads
+        std::set<uint32_t> groupSel;               // selected slot ids
+        std::optional<uint32_t> groupHover;
+        std::optional<DirectX::XMFLOAT4X4> groupDrag;   // a handle drag in progress: the move so far (editor axes)
+    };
+    std::optional<Interior> m_interior;
+    WmoEditAdapter m_wmoEdits;
+    /// Groups copied from a building, with the doodads standing in them, ready to paste into another.
+    struct WmoClip
+    {
+        std::map<uint32_t, WmoSlot> slots;         // by the id they had; `from` always named
+        std::vector<WmoDoodads::Doodad> doodads;   // groups name those ids; sets index `sets`
+        std::vector<std::string> sets;
+        WmoBox box{};                              // all of them, in the building they came from
+        std::string label;
+    };
+    std::optional<WmoClip> m_wmoClip;
+    /// The file slots without `from` read from: the copy's source, or the building itself when not edited yet.
+    std::string InteriorBase() const;
+    /// Every slot of the session's building with its box (WoW axes, the building's own space).
+    std::vector<std::pair<uint32_t, WmoBox>> InteriorBoxes();
+    /// The doodads standing in these slots: listed by one of them, or (listing none) inside one's box.
+    std::set<uint32_t> DoodadsInSlots(const std::set<uint32_t>& slots);
+    void CopyGroups(bool cut);
+    void PasteGroups();
+    void DeleteGroups();
+    std::optional<Transformable> InteriorGroupTransform();
+    void BeginInterior(uint32_t wmoUid);
+    /// The placement's WMO becomes editable: a project copy only this placement uses, or the original (every placement).
+    void MakeInteriorEditable(bool inPlace);
+    /// The edited placement's matrix in the world; none when it is not loaded.
+    std::optional<DirectX::XMFLOAT4X4> InteriorWorld() const;
+    /// The armed catalog doodad as it would be added at `point` (editor axes, world): the building's axes, the set
+    /// shown, the placing turn and scale, lit like the nearest doodad of that set. None when the placement is not loaded.
+    std::optional<WmoDoodads::Doodad> InteriorDoodadAt(const DirectX::XMFLOAT3& point) const;
+    /// Shows m_interior->live in the viewport (no change recorded).
+    void PreviewInterior();
+    /// Records m_interior->live as one change (nothing when it equals the saved doodads).
+    void CommitInterior(const std::string& label);
+    /// Hover, click select, catalog add; called by the viewport while the Objects tool edits a building.
+    void InteriorViewport(DirectX::FXMVECTOR p0, DirectX::FXMVECTOR dir, const ImVec2& origin, const ImVec2& size);
+    void DrawInteriorPanel();
+    void InteriorOutlines(std::vector<LineVertex>& lines) const;
+    /// Edited WMOs changed (an edit, undo, redo, a project opened): the renderer and the project's file layer follow.
+    void UpdateEditedWmos();
+    /// Re-adds the models of every loaded tile placing `wmo` (its doodads changed).
+    void ReloadTilesWith(const std::string& wmo);
 
     // atmosphere: light volumes (Light.dbc) and their colour, fog and sky sets (AppLights.cpp)
     bool m_gameLight = false;          // viewport shows the game's light at the camera (View menu, Lights tool)

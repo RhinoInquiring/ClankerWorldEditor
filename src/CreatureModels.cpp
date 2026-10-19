@@ -374,7 +374,8 @@ std::vector<Change> AddLooseCreatureModel(const std::filesystem::path& file, con
 }
 
 std::shared_ptr<const MpqChain::ProjectFiles> ProjectFilesLayer(const std::filesystem::path& assets, const std::map<uint32_t, nlohmann::json>& packages,
-                                                                const std::function<const MpqChain*(const std::string&)>& source, const MpqChain& client)
+                                                                const std::function<const MpqChain*(const std::string&)>& source, const MpqChain& client,
+                                                                const std::filesystem::path& generated)
 {
     namespace fs = std::filesystem;
     struct File { fs::path disk; const MpqChain* chain = nullptr; std::string from; std::map<std::string, std::string> renames; };
@@ -386,6 +387,9 @@ std::shared_ptr<const MpqChain::ProjectFiles> ProjectFilesLayer(const std::files
     std::error_code ec;
     for (const auto& e : fs::recursive_directory_iterator(assets, ec))
         if (e.is_regular_file()) (*files)[key(fs::relative(e.path(), assets, ec).string())].disk = e.path();
+    if (!generated.empty())
+        for (const auto& e : fs::recursive_directory_iterator(generated, ec))
+            if (e.is_regular_file()) (*files)[key(fs::relative(e.path(), generated, ec).string())] = File{ e.path() };
     for (const auto& [id, p] : packages)
     {
         const MpqChain* from = source(p.value("source", nlohmann::json::object()).value("client", std::string()));

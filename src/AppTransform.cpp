@@ -83,7 +83,7 @@ Trigger FromFrame(Trigger t, FXMMATRIX m)
 std::optional<App::Transformable> App::ActiveTransform()
 {
     if (m_terrain.Map().empty()) return std::nullopt;
-    if (m_tool == Tool::Objects) return ObjectTransform();
+    if (m_tool == Tool::Objects) return m_interior ? InteriorTransform() : ObjectTransform();
     if (m_tool == Tool::Creatures && m_path) return PathPointTransform();   // editing a path: its points, not the creatures
     if (SpawnTool()) return SpawnTransform();
     if (m_tool == Tool::Triggers) return TriggerTransform();

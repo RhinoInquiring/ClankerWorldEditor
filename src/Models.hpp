@@ -78,6 +78,7 @@ struct ModelMesh
         uint32_t textureType = 0;   // M2 texture type: 0 fixed (texture), else replaceable (1 body, 2 cape, 6 hair, 8 fur, 11-13 creature skins)
         uint16_t geoset = 0;        // M2 submesh id (group * 100 + variant); WMO 0
         uint16_t liquid = 0;        // WMO liquid: its LiquidType id (animated frames, drawn as water); 0 = not a liquid
+        uint16_t group = 0;         // WMO: the group (index into the root's groups) it belongs to
         int16_t uvAnim = -1, weight = -1, color = -1;   // M2: texture transform, transparency weight, colour (ModelSkeleton), -1 = none
         Blend blend = Blend::Opaque;
         bool twoSided = false;

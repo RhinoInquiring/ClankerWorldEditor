@@ -28,6 +28,7 @@ needs the original files.
   assets/             generated pictures (world maps), copied into every export
   tiles/              added tiles (converted) and their minimap pictures
   overlay/            added tiles and the WDT/WDL listing them, served above the game files (rebuilt on open)
+  wmos/               edited WMOs (root and groups), served above the game files (rebuilt on open)
   minimaps/           minimap pictures of edited tiles (derived)
   differences/        scan results and verdicts (derived)
   out/client/         the last export's client files
@@ -76,6 +77,24 @@ given (new ids continue above it), `minimap` the other version's minimap picture
 Applying copies the file into `<project>/overlay/World/Maps/<map>/` and marks the tile in overlay copies of the map's
 WDT and WDL (far heights computed from the tile); reverting removes them. The archive reader serves overlay files above
 every source for `World\Maps\` paths. Export writes the tiles, the WDT, the WDL, and their minimaps.
+
+### wmo.doodads
+
+A WMO's own doodads, by file (`wmo`, its game path):
+
+| Shape | Meaning |
+| --- | --- |
+| `{wmo, from, create: true}` | Starts editing `wmo` as a copy of `from` (`wmo == from`: the original in place); reverting removes it |
+| `{wmo, sets: [[index, before, after]], doodads: [[id, before, after]], slots: [[id, before, after]]}` | Set names (null = added / removed, last set only), doodads and groups (null = added / deleted) |
+
+A doodad is `{m: model, p: [x, y, z], q: [x, y, z, w], s: scale, c: BGRA colour, f: flags, set, g: [groups]}` in the
+WMO's own axes; ids are the source file's MODD indices, new ones counting on above them. `g` names slots; no `g` = the
+group whose box holds it.
+
+A slot is one output group, written in id order: `{from: file (absent = the WMO's own source), g: group, b: batch,
+t: quarter turns about +z, o: [x, y, z] offset, out: -1 as it is / 0 indoor / 1 outdoor}`. The source's own groups are
+slots 0..n-1; pasted ones count on. Portals are kept between slots of the same file, batch and transform. A copy is created in one batch with the placement edit (`terrain.heights` objects) that points the placement
+at it. Applying writes the root and every group under `<project>/wmos/`.
 
 ### world.creature, world.gameobject
 

@@ -70,6 +70,7 @@ struct Project
     std::filesystem::path BlueprintsDir() const { return dir / "blueprints"; }
     /// Files the editor generated for the client (world map pictures, ...), laid out as in the MPQs; export copies them.
     std::filesystem::path AssetsDir() const { return dir / "assets"; }
+    std::filesystem::path WmosDir() const { return dir / "wmos"; }   // edited WMOs (derived: rebuilt from the changes)
     std::filesystem::path ClientOutDir() const { return dir / "out" / "client"; }
     /// Where the play-test link extension serves files from.
     std::filesystem::path OverlayDir() const { return std::filesystem::path(clientDir) / "Extensions" / "wxl-editor-poc" / "overlay"; }

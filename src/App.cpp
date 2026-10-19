@@ -369,6 +369,7 @@ bool App::Init(HWND hwnd, ID3D11Device* device, ID3D11DeviceContext* context, bo
     m_store.Register(m_raceRows);
     m_store.Register(m_creatureModelRows);
     m_store.Register(m_gameobjects);
+    m_store.Register(m_wmoEdits);
     for (DbcTable* table : DbcTables()) m_store.Register(*table);
     for (TableRowsAdapter* table : TableAdapters())
     {
@@ -584,6 +585,10 @@ bool App::OpenProject(const std::string& dir)
     m_loader.Start(&m_mpq);
     m_store.author = m_project->author;
     ShowBusy("Loading the project's changes");
+    // Edited WMOs are derived: the folder starts empty and the changes write it again, reading the originals.
+    m_wmoEdits.Reset([this](const std::string& n) { return m_mpq.ReadBase(n); }, m_project->WmosDir());
+    ++m_assetsVersion;
+    UpdateProjectFiles();
     if (!m_store.Load(m_project->ChangesDir(), error)) Log("Changes not fully loaded: %s", error.c_str());
     m_terrain.RebuildOverlay();
     RememberProject(m_project->dir.string());
@@ -611,6 +616,10 @@ void App::CloseProject()
 {
     m_terrain.Unload();
     m_models.Clear();
+    m_interior.reset();
+    for (const auto& [key, e] : m_wmoEdits.All()) m_models.Forget(e.name);   // an original edited in place reads as the game has it again
+    m_wmoEdits.Reset({}, {});
+    m_wmoEdits.TakeChanged();
     m_objSel.clear();
     m_races = RacesView{};   // its sources' chains are about to close
     m_creatureModels = CreatureModelsView{};   // the same
@@ -723,7 +732,23 @@ void App::Export(bool playTest)
     if (const size_t dropped = m_terrain.TakeDroppedEffects())
         Log("%zu texture layer(s) had ground effects this client does not know (from another map); exported without them.", dropped);
     SetCdnAsync(false);   // the patch must be complete: wait for CDN files
-    AssetReport assets = CopyMissingAssets(m_mpq, tiles, out, false, m_project->wxlExport ? ExportTarget::Wxl : ExportTarget::Client335);
+    // Edited WMOs go in whole, and what their doodads use is followed like the tiles' references.
+    std::vector<fs::path> roots = tiles;
+    for (const auto& [key, e] : m_wmoEdits.All())
+    {
+        std::error_code ec;
+        for (uint32_t g = 0; g <= e.boxes.size(); ++g)
+        {
+            std::string rel = g == 0 ? e.name : WmoGroupName(e.name, g - 1);
+            std::replace(rel.begin(), rel.end(), '\\', '/');
+            const fs::path from = m_wmoEdits.Dir() / fs::path(rel), to = out / fs::path(rel);
+            fs::create_directories(to.parent_path(), ec);
+            fs::copy_file(from, to, fs::copy_options::overwrite_existing, ec);
+            if (g == 0) roots.push_back(to);
+        }
+    }
+    if (!m_wmoEdits.All().empty()) Log("Edited WMOs: %zu written with their groups.", m_wmoEdits.All().size());
+    AssetReport assets = CopyMissingAssets(m_mpq, roots, out, false, m_project->wxlExport ? ExportTarget::Wxl : ExportTarget::Client335);
     SetCdnAsync(true);
     if (!assets.copied.empty()) Log("Added %zu file(s) from other clients that this client lacks (e.g. %s).", assets.copied.size(), assets.copied[0].c_str());
     if (!assets.kept.empty()) Log("WXL: %zu newer-client file(s) kept as they are.", assets.kept.size());
@@ -1681,7 +1706,7 @@ void App::UpdateProjectFiles()
         for (const Ghosts::Source& s : m_ghosts.Sources())
             if (s.name == client && s.mpq != &m_mpq) return s.mpq;
         return nullptr;
-    }, m_mpq));
+    }, m_mpq, m_wmoEdits.Dir()));
     m_models.ForgetFailed();   // a model or texture that was missing may be there now
     m_renderer.ForgetMissingTextures();
 }
@@ -2225,6 +2250,7 @@ void App::DrawObjectPanel()
         return;
     }
     DrawTransformBar(ImGui::GetContentRegionAvail().x);
+    if (m_interior) { DrawInteriorPanel(); return; }
 
     if (m_objSel.empty())
     {
@@ -2338,6 +2364,11 @@ void App::DrawObjectPanel()
     }
     else ImGui::TextColored(kQuiet, "To swap the model: pick one in the Catalog, then Replace here.");
     if (isGlobal) ImGui::TextColored(kQuiet, "This map's own WMO: kept in its WDT, exported with it.");
+    if (ref.wmo)
+    {
+        if (ImGui::Button("Edit doodads inside")) BeginInterior(ref.uid);
+        ImGui::SetItemTooltip("Move, add and delete the building's own furniture (its doodad sets)");
+    }
     ImGui::Spacing();
     if (ImGui::Button("Drop to ground"))
         EditObjects("Drop object to the ground", [&](float* p, float*, float*) { if (const auto h = m_terrain.HeightAt(p[0], p[2])) p[1] = *h; });
@@ -2784,6 +2815,7 @@ void App::Frame(float dt)
 {
     m_fps = m_fps * 0.95f + (dt > 0 ? 1.0f / dt : 0) * 0.05f;
     Autosave();
+    UpdateEditedWmos();
     UpdateProjectFiles();
     if (m_closeRequested)
     {
@@ -2965,11 +2997,20 @@ void App::HandleShortcuts()
     if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_Y, global) || ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_Z, global)) Redo();
 
     if (ImGui::GetIO().WantTextInput) return;   // the rest only while not typing
-    if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_C, global)) CopySelection();
-    if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_V, global)) PasteInPlace();
+    if (m_tool == Tool::Objects && m_interior && m_interior->groups)   // a building's groups: copy, cut, paste them
+    {
+        if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_C, global)) CopyGroups(false);
+        if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_X, global)) CopyGroups(true);
+        if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_V, global)) PasteGroups();
+    }
+    else
+    {
+        if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_C, global)) CopySelection();
+        if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_V, global)) PasteInPlace();
+        if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_V, global)) PasteAtCursor();
+    }
     if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_B, global)) OpenSaveBlueprint();
     if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_T, global)) SetTopDown(!m_camera.topDown);
-    if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_V, global)) PasteAtCursor();
     if (ImGui::GetIO().KeyCtrl) return;
     for (const ToolInfo& t : kTools)
         if (t.imKey != ImGuiKey_None && ImGui::IsKeyPressed(t.imKey, false)) m_tool = t.tool;
@@ -3024,6 +3065,9 @@ void App::HandleShortcuts()
         else if (!m_diffPending.empty()) { EndNewTiles(); m_diffPending.clear(); m_diffActive.clear(); }   // a review still on its way
         else if (m_pin) CancelPin();                  // first Esc: unpin, terrain goes back
         else if (m_placing) m_placing = false;        // second: stop placing
+        else if (m_tool == Tool::Objects && m_interior && m_interior->groups && !m_interior->groupSel.empty()) m_interior->groupSel.clear();
+        else if (m_tool == Tool::Objects && m_interior && !m_interior->groups && !m_interior->sel.empty()) m_interior->sel.clear();
+        else if (m_tool == Tool::Objects && m_interior) m_interior.reset();   // back to the map's objects
         else if (m_tool == Tool::Objects && !m_objSel.empty()) m_objSel.clear();
         else if (m_tool == Tool::Sculpt && m_terrain.SelectedVertices()) m_terrain.ClearVertexSelection();
         else if (pathMode) CancelPathEdit();          // leave path editing, nothing saved
@@ -3426,6 +3470,11 @@ void App::BuildOverlay(std::vector<LineVertex>& lines) const
         return;
     }
 
+    if (m_tool == Tool::Objects && m_interior)
+    {
+        InteriorOutlines(lines);
+        return;
+    }
     if (m_tool == Tool::Objects)
     {
         auto box = [&](const ObjectRef& r, XMFLOAT4 color) {
@@ -3659,7 +3708,8 @@ void App::DrawViewport(float dt)
             }
         }
         m_objHover.reset();
-        if ((m_tool == Tool::Objects && !gizmoHot) || (m_tool == Tool::Zones && io.KeyShift))
+        if (m_tool == Tool::Objects && m_interior && !gizmoHot) InteriorViewport(p0, dir, origin, size);
+        else if ((m_tool == Tool::Objects && !gizmoHot) || (m_tool == Tool::Zones && io.KeyShift))
         {
             const float ground = m_hover ? XMVectorGetX(XMVector3Length(XMVectorSubtract(XMLoadFloat3(&m_hover->pos), p0))) : 6000.0f;
             if (const auto hit = m_models.Pick(p0, dir, ground, m_modelSettings)) m_objHover = ObjectRef{ hit->wmo, hit->uid };
@@ -3677,7 +3727,14 @@ void App::DrawViewport(float dt)
 
     // The armed catalog model follows the cursor.
     m_models.RemoveTile(-2);
-    if (m_armed && m_tool == Tool::Objects && m_hover)
+    if (m_armed && m_tool == Tool::Objects && m_interior && m_interior->point && !m_armed->wmo)
+    {
+        // Inside a building: as it will stand in the building's own axes.
+        const auto d = InteriorDoodadAt(*m_interior->point);
+        if (const auto world = InteriorWorld(); d && world)
+            m_models.AddModel(-2, ModelLook{ d->model }, DoodadMatrix(*d) * XMLoadFloat4x4(&*world), d->scale, 0, m_mpq);
+    }
+    else if (m_armed && m_tool == Tool::Objects && !m_interior && m_hover)
     {
         Adt preview;
         const float pos[3] = { m_hover->pos.x, m_hover->pos.y, m_hover->pos.z }, rot[3] = { 0, m_placeYaw, 0 };
@@ -3852,6 +3909,40 @@ void App::DrawViewport(float dt)
     else if (m_tool == Tool::Roads)
     {
         RoadsViewport(origin, size, viewProj);
+    }
+    else if (m_tool == Tool::Objects && m_interior)
+    {
+        // A building's own doodads: click picks (Shift adds, Ctrl removes), an armed catalog doodad is added where clicked.
+        if (ImGui::IsItemActivated() && ImGui::IsMouseDown(ImGuiMouseButton_Left))
+        {
+            m_boxStart[0] = io.MousePos.x;
+            m_boxStart[1] = io.MousePos.y;
+        }
+        const bool click = ImGui::IsItemDeactivated() && ImGui::IsMouseReleased(ImGuiMouseButton_Left) &&
+                           std::fabs(io.MousePos.x - m_boxStart[0]) + std::fabs(io.MousePos.y - m_boxStart[1]) <= 5;
+        std::set<uint32_t>& picked = m_interior->groups ? m_interior->groupSel : m_interior->sel;
+        if (click && m_armed && !m_armed->wmo && !m_interior->groups && m_interior->point && m_wmoEdits.Find(m_interior->wmo))
+        {
+            if (const auto d = InteriorDoodadAt(*m_interior->point))
+            {
+                const uint32_t id = m_interior->live.NextId();
+                m_interior->live.doodads[id] = *d;
+                CommitInterior("Add " + FileOf(d->model) + " to " + FileOf(m_interior->wmo));
+                m_interior->sel = { id };
+                if (!io.KeyShift) m_armed.reset();
+                if (m_placeRandomYaw) m_placeYaw = RandomUnit() * 360.0f;
+            }
+        }
+        else if (click && io.KeyAlt && !picked.empty() && m_interior->point)
+            MoveSelectionTo(*m_interior->point);   // Alt+click: the selection goes there
+        else if (click && !m_armed)
+        {
+            const std::optional<uint32_t> hit = m_interior->groups ? m_interior->groupHover : m_interior->hover;
+            if (!hit) { if (!io.KeyShift && !io.KeyCtrl) picked.clear(); }
+            else if (io.KeyCtrl) picked.erase(*hit);
+            else if (io.KeyShift) picked.insert(*hit);
+            else picked = { *hit };
+        }
     }
     else if (m_tool == Tool::Objects)
     {
@@ -4092,6 +4183,14 @@ void App::DrawViewport(float dt)
             snprintf(caption, sizeof caption, "%s   World > Sound   click the ground: add an emitter   Shift+click: add and keep going   Esc: stop", m_terrain.Map().c_str());
         else if (m_tool == Tool::Lights && m_lightPlace)
             snprintf(caption, sizeof caption, "%s   World > Lights   click the ground: add a light   Shift+click: add and keep going   Esc: stop", m_terrain.Map().c_str());
+        else if (m_tool == Tool::Objects && m_interior && m_armed)
+            snprintf(caption, sizeof caption, "%s   World > Objects > %s > Add %s   click inside: add   Shift+click: add and keep going   Esc: stop",
+                     m_terrain.Map().c_str(), FileOf(m_interior->wmo).c_str(), FileOf(m_armed->path).c_str());
+        else if (m_tool == Tool::Objects && m_interior)
+            snprintf(caption, sizeof caption, "%s   World > Objects > %s %s (%s)   %zu selected   %s   Esc: back to the map", m_terrain.Map().c_str(),
+                     FileOf(m_interior->wmo).c_str(), m_interior->groups ? "groups" : "doodads",
+                     m_gizmo == Gizmo::Move ? "Move" : m_gizmo == Gizmo::Rotate ? "Rotate" : "Scale",
+                     m_interior->groups ? m_interior->groupSel.size() : m_interior->sel.size(), TransformHint().c_str());
         else if (m_tool == Tool::Objects && m_armed)
             snprintf(caption, sizeof caption, "%s   World > Objects > Place %s   click: place   Shift+click: place and keep going   Esc: stop",
                      m_terrain.Map().c_str(), FileOf(m_armed->path).c_str());

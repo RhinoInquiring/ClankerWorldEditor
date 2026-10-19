@@ -639,8 +639,9 @@ std::optional<ModelMesh> ParseWmo(const std::vector<uint8_t>& root, const std::v
                                      : CString(root, modnOff, modnSize, ref);
         mesh.doodads.push_back(std::move(d));
     }
-    for (const auto& g : groups)
+    for (size_t groupIndex = 0; groupIndex < groups.size(); ++groupIndex)
     {
+        const auto& g = groups[groupIndex];
         // A group file: MVER, then one MOGP whose data is a 68-byte header followed by sub-chunks. Some shipped
         // groups state a MOGP size past the end of the file; read up to the end instead of skipping the group.
         auto groupChunks = [&](auto&& fn) {
@@ -687,6 +688,7 @@ std::optional<ModelMesh> ParseWmo(const std::vector<uint8_t>& root, const std::v
             {
                 if (size_t(b.startIndex) + b.count > idx.size()) continue;
                 ModelMesh::Batch out;
+                out.group = uint16_t(groupIndex);
                 out.indexStart = uint32_t(mesh.indices.size());
                 out.indexCount = b.count;
                 for (uint32_t k = 0; k < b.count; ++k) mesh.indices.push_back(base + std::min<uint32_t>(idx[b.startIndex + k], uint32_t(count ? count - 1 : 0)));
@@ -731,6 +733,7 @@ std::optional<ModelMesh> ParseWmo(const std::vector<uint8_t>& root, const std::v
                         Grow(mesh, mesh.vertices.back().pos);
                     }
                 ModelMesh::Batch out;
+                out.group = uint16_t(groupIndex);
                 out.indexStart = uint32_t(mesh.indices.size());
                 for (int j = 0; j < yt; ++j)
                     for (int i = 0; i < xt; ++i)

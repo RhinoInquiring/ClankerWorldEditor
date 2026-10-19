@@ -12,6 +12,8 @@ format code never touches the GPU; the `App*` files are the UI.
 | `src/Mpq.*` | Layered game files (MPQ folders in client order, single MPQs, unpacked folders), the overlay for added tiles, folder scan, MPQ writer |
 | `src/Formats.*` | ADT, WDT, WDL, BLP, DBC readers and writers: rewritten ADTs, MH2O, WDT tile flags, WDL heights, minimap index, structure check |
 | `src/Models.*` | M2 and WMO loading: meshes, skeletons, animation, doodad sets, liquids, placement matrices |
+| `src/WmoCompose.*` | A WMO written from slots (groups of any WMO, quarter-turned and moved): materials, names, lights, fogs, portals remapped; collision trees and liquids moved |
+| `src/WmoEdit.*` | A WMO's own doodads: read and write MODS/MODN/MODD and each group's MODR, the `wmo.doodads` adapter (files under `<project>/wmos/`) |
 | `src/Catalog.*` | Every file of the sources by kind, with folder trees and search |
 | `src/Assets.*` | References of tiles, models and buildings; copying what players lack into the export |
 | `src/Project.*` | The project folder and `project.json`: sources, id ranges, patch name |
@@ -79,6 +81,7 @@ format code never touches the GPU; the `App*` files are the UI.
 | `src/AppFlights.cpp` | Flights tool: nodes, paths, points, flight masters, their checks |
 | `src/AppWorldMap.cpp` | World map drawing |
 | `src/AppInspect.cpp` | Inspector |
+| `src/AppInterior.cpp` | Doodads inside a building: the Objects tool's interior session, picking, handles, panel |
 | `src/AppServer.cpp` | Server setup, Server panel, Problems |
 | `src/main.cpp` | Window and device, frame loop |
 

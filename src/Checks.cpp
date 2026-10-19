@@ -60,6 +60,8 @@ int RunCheck()
     struct Entry { const wchar_t* flag; int minArgs; int (*run)(); };   // minArgs: __argc, the exe and the flag included
     static const Entry kChecks[] = {
         { L"--model-check", 0, checks::ModelCheck },
+        { L"--wmo-doodad-check", 3, checks::WmoDoodadCheck },
+        { L"--wmo-group-check", 3, checks::WmoGroupCheck },
         { L"--render", 0, checks::RenderCheck },
         { L"--loader-check", 0, checks::LoaderCheck },
         { L"--catalog-check", 0, checks::CatalogCheck },
@@ -121,7 +123,7 @@ int RunCheck()
         { L"--selftest", 0, [] {
              return FormatsSelfTest() && ChangesSelfTest() && TerrainSelfTest() && BlendSelfTest() && CatalogSelfTest() && BlueprintSelfTest() &&
                     DownportSelfTest() && TriggersSelfTest() && TransformSelfTest() && RoadSelfTest() &&
-                    RacesSelfTest() ? 0 : 1;
+                    RacesSelfTest() && WmoEditSelfTest() && WmoComposeSelfTest() ? 0 : 1;
          } },
         { L"--race-check", 3, checks::RaceCheck },
         { L"--race-look", 6, checks::RaceLookCheck },

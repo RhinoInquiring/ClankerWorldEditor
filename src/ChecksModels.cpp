@@ -2417,4 +2417,314 @@ namespace checks
         printf("%d problem(s)\n", problems);
         return problems ? 1 : 0;
     }
+
+    /// --wmo-doodad-check <Data> [max]: every WMO root of the client (or the first `max`) read as the interior
+    /// editor reads it and written back unchanged: each set lists the same doodads in the same order, each group's MODR
+    /// names the same doodads, the rest of every group is byte for byte the same, and the mesh parses as before.
+    int WmoDoodadCheck()
+    {
+        if (__argc < 3 || !__wargv) return 2;
+        setvbuf(stdout, nullptr, _IONBF, 0);
+        auto arg = [](int i) {
+            char buf[1024] = {};
+            WideCharToMultiByte(CP_ACP, 0, __wargv[i], -1, buf, sizeof buf, nullptr, nullptr);
+            return std::string(buf);
+        };
+        MpqChain mpq;
+        mpq.Open(arg(2));
+        const size_t max = __argc > 3 ? size_t(std::stoul(arg(3))) : SIZE_MAX;
+        Catalog catalog;
+        catalog.Build(mpq);
+        std::vector<std::string> roots;
+        for (const auto* item : catalog.Filter(Catalog::Kind::Wmo, "", "")) roots.push_back(item->path);
+        size_t checked = 0, skipped = 0, doodads = 0, groups = 0;
+        int problems = 0;
+        auto bad = [&](const std::string& name, const char* what) {
+            if (++problems <= 20) printf("  %s: %s\n", name.c_str(), what);
+        };
+        const auto t0 = std::chrono::steady_clock::now();
+        for (const std::string& name : roots)
+        {
+            if (checked >= max) break;
+            const auto root = mpq.Read(name);
+            uint32_t count = 0;
+            float bounds[6];
+            if (!root || !WmoRootInfo(*root, count, bounds) || count > 512) { ++skipped; continue; }
+            std::vector<std::vector<uint8_t>> files;
+            for (uint32_t g = 0; g < count; ++g) files.push_back(mpq.Read(WmoGroupFile(name, *root, g)).value_or(std::vector<uint8_t>{}));
+            std::string error;
+            const auto d = ReadWmoDoodads(*root, files, error);
+            if (!d) { ++skipped; continue; }   // newer-client roots
+            ++checked;
+            doodads += d->doodads.size();
+            groups += count;
+            std::vector<std::vector<uint16_t>> modr;
+            const auto newRoot = WriteWmoRoot(*root, *d, WmoGroupBoxes(files), modr);
+            std::vector<std::vector<uint8_t>> newFiles;
+            for (size_t g = 0; g < files.size(); ++g) newFiles.push_back(files[g].empty() ? files[g] : WriteWmoGroupModr(files[g], modr[g]));
+            const auto back = ReadWmoDoodads(newRoot, newFiles, error);
+            if (!back || back->sets != d->sets) { bad(name, "sets differ"); continue; }
+            // The same doodads per set, in order (ids may renumber: the copy lays sets out one after another).
+            std::vector<ModelMesh::Doodad> a, b;
+            std::vector<ModelMesh::DoodadSet> sa, sb;
+            std::vector<uint32_t> ia, ib;
+            MeshDoodads(*d, a, sa, ia);
+            MeshDoodads(*back, b, sb, ib);
+            bool same = a.size() == b.size();
+            for (size_t i = 0; same && i < a.size(); ++i)
+                same = _stricmp(a[i].model.c_str(), b[i].model.c_str()) == 0 && std::memcmp(&a[i].pos, &b[i].pos, sizeof a[i].pos) == 0 &&
+                       std::memcmp(&a[i].rot, &b[i].rot, sizeof a[i].rot) == 0 && a[i].scale == b[i].scale;
+            if (!same) { bad(name, "doodads differ"); continue; }
+            // Each group lists the same doodads (by what they are, the indices may move).
+            for (size_t g = 0; g < files.size() && same; ++g)
+            {
+                std::multiset<uint32_t> before, after;
+                for (const auto& [id, e] : d->doodads)
+                    if (std::count(e.groups.begin(), e.groups.end(), uint16_t(g))) before.insert(id);
+                for (uint16_t i : modr[g]) after.insert(ia[i]);
+                // Doodads in two sets come back once per set; a source listing them in no group gets the box's group.
+                for (const auto& [id, e] : d->doodads)
+                    if (e.groups.empty()) after.erase(id);
+                same = before == after;
+            }
+            if (!same) { bad(name, "a group's MODR differs"); continue; }
+            // Nothing else in the groups changed, and the building still parses as before.
+            for (size_t g = 0; g < files.size() && same; ++g)
+                if (!files[g].empty() && WriteWmoGroupModr(newFiles[g], {}) != WriteWmoGroupModr(files[g], {})) same = false;
+            const auto meshA = ParseWmo(*root, files), meshB = ParseWmo(newRoot, newFiles);
+            if (!same || bool(meshA) != bool(meshB) || (meshA && (meshA->vertices.size() != meshB->vertices.size() || meshA->batches.size() != meshB->batches.size())))
+                bad(name, "groups or mesh changed");
+        }
+        printf("%zu WMO(s) round-tripped (%zu groups, %zu doodads), %zu skipped (newer client or unreadable), %.1f s, %d problem(s)\n", checked, groups,
+               doodads, skipped, std::chrono::duration<float>(std::chrono::steady_clock::now() - t0).count(), problems);
+        return problems ? 1 : 0;
+    }
+
+    /// --wmo-group-check <Data> [every]: (1) every WMO of the client rebuilt from its own groups as they are gives the
+    /// same materials, textures, names, lights, fogs, portals and groups (each group byte for byte but its doodad list);
+    /// (2) every `every`-th WMO pasted whole into the first one with portals, a quarter turn and a move: all its portals
+    /// kept, every group's vertex count, each sampled face still found by its collision tree where it moved to, and
+    /// the result parses with every vertex.
+    int WmoGroupCheck()
+    {
+        if (__argc < 3 || !__wargv) return 2;
+        setvbuf(stdout, nullptr, _IONBF, 0);
+        auto arg = [](int i) {
+            char buf[1024] = {};
+            WideCharToMultiByte(CP_ACP, 0, __wargv[i], -1, buf, sizeof buf, nullptr, nullptr);
+            return std::string(buf);
+        };
+        MpqChain mpq;
+        mpq.Open(arg(2));
+        const size_t every = __argc > 3 ? std::max<size_t>(1, std::stoul(arg(3))) : 25;
+        Catalog catalog;
+        catalog.Build(mpq);
+        auto tag = [](const char* s) { return uint32_t(uint8_t(s[0])) << 24 | uint32_t(uint8_t(s[1])) << 16 | uint32_t(uint8_t(s[2])) << 8 | uint32_t(uint8_t(s[3])); };
+        // Chunk bodies of a file (begin .. end), and of a group's MOGP.
+        auto chunks = [](const std::vector<uint8_t>& d, size_t begin, size_t end) {
+            std::vector<std::tuple<uint32_t, size_t, size_t>> out;
+            for (size_t pos = begin; pos + 8 <= end;)
+            {
+                uint32_t t = 0, size = 0;
+                std::memcpy(&t, d.data() + pos, 4);
+                std::memcpy(&size, d.data() + pos + 4, 4);
+                const size_t clamped = std::min<size_t>(size, end - pos - 8);
+                out.emplace_back(t, pos + 8, clamped);
+                pos += 8 + clamped;
+            }
+            return out;
+        };
+        auto body = [&](const std::vector<uint8_t>& d, const char* name) {
+            for (const auto& [t, off, size] : chunks(d, 0, d.size()))
+                if (t == tag(name)) return std::vector<uint8_t>(d.begin() + std::ptrdiff_t(off), d.begin() + std::ptrdiff_t(off + size));
+            return std::vector<uint8_t>{};
+        };
+        auto groupBody = [&](const std::vector<uint8_t>& g, const char* name) {
+            for (const auto& [t, off, size] : chunks(g, 0, g.size()))
+                if (t == tag("MOGP") && size >= 68)
+                    for (const auto& [s, so, ss] : chunks(g, off + 68, off + size))
+                        if (s == tag(name)) return std::vector<uint8_t>(g.begin() + std::ptrdiff_t(so), g.begin() + std::ptrdiff_t(so + ss));
+            return std::vector<uint8_t>{};
+        };
+
+        struct Wmo { std::string name; std::vector<uint8_t> root; std::vector<std::vector<uint8_t>> groups; std::vector<WmoGroupInfo> infos; };
+        std::map<std::string, Wmo> loaded;
+        auto load = [&](const std::string& name) -> const Wmo* {
+            auto [it, fresh] = loaded.try_emplace(Catalog::Normalize(name));
+            Wmo& w = it->second;
+            if (fresh)
+            {
+                const auto root = mpq.Read(name);
+                uint32_t count = 0;
+                float bounds[6];
+                std::string error;
+                if (!root || !WmoRootInfo(*root, count, bounds) || count > 512 || !ReadWmoDoodads(*root, {}, error)) return nullptr;
+                w.name = name;
+                w.root = *root;
+                for (uint32_t g = 0; g < count; ++g)
+                {
+                    w.groups.push_back(mpq.Read(WmoGroupFile(name, *root, g)).value_or(std::vector<uint8_t>{}));
+                    const auto info = ReadWmoGroupInfo(w.groups.back());
+                    if (!info) return nullptr;
+                    w.infos.push_back(*info);
+                }
+            }
+            return w.root.empty() ? nullptr : &w;
+        };
+        auto rootOf = [&](const std::string& s) -> const std::vector<uint8_t>* { const Wmo* w = load(s); return w ? &w->root : nullptr; };
+        auto infoOf = [&](const std::string& s, uint16_t g) -> const WmoGroupInfo* {
+            const Wmo* w = load(s);
+            return w && g < w->infos.size() ? &w->infos[g] : nullptr;
+        };
+        auto groupOf = [&](const std::string& s, uint16_t g) -> const std::vector<uint8_t>* {
+            const Wmo* w = load(s);
+            return w && g < w->groups.size() ? &w->groups[g] : nullptr;
+        };
+        int problems = 0;
+        auto bad = [&](const std::string& name, const std::string& what) {
+            if (++problems <= 25) printf("  %s: %s\n", name.c_str(), what.c_str());
+        };
+        // Portals as their vertices and planes, per portal index.
+        auto portals = [&](const std::vector<uint8_t>& root) {
+            const auto mopt = body(root, "MOPT"), mopv = body(root, "MOPV");
+            std::vector<std::vector<float>> out;
+            for (size_t p = 0; p + 20 <= mopt.size(); p += 20)
+            {
+                uint16_t first = 0, count = 0;
+                std::memcpy(&first, mopt.data() + p, 2);
+                std::memcpy(&count, mopt.data() + p + 2, 2);
+                std::vector<float> v(4);
+                std::memcpy(v.data(), mopt.data() + p + 4, 16);
+                for (size_t k = 0; k < count && (first + k) * 12 + 12 <= mopv.size(); ++k)
+                {
+                    float x[3];
+                    std::memcpy(x, mopv.data() + (first + k) * 12, 12);
+                    v.insert(v.end(), x, x + 3);
+                }
+                out.push_back(std::move(v));
+            }
+            return out;
+        };
+
+        std::vector<std::string> roots;
+        for (const auto* item : catalog.Filter(Catalog::Kind::Wmo, "", "")) roots.push_back(item->path);
+        const auto t0 = std::chrono::steady_clock::now();
+        size_t same = 0, skipped = 0;
+        std::string target;
+        for (const std::string& name : roots)
+        {
+            const Wmo* w = load(name);
+            if (!w) { ++skipped; continue; }
+            std::string error;
+            const WmoDoodads d = *ReadWmoDoodads(w->root, w->groups, error);
+            const WmoComposed out = ComposeWmo(w->root, name, d.slots, d, rootOf, infoOf);
+            bool ok = out.groups.size() == w->groups.size() && out.notes.empty();
+            for (const char* c : { "MOTX", "MOMT", "MOGN", "MOGI", "MOLT", "MFOG", "MOPR" })
+                if (ok && body(out.root, c) != body(w->root, c)) { bad(name, std::string(c) + " differs"); ok = false; }
+            const bool samePortalBytes = body(out.root, "MOPT") == body(w->root, "MOPT") && body(out.root, "MOPV") == body(w->root, "MOPV");
+            if (ok && !samePortalBytes && portals(out.root) != portals(w->root))   // bytes first: a NaN in a file never equals itself
+            {
+                bad(name, "portals differ (MOPT " + std::to_string(body(out.root, "MOPT").size()) + "/" + std::to_string(body(w->root, "MOPT").size()) + ", MOPV " +
+                              std::to_string(body(out.root, "MOPV").size()) + "/" + std::to_string(body(w->root, "MOPV").size()) + ")");
+                ok = false;
+            }
+            for (size_t g = 0; ok && g < out.groups.size(); ++g)
+                if (const auto a = EmitWmoGroup(out.groups[g], w->groups[g]), b = WriteWmoGroupModr(w->groups[g], out.groups[g].modr); a != b)
+                {
+                    size_t at = 0;
+                    while (at < std::min(a.size(), b.size()) && a[at] == b[at]) ++at;
+                    bad(name, "group " + std::to_string(g) + " differs at byte " + std::to_string(at) + " of " + std::to_string(a.size()) + "/" + std::to_string(b.size()));
+                    ok = false;
+                }
+            same += ok;
+            if (target.empty() && ok && !body(w->root, "MOPT").empty() && w->groups.size() >= 2) target = name;
+            loaded.clear();   // ponytail: one WMO at a time keeps memory flat; the paste pass reloads what it needs
+        }
+        printf("rebuilt as they are: %zu of %zu WMO(s) the same, %zu skipped (newer client or unreadable), %.1f s\n", same, roots.size() - skipped,
+               skipped, std::chrono::duration<float>(std::chrono::steady_clock::now() - t0).count());
+
+        // Paste every n-th WMO whole into the target, a quarter turn and a move away.
+        const Wmo* into = target.empty() ? nullptr : load(target);
+        size_t pasted = 0, faces = 0, found = 0, onPlane = 0;
+        for (size_t r = 0; into && r < roots.size(); r += every)
+        {
+            const std::string name = roots[r];
+            const Wmo* from = load(name);
+            if (!from || Catalog::Normalize(name) == Catalog::Normalize(target)) continue;
+            std::string error;
+            WmoDoodads d = *ReadWmoDoodads(into->root, into->groups, error);
+            const WmoTransform t{ 1, { 500, -300, 20 } };
+            const uint32_t first = d.NextSlotId();
+            for (uint16_t g = 0; g < from->groups.size(); ++g) d.slots[first + g] = WmoSlot{ name, g, 1, t };
+            const WmoComposed out = ComposeWmo(into->root, target, d.slots, d, rootOf, infoOf);
+            ++pasted;
+            if (out.groups.size() != into->groups.size() + from->groups.size()) { bad(name, "groups missing after the paste"); continue; }
+            // Every portal of the pasted WMO its groups use comes along; one no group's portal list reaches (or one naming
+            // a group the file lacks) does nothing in the game and is left out.
+            size_t orphans = 0;
+            {
+                const auto mopr = body(from->root, "MOPR");
+                const size_t count = body(from->root, "MOPT").size() / 20, refs = mopr.size() / 8;
+                std::vector<int> total(count), reached(count);
+                for (size_t r = 0; r < refs; ++r)
+                    if (uint16_t p = 0; std::memcpy(&p, mopr.data() + r * 8, 2), p < count) ++total[p];
+                for (const WmoGroupInfo& gi : from->infos)
+                    for (size_t r = gi.portalStart; r < size_t(gi.portalStart) + gi.portalCount && r < refs; ++r)
+                    {
+                        uint16_t p = 0, other = 0;
+                        std::memcpy(&p, mopr.data() + r * 8, 2);
+                        std::memcpy(&other, mopr.data() + r * 8 + 2, 2);
+                        if (p < count) reached[p] += other < from->groups.size() ? 1 : -100000;
+                    }
+                for (size_t p = 0; p < count; ++p) orphans += total[p] == 0 || reached[p] != total[p];
+            }
+            const size_t want = portals(into->root).size() + portals(from->root).size() - orphans, got = portals(out.root).size();
+            if (got != want) bad(name, "portals " + std::to_string(got) + " of " + std::to_string(want));
+            else if (orphans) printf("  %s: %zu portal(s) no group uses left out\n", name.c_str(), orphans);
+            std::vector<std::vector<uint8_t>> emitted;
+            for (size_t g = 0; g < out.groups.size(); ++g) emitted.push_back(EmitWmoGroup(out.groups[g], *groupOf(out.groups[g].source, out.groups[g].group)));
+            for (uint16_t g = 0; g < from->groups.size(); ++g)
+            {
+                const auto& src = from->groups[g];
+                const auto& dst = emitted[into->groups.size() + g];
+                if (groupBody(src, "MOVT").size() != groupBody(dst, "MOVT").size()) { bad(name, "group " + std::to_string(g) + " lost vertices"); continue; }
+                // Faces the source tree finds at their centre are still found at the moved centre.
+                const auto movt = groupBody(src, "MOVT"), movi = groupBody(src, "MOVI");
+                const auto mobn = groupBody(src, "MOBN"), mobr = groupBody(src, "MOBR"), mobn2 = groupBody(dst, "MOBN"), mobr2 = groupBody(dst, "MOBR");
+                for (size_t f = 0; f * 6 + 6 <= movi.size(); f += 7)
+                {
+                    float c[3] = {};
+                    for (int k = 0; k < 3; ++k)
+                    {
+                        uint16_t i = 0;
+                        std::memcpy(&i, movi.data() + f * 6 + size_t(k) * 2, 2);
+                        if (size_t(i) * 12 + 12 > movt.size()) break;
+                        for (int a = 0; a < 3; ++a) { float v; std::memcpy(&v, movt.data() + size_t(i) * 12 + size_t(a) * 4, 4); c[a] += v / 3; }
+                    }
+                    const auto before = BspFacesAt(mobn, mobr, c);
+                    if (std::find(before.begin(), before.end(), uint16_t(f)) == before.end()) continue;
+                    ++faces;
+                    t.Point(c);
+                    auto at = [&](const float* q) { const auto l = BspFacesAt(mobn2, mobr2, q); return std::find(l.begin(), l.end(), uint16_t(f)) != l.end(); };
+                    bool hit = at(c);
+                    for (int k = 0; !hit && k < 6; ++k)   // a centre exactly on a split plane: either side is the plane
+                    {
+                        float q[3] = { c[0], c[1], c[2] };
+                        q[k / 2] += k % 2 ? 0.001f : -0.001f;
+                        if ((hit = at(q))) ++onPlane;
+                    }
+                    if (hit) ++found;
+                    else if (faces - found <= 5) bad(name, "group " + std::to_string(g) + " face " + std::to_string(f) + " lost by its collision tree");
+                }
+            }
+            const auto mesh = ParseWmo(out.root, emitted), a = ParseWmo(into->root, into->groups), b = ParseWmo(from->root, from->groups);
+            if (a && b && (!mesh || mesh->vertices.size() != a->vertices.size() + b->vertices.size())) bad(name, "the result does not parse with every vertex");   // a, b: collision-only WMOs draw nothing
+            for (auto it = loaded.begin(); it != loaded.end();)   // keep the target only
+                it = Catalog::Normalize(it->first) == Catalog::Normalize(target) ? std::next(it) : loaded.erase(it);
+        }
+        printf("pasted %zu WMO(s) into %s: %zu of %zu sampled faces found where they moved to (%zu centred on a split plane)\n", pasted, target.c_str(),
+               found, faces, onPlane);
+        printf("%.1f s, %d problem(s)\n", std::chrono::duration<float>(std::chrono::steady_clock::now() - t0).count(), problems);
+        return problems || found != faces ? 1 : 0;
+    }
 }

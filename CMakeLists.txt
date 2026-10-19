@@ -67,6 +67,7 @@ add_executable(wow-world-editor WIN32
     src/AppRoads.cpp
     src/Differences.cpp
     src/AppInspect.cpp
+    src/AppInterior.cpp
     src/AppNpc.cpp
     src/AppDialogue.cpp
     src/AppPaths.cpp
@@ -109,7 +110,9 @@ add_executable(wow-world-editor WIN32
     src/Pois.cpp
     src/Races.cpp
     src/Terrain.cpp
-    src/Triggers.cpp)
+    src/Triggers.cpp
+    src/WmoCompose.cpp
+    src/WmoEdit.cpp)
 target_compile_definitions(wow-world-editor PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN CASCLIB_NO_AUTO_LINK_LIBRARY)
 target_link_libraries(wow-world-editor PRIVATE imgui StormLib::storm casc_static nlohmann_json::nlohmann_json
     d3d11 d3dcompiler dxgi ole32 shell32 uuid windowscodecs advapi32 winhttp winmm)

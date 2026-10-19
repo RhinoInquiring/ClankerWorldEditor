@@ -72,9 +72,11 @@ std::vector<Change> AddLooseCreatureModel(const std::filesystem::path& file, con
 /// The project's files that sit in no archive, as a layer for the project's MpqChain (read first, as the patch will be):
 /// every file of `assets` (by its path under it), and every file an import copies at export, read from its source
 /// client (`source` finds it by name; files of a source not attached are left out) or, marked "fromClient", from
-/// `client`, with the fixed texture names export renames. A file of the assets wins over an import's.
+/// `client`, with the fixed texture names export renames. A file of the assets wins over an import's. Files of
+/// `generated` (edited WMOs: WmoEditAdapter::Dir) are listed the same way and win over both.
 std::shared_ptr<const MpqChain::ProjectFiles> ProjectFilesLayer(const std::filesystem::path& assets, const std::map<uint32_t, nlohmann::json>& packages,
-                                                                const std::function<const MpqChain*(const std::string&)>& source, const MpqChain& client);
+                                                                const std::function<const MpqChain*(const std::string&)>& source, const MpqChain& client,
+                                                                const std::filesystem::path& generated = {});
 
 /// The changes removing an imported model: its package and the rows it added.
 std::vector<Change> RemoveCreatureModelChanges(uint32_t model, const CreatureModelAdapter& adapter, const DbcTable& displays, const DbcTable& models);
