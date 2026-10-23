@@ -511,7 +511,7 @@ void App::DrawTriggersPanel(float w)
         const auto savedTp = teleports.find(t.id);
         const bool changed = !saved || t.ToDbcRow() != saved->ToDbcRow() || m_teleportEdit.has_value() != (savedTp != teleports.end()) ||
                              (m_teleportEdit && m_teleportEdit->ToRow() != savedTp->second.ToRow());
-        if (changed && editable && !ImGui::IsAnyItemActive() && !m_gizmoActive) CommitTrigger(t.id, t, m_teleportEdit, "Edit trigger " + std::to_string(t.id));
+        if (changed && editable && !ImGui::IsAnyItemActive() && !m_gizmoDrag.active) CommitTrigger(t.id, t, m_teleportEdit, "Edit trigger " + std::to_string(t.id));
     }
 
     if (Section("Entrance"))

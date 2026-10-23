@@ -83,7 +83,7 @@ format code never touches the GPU; the `App*` files are the UI.
 | `src/AppFlights.cpp` | Flights tool: nodes, paths, points, flight masters, their checks |
 | `src/AppWorldMap.cpp` | World map drawing |
 | `src/AppInspect.cpp` | Inspector |
-| `src/AppInterior.cpp` | Doodads inside a building: the Objects tool's interior session, picking, handles, panel |
+| `src/AppInterior.cpp` | Building editor: its window and tabs (one WMO each, alone on its own renderer layer), camera, picking, handles, doodad and group panel |
 | `src/AppServer.cpp` | Server setup, Server panel, Problems |
 | `src/main.cpp` | Window and device, frame loop |
 

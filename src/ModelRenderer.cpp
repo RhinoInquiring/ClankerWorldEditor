@@ -395,13 +395,13 @@ std::optional<float> ModelRenderer::HitDistance(const Instance& inst, FXMVECTOR 
     return nearest * (maxDistance / len);
 }
 
-std::optional<ModelRenderer::Hit> ModelRenderer::Pick(FXMVECTOR origin, FXMVECTOR dir, float maxDistance, const DrawSettings& settings) const
+std::optional<ModelRenderer::Hit> ModelRenderer::Pick(FXMVECTOR origin, FXMVECTOR dir, float maxDistance, const DrawSettings& settings, int layer) const
 {
     std::optional<Hit> best;
     float bestT = maxDistance;
     for (const auto& [key, inst] : m_instances)
     {
-        if (inst.layer != 0 || (inst.wmo ? !settings.wmos : !settings.doodads) || (inst.attached && !settings.attached)) continue;
+        if (inst.layer != layer || (inst.wmo ? !settings.wmos : !settings.doodads) || (inst.attached && !settings.attached)) continue;
         if (const auto t = HitDistance(inst, origin, dir, bestT))
         {
             bestT = *t;
@@ -533,11 +533,11 @@ void ModelRenderer::RenderThumb(Thumb& thumb, const std::vector<std::tuple<GpuMe
     if (viewports) m_context->RSSetViewports(1, &oldVp);
 }
 
-bool ModelRenderer::Corners(bool wmo, uint32_t uid, XMFLOAT3 corners[8]) const
+bool ModelRenderer::Corners(bool wmo, uint32_t uid, XMFLOAT3 corners[8], int layer) const
 {
     for (const auto& [key, inst] : m_instances)
     {
-        if (inst.layer != 0 || inst.attached || inst.wmo != wmo || inst.uid != uid) continue;
+        if (inst.layer != layer || inst.attached || inst.wmo != wmo || inst.uid != uid) continue;
         const XMMATRIX world = XMLoadFloat4x4(&inst.world);
         const XMFLOAT3& a = inst.mesh->boundsMin;
         const XMFLOAT3& b = inst.mesh->boundsMax;
@@ -548,12 +548,12 @@ bool ModelRenderer::Corners(bool wmo, uint32_t uid, XMFLOAT3 corners[8]) const
     return false;
 }
 
-std::optional<ModelRenderer::DoodadHit> ModelRenderer::PickDoodad(uint32_t wmoUid, FXMVECTOR origin, FXMVECTOR dir, float maxDistance) const
+std::optional<ModelRenderer::DoodadHit> ModelRenderer::PickDoodad(uint32_t wmoUid, FXMVECTOR origin, FXMVECTOR dir, float maxDistance, int layer) const
 {
     std::optional<DoodadHit> best;
     float bestT = maxDistance;
     for (const auto& [key, inst] : m_instances)
-        if (inst.layer == 0 && inst.attached && inst.uid == wmoUid && inst.doodad >= 0)
+        if (inst.layer == layer && inst.attached && inst.uid == wmoUid && inst.doodad >= 0)
             if (const auto t = HitDistance(inst, origin, dir, bestT))
             {
                 bestT = *t;
@@ -562,11 +562,11 @@ std::optional<ModelRenderer::DoodadHit> ModelRenderer::PickDoodad(uint32_t wmoUi
     return best;
 }
 
-bool ModelRenderer::DoodadCorners(uint32_t wmoUid, uint32_t index, XMFLOAT3 corners[8]) const
+bool ModelRenderer::DoodadCorners(uint32_t wmoUid, uint32_t index, XMFLOAT3 corners[8], int layer) const
 {
     for (const auto& [key, inst] : m_instances)
     {
-        if (inst.layer != 0 || !inst.attached || inst.uid != wmoUid || inst.doodad != int32_t(index)) continue;
+        if (inst.layer != layer || !inst.attached || inst.uid != wmoUid || inst.doodad != int32_t(index)) continue;
         const XMMATRIX world = XMLoadFloat4x4(&inst.world);
         const XMFLOAT3& a = inst.mesh->boundsMin;
         const XMFLOAT3& b = inst.mesh->boundsMax;
@@ -605,12 +605,12 @@ std::vector<int> ModelRenderer::Forget(const std::string& name)
     return tiles;
 }
 
-std::optional<ModelRenderer::GroupHit> ModelRenderer::PickWmoGroup(uint32_t wmoUid, FXMVECTOR origin, FXMVECTOR dir, float maxDistance) const
+std::optional<ModelRenderer::GroupHit> ModelRenderer::PickWmoGroup(uint32_t wmoUid, FXMVECTOR origin, FXMVECTOR dir, float maxDistance, int layer) const
 {
     std::optional<GroupHit> best;
     for (const auto& [key, inst] : m_instances)
     {
-        if (inst.layer != 0 || inst.attached || !inst.wmo || inst.uid != wmoUid || !inst.mesh->wmo) continue;
+        if (inst.layer != layer || inst.attached || !inst.wmo || inst.uid != wmoUid || !inst.mesh->wmo) continue;
         // The ray in model space, as HitDistance does, then each batch's triangles.
         const XMMATRIX inv = XMMatrixInverse(nullptr, XMLoadFloat4x4(&inst.world));
         const XMVECTOR o = XMVector3TransformCoord(origin, inv);
@@ -670,7 +670,7 @@ void ModelRenderer::Draw(FXMMATRIX viewProj, const XMFLOAT3& eye, const DrawSett
     std::map<std::pair<GpuMesh*, const Look*>, std::vector<const XMFLOAT4X4*>> groups;
     for (const auto& [key, inst] : m_instances)
     {
-        if (inst.layer == kDetailLayer ? !settings.details : (inst.layer != settings.layer && inst.layer != -1)) continue;
+        if (inst.layer == kDetailLayer ? !settings.details : (inst.layer != settings.layer && (inst.layer != -1 || !settings.previews))) continue;
         if (inst.mesh->wmo ? !settings.wmos : !settings.doodads) continue;
         if (visible(inst)) groups[{ inst.mesh, inst.look }].push_back(&inst.world);
     }
@@ -696,7 +696,7 @@ void ModelRenderer::Draw(FXMMATRIX viewProj, const XMFLOAT3& eye, const DrawSett
     }
     m_context->Unmap(m_instanceBuffer.Get(), 0);
     m_drawn = total;
-    Submit(runs, viewProj, true);
+    Submit(runs, viewProj, settings.sceneLit);
 }
 
 void ModelRenderer::Submit(const std::vector<Run>& runs, FXMMATRIX viewProj, bool sceneLit)

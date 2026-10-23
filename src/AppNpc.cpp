@@ -215,10 +215,8 @@ void App::ScenePreview::Frame(const XMFLOAT3& lo, const XMFLOAT3& hi, float scal
     distance = std::max(0.5f * std::sqrt(dx * dx + dy * dy + dz * dz) * scale * 2.6f, 0.5f);
 }
 
-void App::DrawScene(ScenePreview& v, const ImVec2& size, ModelRenderer& models, const MpqChain& mpq, const std::vector<ModelRenderer::Part>& parts,
-                    const char* empty)
+bool App::SceneTarget(ScenePreview& v, UINT w, UINT h)
 {
-    const UINT w = UINT(std::max(size.x, 8.0f)), h = UINT(std::max(size.y, 8.0f));
     if (w != v.width || h != v.height || !v.rtv)
     {
         v.width = w;
@@ -246,7 +244,14 @@ void App::DrawScene(ScenePreview& v, const ImVec2& size, ModelRenderer& models, 
         m_device->CreateTexture2D(&d, nullptr, &v.depth);
         if (v.depth) m_device->CreateDepthStencilView(v.depth.Get(), nullptr, &v.dsv);
     }
-    if (!v.rtv || !v.dsv) return;
+    return v.rtv && v.dsv;
+}
+
+void App::DrawScene(ScenePreview& v, const ImVec2& size, ModelRenderer& models, const MpqChain& mpq, const std::vector<ModelRenderer::Part>& parts,
+                    const char* empty)
+{
+    const UINT w = UINT(std::max(size.x, 8.0f)), h = UINT(std::max(size.y, 8.0f));
+    if (!SceneTarget(v, w, h)) return;
 
     const ImGuiIO& io = ImGui::GetIO();
     const XMVECTOR center = XMVectorSet(v.center[0], v.center[1], v.center[2], 0);

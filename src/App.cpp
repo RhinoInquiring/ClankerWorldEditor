@@ -439,6 +439,7 @@ bool App::Init(HWND hwnd, ID3D11Device* device, ID3D11DeviceContext* context, bo
         { "Server: build server data (maps, vmaps, mmaps)", "", [this] { m_showServerData = true; }, hasProject },
         { "Check for problems", "", [this] { RunChecks(); }, hasProject },
         { "Window: NPC viewer", "", [this] { m_showNpc = true; m_npc.focus = true; }, always },
+        { "Window: Building editor", "", [this] { m_showBuildings = m_buildingFront = true; }, hasProject },
         { "Window: Sources", "", [this] { m_showSources = true; }, hasProject },
         { "Window: Races", "", [this] { m_showRaces = true; }, hasProject },
         { "Window: Creature models", "", [this] { m_showCreatureModels = true; }, hasProject },
@@ -616,7 +617,7 @@ void App::CloseProject()
 {
     m_terrain.Unload();
     m_models.Clear();
-    m_interior.reset();
+    m_buildings.clear();
     for (const auto& [key, e] : m_wmoEdits.All()) m_models.Forget(e.name);   // an original edited in place reads as the game has it again
     m_wmoEdits.Reset({}, {});
     m_wmoEdits.TakeChanged();
@@ -1431,7 +1432,8 @@ void App::DrawCatalog()
         ImGui::TextUnformatted(item.path.c_str());
         const auto use = m_usage.find(item.lower);
         ImGui::TextColored(kQuiet, "%s   used %d time(s) on the loaded tiles", m_mpq.Names()[item.archive].c_str(), use == m_usage.end() ? 0 : use->second);
-        ImGui::TextColored(kQuiet, "%s", item.kind == K::Doodad || item.kind == K::Wmo ? "Click to place it (Objects tool)"
+        ImGui::TextColored(kQuiet, "%s", item.kind == K::Wmo ? "Click to place it (Objects tool); right-click to open it in the Building editor"
+                                         : item.kind == K::Doodad ? "Click to place it (Objects tool)"
                                          : item.kind == K::GroundTexture ? "Click to pick it for painting" : "Click to copy the path");
         ImGui::EndTooltip();
     };
@@ -1504,6 +1506,11 @@ void App::DrawCatalog()
                         if (picked) ImGui::PopStyleColor();
                         tooltip(item);
                         if (clicked) activate(item);
+                        if (item.kind == K::Wmo && ImGui::BeginPopupContextItem("##building"))
+                        {
+                            if (ImGui::MenuItem("Edit in the Building editor")) OpenBuildingFile(item.path);
+                            ImGui::EndPopup();
+                        }
                         std::string name = FileOf(item.path);
                         if (const auto use = m_usage.find(item.lower); use != m_usage.end()) name = std::to_string(use->second) + "x " + name;
                         ImGui::TextUnformatted(Fit(name, thumb + style.FramePadding.x * 2).c_str());
@@ -2215,7 +2222,7 @@ void App::DeleteSelectedObjects()
     m_objSel.clear();
 }
 
-void App::DrawTransformBar(float pw)
+void App::DrawTransformBar(float pw, bool building)
 {
     // The same bar in every tool that moves things: handle mode, world / local, snapping, and what this selection allows.
     const float x0 = ImGui::GetCursorPosX();
@@ -2234,7 +2241,7 @@ void App::DrawTransformBar(float pw)
     ImGui::SameLine();
     ImGui::SetNextItemWidth(left / 3 - 4);
     ImGui::SliderFloat("##snapScale", &m_snapScale, 0.01f, 1.0f, "x%.2f", ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_AlwaysClamp);
-    if (const auto t = ActiveTransform())
+    if (const auto t = building ? BuildingTransform() : ActiveTransform())
     {
         const bool blocked = (m_gizmo == Gizmo::Rotate && !t->rotate) || (m_gizmo == Gizmo::Scale && t->scale == Transformable::Scale::None);
         if (blocked) ImGui::TextColored(kWarn, "%s Pick Move (1).", t->limits.c_str());
@@ -2253,7 +2260,6 @@ void App::DrawObjectPanel()
         return;
     }
     DrawTransformBar(ImGui::GetContentRegionAvail().x);
-    if (m_interior) { DrawInteriorPanel(); return; }
 
     if (m_objSel.empty())
     {
@@ -2369,8 +2375,8 @@ void App::DrawObjectPanel()
     if (isGlobal) ImGui::TextColored(kQuiet, "This map's own WMO: kept in its WDT, exported with it.");
     if (ref.wmo)
     {
-        if (ImGui::Button("Edit doodads inside")) BeginInterior(ref.uid);
-        ImGui::SetItemTooltip("Move, add and delete the building's own furniture (its doodad sets)");
+        if (ImGui::Button("Edit building")) OpenBuilding(ref.uid);
+        ImGui::SetItemTooltip("Opens it in the Building editor, alone in a view of its own: its furniture (doodad sets) and its parts (groups)");
     }
     ImGui::Spacing();
     if (ImGui::Button("Drop to ground"))
@@ -2970,6 +2976,7 @@ void App::Frame(float dt)
     DrawCreatureModels();
     UpdateNpc();
     DrawNpcViewer();
+    DrawBuildings();
     DrawShortcuts();
     DrawServerDataWindow();
     DrawChangesPanel();
@@ -3001,18 +3008,10 @@ void App::HandleShortcuts()
     if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_Y, global) || ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_Z, global)) Redo();
 
     if (ImGui::GetIO().WantTextInput) return;   // the rest only while not typing
-    if (m_tool == Tool::Objects && m_interior && m_interior->groups)   // a building's groups: copy, cut, paste them
-    {
-        if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_C, global)) CopyGroups(false);
-        if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_X, global)) CopyGroups(true);
-        if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_V, global)) PasteGroups();
-    }
-    else
-    {
-        if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_C, global)) CopySelection();
-        if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_V, global)) PasteInPlace();
-        if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_V, global)) PasteAtCursor();
-    }
+    if (m_buildingFocused) { BuildingKeys(); return; }   // the building editor has the keyboard: its keys, not the map's
+    if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_C, global)) CopySelection();
+    if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_V, global)) PasteInPlace();
+    if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_V, global)) PasteAtCursor();
     if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_B, global)) OpenSaveBlueprint();
     if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_T, global)) SetTopDown(!m_camera.topDown);
     if (ImGui::GetIO().KeyCtrl) return;
@@ -3069,9 +3068,6 @@ void App::HandleShortcuts()
         else if (!m_diffPending.empty()) { EndNewTiles(); m_diffPending.clear(); m_diffActive.clear(); }   // a review still on its way
         else if (m_pin) CancelPin();                  // first Esc: unpin, terrain goes back
         else if (m_placing) m_placing = false;        // second: stop placing
-        else if (m_tool == Tool::Objects && m_interior && m_interior->groups && !m_interior->groupSel.empty()) m_interior->groupSel.clear();
-        else if (m_tool == Tool::Objects && m_interior && !m_interior->groups && !m_interior->sel.empty()) m_interior->sel.clear();
-        else if (m_tool == Tool::Objects && m_interior) m_interior.reset();   // back to the map's objects
         else if (m_tool == Tool::Objects && !m_objSel.empty()) m_objSel.clear();
         else if (m_tool == Tool::Sculpt && m_terrain.SelectedVertices()) m_terrain.ClearVertexSelection();
         else if (pathMode) CancelPathEdit();          // leave path editing, nothing saved
@@ -3157,6 +3153,7 @@ void App::DrawMenuBar()
         ImGui::Separator();
         ImGui::MenuItem("Sources", nullptr, &m_showSources);
         ImGui::MenuItem("NPC viewer", nullptr, &m_showNpc);
+        ImGui::MenuItem("Building editor", nullptr, &m_showBuildings);
         ImGui::MenuItem("Races", nullptr, &m_showRaces);
         ImGui::MenuItem("Creature models", nullptr, &m_showCreatureModels);
         if (ImGui::MenuItem("Reset panel layout")) m_buildLayout = true;
@@ -3475,11 +3472,6 @@ void App::BuildOverlay(std::vector<LineVertex>& lines) const
         return;
     }
 
-    if (m_tool == Tool::Objects && m_interior)
-    {
-        InteriorOutlines(lines);
-        return;
-    }
     if (m_tool == Tool::Objects)
     {
         auto box = [&](const ObjectRef& r, XMFLOAT4 color) {
@@ -3490,7 +3482,7 @@ void App::BuildOverlay(std::vector<LineVertex>& lines) const
         };
         for (const ObjectRef& r : m_objSel) box(r, { 1, 0.75f, 0.2f, 1 });
         if (m_carryInside)   // what moves along with a selected building
-            for (const ObjectRef& r : m_gizmoActive ? m_gizmoRiders : m_terrain.DoodadsInside(m_objSel)) box(r, { 1, 0.75f, 0.2f, 0.35f });
+            for (const ObjectRef& r : m_gizmoDrag.active ? m_gizmoRiders : m_terrain.DoodadsInside(m_objSel)) box(r, { 1, 0.75f, 0.2f, 0.35f });
         if (m_objHover && !m_objSel.count(*m_objHover)) box(*m_objHover, { 1, 1, 1, 0.6f });
         return;
     }
@@ -3715,8 +3707,7 @@ void App::DrawViewport(float dt)
             }
         }
         m_objHover.reset();
-        if (m_tool == Tool::Objects && m_interior && !gizmoHot) InteriorViewport(p0, dir, origin, size);
-        else if ((m_tool == Tool::Objects && !gizmoHot) || (m_tool == Tool::Zones && io.KeyShift))
+        if ((m_tool == Tool::Objects && !gizmoHot) || (m_tool == Tool::Zones && io.KeyShift))
         {
             const float ground = m_hover ? XMVectorGetX(XMVector3Length(XMVectorSubtract(XMLoadFloat3(&m_hover->pos), p0))) : 6000.0f;
             if (const auto hit = m_models.Pick(p0, dir, ground, m_modelSettings)) m_objHover = ObjectRef{ hit->wmo, hit->uid };
@@ -3734,14 +3725,7 @@ void App::DrawViewport(float dt)
 
     // The armed catalog model follows the cursor.
     m_models.RemoveTile(-2);
-    if (m_armed && m_tool == Tool::Objects && m_interior && m_interior->point && !m_armed->wmo)
-    {
-        // Inside a building: as it will stand in the building's own axes.
-        const auto d = InteriorDoodadAt(*m_interior->point);
-        if (const auto world = InteriorWorld(); d && world)
-            m_models.AddModel(-2, ModelLook{ d->model }, DoodadMatrix(*d) * XMLoadFloat4x4(&*world), d->scale, 0, m_mpq);
-    }
-    else if (m_armed && m_tool == Tool::Objects && !m_interior && m_hover)
+    if (m_armed && m_tool == Tool::Objects && m_hover)
     {
         Adt preview;
         const float pos[3] = { m_hover->pos.x, m_hover->pos.y, m_hover->pos.z }, rot[3] = { 0, m_placeYaw, 0 };
@@ -3920,40 +3904,6 @@ void App::DrawViewport(float dt)
     else if (m_tool == Tool::GroundEffects)
     {
         GroundEffectsViewport();
-    }
-    else if (m_tool == Tool::Objects && m_interior)
-    {
-        // A building's own doodads: click picks (Shift adds, Ctrl removes), an armed catalog doodad is added where clicked.
-        if (ImGui::IsItemActivated() && ImGui::IsMouseDown(ImGuiMouseButton_Left))
-        {
-            m_boxStart[0] = io.MousePos.x;
-            m_boxStart[1] = io.MousePos.y;
-        }
-        const bool click = ImGui::IsItemDeactivated() && ImGui::IsMouseReleased(ImGuiMouseButton_Left) &&
-                           std::fabs(io.MousePos.x - m_boxStart[0]) + std::fabs(io.MousePos.y - m_boxStart[1]) <= 5;
-        std::set<uint32_t>& picked = m_interior->groups ? m_interior->groupSel : m_interior->sel;
-        if (click && m_armed && !m_armed->wmo && !m_interior->groups && m_interior->point && m_wmoEdits.Find(m_interior->wmo))
-        {
-            if (const auto d = InteriorDoodadAt(*m_interior->point))
-            {
-                const uint32_t id = m_interior->live.NextId();
-                m_interior->live.doodads[id] = *d;
-                CommitInterior("Add " + FileOf(d->model) + " to " + FileOf(m_interior->wmo));
-                m_interior->sel = { id };
-                if (!io.KeyShift) m_armed.reset();
-                if (m_placeRandomYaw) m_placeYaw = RandomUnit() * 360.0f;
-            }
-        }
-        else if (click && io.KeyAlt && !picked.empty() && m_interior->point)
-            MoveSelectionTo(*m_interior->point);   // Alt+click: the selection goes there
-        else if (click && !m_armed)
-        {
-            const std::optional<uint32_t> hit = m_interior->groups ? m_interior->groupHover : m_interior->hover;
-            if (!hit) { if (!io.KeyShift && !io.KeyCtrl) picked.clear(); }
-            else if (io.KeyCtrl) picked.erase(*hit);
-            else if (io.KeyShift) picked.insert(*hit);
-            else picked = { *hit };
-        }
     }
     else if (m_tool == Tool::Objects)
     {
@@ -4194,14 +4144,6 @@ void App::DrawViewport(float dt)
             snprintf(caption, sizeof caption, "%s   World > Sound   click the ground: add an emitter   Shift+click: add and keep going   Esc: stop", m_terrain.Map().c_str());
         else if (m_tool == Tool::Lights && m_lightPlace)
             snprintf(caption, sizeof caption, "%s   World > Lights   click the ground: add a light   Shift+click: add and keep going   Esc: stop", m_terrain.Map().c_str());
-        else if (m_tool == Tool::Objects && m_interior && m_armed)
-            snprintf(caption, sizeof caption, "%s   World > Objects > %s > Add %s   click inside: add   Shift+click: add and keep going   Esc: stop",
-                     m_terrain.Map().c_str(), FileOf(m_interior->wmo).c_str(), FileOf(m_armed->path).c_str());
-        else if (m_tool == Tool::Objects && m_interior)
-            snprintf(caption, sizeof caption, "%s   World > Objects > %s %s (%s)   %zu selected   %s   Esc: back to the map", m_terrain.Map().c_str(),
-                     FileOf(m_interior->wmo).c_str(), m_interior->groups ? "groups" : "doodads",
-                     m_gizmo == Gizmo::Move ? "Move" : m_gizmo == Gizmo::Rotate ? "Rotate" : "Scale",
-                     m_interior->groups ? m_interior->groupSel.size() : m_interior->sel.size(), TransformHint().c_str());
         else if (m_tool == Tool::Objects && m_armed)
             snprintf(caption, sizeof caption, "%s   World > Objects > Place %s   click: place   Shift+click: place and keep going   Esc: stop",
                      m_terrain.Map().c_str(), FileOf(m_armed->path).c_str());

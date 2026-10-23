@@ -2528,6 +2528,175 @@ namespace checks
         return problems ? 1 : 0;
     }
 
+    /// --building-check <Data> <wmo> <out.png>: the building editor's view of one WMO. It stands alone on a layer of its
+    /// own at the origin (no turn): drawn there and not on the map's layer, its boxes, groups and doodads picked on its
+    /// layer only, a doodad moved by SetWmoDoodads shows moved once the tile is added again; the view saved as a PNG.
+    int BuildingCheck()
+    {
+        if (__argc < 5 || !__wargv) return 2;
+        setvbuf(stdout, nullptr, _IONBF, 0);
+        auto arg = [](int i) {
+            char buf[1024] = {};
+            WideCharToMultiByte(CP_ACP, 0, __wargv[i], -1, buf, sizeof buf, nullptr, nullptr);
+            return std::string(buf);
+        };
+        MpqChain mpq;
+        mpq.Open(arg(2));
+        const std::string wmo = arg(3);
+        ComPtr<ID3D11Device> device;
+        ComPtr<ID3D11DeviceContext> context;
+        if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &device, nullptr, &context))) return 1;
+        Renderer renderer;
+        ModelRenderer models;
+        std::string error;
+        if (!renderer.Init(device.Get(), context.Get(), error) || !models.Init(device.Get(), context.Get(), renderer, error)) { printf("%s\n", error.c_str()); return 1; }
+        const auto root = mpq.Read(wmo);
+        const auto doodads = root ? ReadWmoDoodads(*root, {}, error) : std::nullopt;
+        if (!doodads) { printf("cannot read %s: %s\n", wmo.c_str(), root ? error.c_str() : "file not found"); return 1; }
+
+        // As App::ShowBuilding places it: layer L, the origin, rotation 90 (no turn), set 1 when it has one.
+        constexpr int kLayer = (1 << 24) + 1, kKey = -200000002;
+        constexpr uint32_t kUid = 0xF0000001u;
+        const uint16_t set = doodads->sets.size() > 1 ? 1 : 0;
+        auto show = [&] {
+            models.RemoveTile(kKey);
+            Adt adt;
+            adt.wmos.push_back({ wmo, { 0, 0, 0 }, { 0, 90, 0 }, {}, {}, kUid, set });
+            models.AddTile(kKey, adt, mpq, kLayer);
+        };
+        show();
+        int problems = 0;
+        auto bad = [&](const char* what) { printf("  PROBLEM: %s\n", what); ++problems; };
+        XMFLOAT3 c[8];
+        if (!models.Corners(true, kUid, c, kLayer)) { printf("not drawn: the WMO did not load\n"); return 1; }
+        if (models.Corners(true, kUid, c, 0)) bad("the building shows on the map's layer");
+        XMFLOAT3 lo{ INFINITY, INFINITY, INFINITY }, hi{ -INFINITY, -INFINITY, -INFINITY };
+        for (const XMFLOAT3& p : c)
+        {
+            lo = { std::min(lo.x, p.x), std::min(lo.y, p.y), std::min(lo.z, p.z) };
+            hi = { std::max(hi.x, p.x), std::max(hi.y, p.y), std::max(hi.z, p.z) };
+        }
+        printf("%s: box (%.1f %.1f %.1f) - (%.1f %.1f %.1f), %zu doodads, %zu sets (showing %u), %zu groups\n", wmo.c_str(), lo.x, lo.y, lo.z, hi.x, hi.y,
+               hi.z, doodads->doodads.size(), doodads->sets.size(), set, doodads->slots.size());
+
+        // Groups: rays straight down over a grid of the box find a group on the building's layer and nothing on the map's.
+        size_t groupHits = 0, mapHits = 0, rays = 0;
+        for (int i = 1; i < 8; ++i)
+            for (int j = 1; j < 8; ++j, ++rays)
+            {
+                const XMVECTOR p0 = XMVectorSet(lo.x + (hi.x - lo.x) * i / 8, hi.y + 5, lo.z + (hi.z - lo.z) * j / 8, 0), down = XMVectorSet(0, -1, 0, 0);
+                groupHits += models.PickWmoGroup(kUid, p0, down, hi.y - lo.y + 10, kLayer).has_value();
+                mapHits += models.PickWmoGroup(kUid, p0, down, hi.y - lo.y + 10, 0).has_value();
+            }
+        printf("groups: %zu of %zu rays down hit one, %zu on the map's layer\n", groupHits, rays, mapHits);
+        if (!groupHits) bad("no group picked");
+        if (mapHits) bad("groups picked on the map's layer");
+
+        // Doodads: a ray down onto each shown doodad's box centre picks a doodad; one moved 2 yd along x shows moved.
+        std::vector<ModelMesh::Doodad> list;
+        std::vector<ModelMesh::DoodadSet> sets;
+        std::vector<uint32_t> ids;
+        MeshDoodads(*doodads, list, sets, ids);
+        size_t shown = 0, picked = 0;
+        std::optional<uint32_t> first;
+        for (uint32_t i = 0; i < list.size(); ++i)
+        {
+            if (!models.DoodadCorners(kUid, i, c, kLayer)) continue;
+            ++shown;
+            if (!first) first = i;
+            float top = -INFINITY;
+            for (const XMFLOAT3& p : c) top = std::max(top, p.y + 1);
+            const float x = (c[0].x + c[7].x) / 2, z = (c[0].z + c[7].z) / 2;   // opposite corners: the box centre
+            picked += models.PickDoodad(kUid, XMVectorSet(x, top, z, 0), XMVectorSet(0, -1, 0, 0), 50, kLayer).has_value();
+            if (models.DoodadCorners(kUid, i, c, 0)) { bad("a doodad shows on the map's layer"); break; }
+        }
+        printf("doodads: %zu shown (set 0 and %u), %zu picked from above\n", shown, set, picked);
+        if (shown && !picked) bad("no doodad picked");
+        if (first)
+        {
+            models.DoodadCorners(kUid, *first, c, kLayer);
+            const float before = c[0].x;
+            auto moved = list;
+            moved[*first].pos.x += 2;   // WoW x = editor x
+            models.SetWmoDoodads(wmo, moved, sets);
+            show();
+            models.DoodadCorners(kUid, *first, c, kLayer);
+            printf("doodad %u moved by %.2f yd (want 2.00)\n", *first, c[0].x - before);
+            if (std::fabs(c[0].x - before - 2) > 0.01f) bad("the moved doodad did not follow");
+            models.SetWmoDoodads(wmo, list, sets);
+            show();
+        }
+
+        // The view as the window frames it (ScenePreview::Frame, yaw 0.6, pitch 0.25), on the building's layer and on the map's.
+        constexpr UINT kW = 960, kH = 600;
+        D3D11_TEXTURE2D_DESC d{};
+        d.Width = kW;
+        d.Height = kH;
+        d.MipLevels = d.ArraySize = 1;
+        d.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        d.SampleDesc.Count = 1;
+        d.BindFlags = D3D11_BIND_RENDER_TARGET;
+        ComPtr<ID3D11Texture2D> color, depth, staging;
+        ComPtr<ID3D11RenderTargetView> rtv;
+        ComPtr<ID3D11DepthStencilView> dsv;
+        device->CreateTexture2D(&d, nullptr, &color);
+        device->CreateRenderTargetView(color.Get(), nullptr, &rtv);
+        d.Usage = D3D11_USAGE_STAGING;
+        d.BindFlags = 0;
+        d.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        device->CreateTexture2D(&d, nullptr, &staging);
+        d.Usage = D3D11_USAGE_DEFAULT;
+        d.CPUAccessFlags = 0;
+        d.Format = DXGI_FORMAT_D32_FLOAT;
+        d.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+        device->CreateTexture2D(&d, nullptr, &depth);
+        device->CreateDepthStencilView(depth.Get(), nullptr, &dsv);
+        const float dx = hi.x - lo.x, dy = hi.y - lo.y, dz = hi.z - lo.z;
+        const float distance = std::max(0.5f * std::sqrt(dx * dx + dy * dy + dz * dz) * 2.6f * 0.65f, 3.0f), yaw = 0.6f, pitch = 0.25f;
+        const XMVECTOR center = XMVectorSet((lo.x + hi.x) / 2, (lo.y + hi.y) / 2, (lo.z + hi.z) / 2, 0);
+        const XMVECTOR eye = XMVectorAdd(center, XMVectorScale(XMVectorSet(std::cos(pitch) * std::cos(yaw), std::sin(pitch), std::cos(pitch) * std::sin(yaw), 0), distance));
+        const XMMATRIX viewProj = XMMatrixLookAtRH(eye, center, XMVectorSet(0, 1, 0, 0)) * XMMatrixPerspectiveFovRH(XMConvertToRadians(60.0f), float(kW) / kH, 0.1f, 5000.0f);
+        XMFLOAT3 at;
+        XMStoreFloat3(&at, eye);
+        const float bg[4] = { 0.16f, 0.17f, 0.20f, 1 };
+        auto render = [&](int layer, std::vector<uint8_t>& bgra) {
+            const D3D11_VIEWPORT vp{ 0, 0, float(kW), float(kH), 0, 1 };
+            context->OMSetRenderTargets(1, rtv.GetAddressOf(), dsv.Get());
+            context->RSSetViewports(1, &vp);
+            context->ClearRenderTargetView(rtv.Get(), bg);
+            context->ClearDepthStencilView(dsv.Get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
+            ModelRenderer::DrawSettings settings;
+            settings.layer = layer;
+            settings.distance = 5000.0f;
+            settings.details = settings.previews = settings.sceneLit = false;
+            models.Draw(viewProj, at, settings);
+            context->CopyResource(staging.Get(), color.Get());
+            D3D11_MAPPED_SUBRESOURCE m{};
+            size_t covered = 0;
+            bgra.assign(size_t(kW) * kH * 4, 255);
+            if (FAILED(context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &m))) return covered;
+            for (UINT y = 0; y < kH; ++y)
+                for (UINT x = 0; x < kW; ++x)
+                {
+                    const uint8_t* p = static_cast<const uint8_t*>(m.pData) + y * m.RowPitch + x * 4;
+                    uint8_t* q = bgra.data() + (size_t(y) * kW + x) * 4;
+                    q[0] = p[2]; q[1] = p[1]; q[2] = p[0];
+                    covered += std::abs(p[0] - 41) + std::abs(p[1] - 43) + std::abs(p[2] - 51) > 6;   // not the background
+                }
+            context->Unmap(staging.Get(), 0);
+            return covered;
+        };
+        std::vector<uint8_t> image, map;
+        const size_t covered = render(kLayer, image), leaked = render(0, map);
+        printf("view: %.1f%% of the picture is the building; drawn on the map's layer: %zu pixel(s)\n", 100.0 * double(covered) / (kW * kH), leaked);
+        if (covered < kW * kH / 100) bad("the view is (nearly) empty");
+        if (leaked) bad("the building draws on the map's layer");
+        CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        if (!SavePng(__wargv[4], kW, kH, std::move(image))) bad("cannot write the png");
+        printf("%d problem(s)\n", problems);
+        return problems ? 1 : 0;
+    }
+
     /// --wmo-group-check <Data> [every]: (1) every WMO of the client rebuilt from its own groups as they are gives the
     /// same materials, textures, names, lights, fogs, portals and groups (each group byte for byte but its doodad list);
     /// (2) every `every`-th WMO pasted whole into the first one with portals, a quarter turn and a move: all its portals

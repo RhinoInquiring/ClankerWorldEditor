@@ -48,27 +48,55 @@ On a WMO-only map (most dungeons) the map's own WMO is an object like any other:
 handles, change its doodad set or replace it. It lives in the map's WDT, which export writes with it; it cannot be
 deleted (the map is that WMO).
 
-## Doodads inside a building
+## Building editor
 
-A WMO file carries its own furniture: doodad sets (MODS) of doodads (MODD) that every placement of that file shows.
-With one WMO selected, **Edit doodads inside** in the Object window edits them; **Esc** goes back to the map's objects.
+A WMO file carries its own furniture (doodad sets, MODS, of doodads, MODD, that every placement of that file shows)
+and is made of groups (rooms, halls, a bridge span). Both are edited in the **Building editor**: a window of its own
+where the building stands alone at the origin, in its own axes, with nothing of the map around it.
 
-The first time, pick how:
+Open one:
+
+- from the map: Objects tool, select a building, **Edit building** in the Object window (the tab remembers that
+  placement and shows the doodad set it shows);
+- from the Catalog: right-click a building, **Edit in the Building editor**;
+- View > Building editor, or the command palette (Ctrl+P), shows the window again.
+
+Each building is a tab; opening one already open brings its tab forward. The panel on the left edits the shown tab; the
+map shows every edit too.
+
+The view:
+
+| Input | Action |
+| --- | --- |
+| Right drag | Look around (the eye stays put) |
+| W A S D / Q E | Fly (Shift: 5x); the wheel while looking sets the fly speed |
+| Middle drag | Orbit the centre; Shift+middle drag pans |
+| Wheel | Zoom towards the centre |
+| F | Frame the selection, else the whole building |
+| Click | Select (Shift adds, Ctrl removes); Alt+click moves the selection there |
+
+While a Building editor panel has the keyboard, keys go to it (the map's tool keys wait).
+
+The first time, pick how to edit:
 
 | Choice | What changes |
 | --- | --- |
-| **Make a copy for this placement** (the usual one) | A new WMO file in the project, `<name>_c1.wmo` with its groups; this placement uses it (one undo step with the copy) |
+| **Make a copy for this placement** (opened from the map; the usual one) | A new WMO file in the project, `<name>_c1.wmo` with its groups; this placement uses it (one undo step with the copy) |
+| **Make a copy** (opened from the Catalog) | The same new file, used by nothing yet: it is picked for placing, click the map to put it there |
 | **Edit the original** | The game's file itself: every placement of it, on every map |
 
-Then the building's doodads work like map objects: click to select (Shift adds, Ctrl removes), the same handles and
-keys move, turn and scale them, **G** drops them onto the floor below, **Del** deletes. The panel lists the doodads of
-one set and edits position (in the building's own axes), scale and the lighting colour of one; **Duplicate**,
-**Delete**, **Reset turn**, **Replace with ...** and **Move to set** work on the selection.
+### Doodads
 
-- **Add**: pick a doodad in the Catalog, then click inside the building; it joins the set shown in the panel and takes
-  the lighting colour of the nearest doodad of that set. Shift+click keeps adding.
-- **Sets**: add a set, rename one, or delete the last one (placements name sets by number, so only the last can go;
-  set 0 always stays). A set the placement does not show gets a **Show it here** button.
+The building's doodads work like map objects: click to select (Shift adds, Ctrl removes), the same handles and keys
+move, turn and scale them, **G** drops them onto the floor below, **Del** deletes. The panel lists the doodads of one set
+and edits position (in the building's own axes), scale and the lighting colour of one; **Duplicate**, **Delete**,
+**Reset turn**, **Replace with ...** and **Move to set** work on the selection.
+
+- **Add**: pick a doodad in the Catalog, then click in the view; it joins the set shown in the panel and takes the
+  lighting colour of the nearest doodad of that set. Shift+click keeps adding.
+- **Sets**: the view shows set 0 (always shown) and the set picked in the panel. Add a set, rename one, or delete the
+  last one (placements name sets by number, so only the last can go; set 0 always stays). Opened from the map, a set
+  the placement does not show gets a **Show it there** button.
 - Each doodad belongs to the group whose box holds it (the group lists it in MODR, which the game uses to draw and
   light it). Untouched doodads keep the groups the file gave them.
 
@@ -76,28 +104,28 @@ Edited WMOs live in `<project>/wmos/` (rebuilt from the changes when the project
 files, and export writes the root and every group, plus any model a new doodad needs that players lack. WMOs from
 newer clients (doodads or groups by FileDataID) cannot be edited yet; export converts them.
 
-Not yet: the copy goes to the selected placement only (other placements keep the original); a copy has no interior
-minimap pictures of its own; doodads inside a WMO are not part of a terrain copy and paste.
+Not yet: a copy goes to one placement only (other placements keep the original); a copy has no interior minimap
+pictures of its own; doodads inside a WMO are not part of a terrain copy and paste.
 
-## Groups: cut and paste between buildings
+### Groups: cut and paste between buildings
 
-**Groups** at the top of the panel switches from doodads to the building's parts (WMO groups: rooms, halls, a bridge
-span). Click a group to select it (Shift adds, Ctrl removes); the list names each group, the file it came from and
-whether it is lit as indoor or outdoor.
+**Groups** at the top of the panel switches from doodads to the building's parts (WMO groups). Click a group to select
+it (Shift adds, Ctrl removes); the list names each group, the file it came from and whether it is lit as indoor or
+outdoor.
 
 | Key / button | Action |
 | --- | --- |
 | Ctrl+C | Copy the selected groups, with the doodads standing in them |
 | Ctrl+X | Cut them (copy, then delete from this building) |
-| Ctrl+V | Paste into the building being edited: its bottom middle lands where the cursor last pointed in it |
+| Ctrl+V | Paste into the shown building: its bottom middle lands where the cursor last pointed in the view (a floor, else the floor plane) |
 | Handles, PgUp/PgDn, Alt+click | Move the selected groups; turning snaps to quarter turns about the vertical |
 | Del | Delete the selected groups and their doodads |
 | Lit as | As it is, indoor or outdoor |
 
-The clipboard keeps its groups after leaving a building: copy from one (even one not made editable), then **Edit doodads
-inside** another, make it editable and paste. What a group needs comes with it: its materials and textures (shared
-when identical), its name, the lights and fog volumes it uses, and its doodads (into the set of the same name, made if
-missing). Pasted groups get their own WMOAreaTable group ids, so room names do not collide.
+To move groups between buildings: copy in one tab (even one not made editable), switch to the other tab, make it
+editable and paste. What a group needs comes with it: its materials and textures (shared when identical), its name, the
+lights and fog volumes it uses, and its doodads (into the set of the same name, made if missing). Pasted groups get
+their own WMOAreaTable group ids, so room names do not collide.
 
 - **Portals** stay between groups that came in together and moved together. A group pasted alone has none: lit as
   outdoor it is drawn from outside; drawing new portals comes with the portal tool.

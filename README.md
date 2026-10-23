@@ -56,7 +56,7 @@ click a tile to fly there.
 | --- | --- |
 | [Objects](docs/objects/objects.md) | Select, move, turn and scale doodads and buildings with a gizmo; furniture follows its building |
 | [Catalog](docs/objects/catalog.md) | Browse every model, building, texture and unit with thumbnails; click to place or paint |
-| [Building interiors](docs/objects/objects.md#doodads-inside-a-building) | Move, add and delete the doodads a WMO carries, edit its doodad sets; in a project copy for one placement or in the original |
+| [Building editor](docs/objects/objects.md#building-editor) | A window of its own per building (tabs, fly camera): move, add and delete the doodads a WMO carries, edit its doodad sets; in a project copy for one placement or in the original |
 | [Building parts](docs/objects/objects.md#groups-cut-and-paste-between-buildings) | Cut, copy and paste WMO groups between buildings with their materials, lights, portals and doodads; move them and turn them in quarter turns |
 | [Dungeons](docs/objects/objects.md#doodad-sets-replacing-dungeon-wmos) | WMO-only maps (most instances) load as their WMO: move, turn or replace it, pick its doodad set; spawns and points stand on its floors |
 

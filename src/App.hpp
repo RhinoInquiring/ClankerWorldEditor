@@ -408,6 +408,9 @@ private:
     // selection can be moved. A tool takes part by returning its selection from ActiveTransform; a future tool that
     // moves things adds a case there and gets the same handles, snapping, keys and undo for free.
 
+    /// A handle drag of one view (the map's, a building's): `active` while dragging (one edit), the handle's frame now
+    /// and when the drag began, and the dragged selection's cancel, should the selection change mid-drag.
+    struct GizmoDrag { bool active = false; DirectX::XMFLOAT4X4 matrix{}, start{}; std::function<void()> cancel; };
     /// The active tool's selection as the shared move / rotate / scale controls see it.
     struct Transformable
     {
@@ -429,14 +432,19 @@ private:
     bool TransformTool() const { return m_tool == Tool::Objects || SpawnTool() || m_tool == Tool::Triggers || m_tool == Tool::Pois || m_tool == Tool::Flights || m_tool == Tool::Lights || m_tool == Tool::Sound || m_tool == Tool::Roads; }
     /// Move / rotate / scale handles on the selection; true while the mouse is over or dragging one.
     bool UpdateGizmo(const ImVec2& origin, const ImVec2& size);
+    /// The handles of `t` in one view (`id` keeps views apart), with that view's drag state; what UpdateGizmo runs for
+    /// the map and the building editor for its building.
+    bool RunGizmo(const std::optional<Transformable>& t, GizmoDrag& drag, DirectX::FXMMATRIX view, DirectX::CXMMATRIX proj, bool ortho,
+                  const ImVec2& origin, const ImVec2& size, const char* id);
     /// begin, preview(delta), commit in one go: keys, Alt+click and typed values.
     void ApplyTransform(const Transformable& t, DirectX::FXMMATRIX delta, const std::string& label);
-    /// 1 / 2 / 3 handle, X world / local, PgUp / PgDn height, + / - scale, G ground, Del delete.
-    void TransformKeys();
+    /// 1 / 2 / 3 handle, X world / local, PgUp / PgDn height, + / - scale, G ground, Del delete. `building`: on the
+    /// building editor's selection instead of the map tool's.
+    void TransformKeys(bool building = false);
     /// Alt+click: the selection's handle point goes to `at`, the items keep their layout.
-    void MoveSelectionTo(const DirectX::XMFLOAT3& at);
+    void MoveSelectionTo(const DirectX::XMFLOAT3& at, bool building = false);
     /// Handle mode, world / local and snapping, plus what the selection allows; at the top of each tool's selection panel.
-    void DrawTransformBar(float width);
+    void DrawTransformBar(float width, bool building = false);
     /// Viewport caption hint for the shared keys.
     std::string TransformHint() const;
     /// The objects' handle frame: the object's own (one object) or the selection's centre (several).
@@ -450,69 +458,6 @@ private:
     std::optional<Transformable> LightTransform();
     std::optional<Transformable> SoundTransform();
     std::optional<Transformable> RoadTransform();
-    std::optional<Transformable> InteriorTransform();
-
-    // A WMO's own doodads (AppInterior.cpp): the furniture inside one building placement, edited in the Objects tool.
-    struct Interior
-    {
-        uint32_t wmoUid = 0;          // the placement being edited
-        std::string wmo;              // its model: the WMO whose doodads change (a project copy, or the original in place)
-        WmoDoodads live;              // what the viewport shows: the saved doodads plus the edit in progress
-        WmoDoodads start;             // as they were when a handle drag began
-        std::vector<uint32_t> ids;    // drawn doodad index -> id
-        std::set<uint32_t> sel;       // selected ids
-        std::optional<uint32_t> hover;
-        uint32_t set = 0;             // the set the list shows and new doodads join
-        std::optional<DirectX::XMFLOAT3> point;   // where an added doodad would stand (building floor or ground)
-        char filter[64] = {};
-        char newSet[20] = {};
-        bool groups = false;                       // picking and moving the building's groups instead of its doodads
-        std::set<uint32_t> groupSel;               // selected slot ids
-        std::optional<uint32_t> groupHover;
-        std::optional<DirectX::XMFLOAT4X4> groupDrag;   // a handle drag in progress: the move so far (editor axes)
-    };
-    std::optional<Interior> m_interior;
-    WmoEditAdapter m_wmoEdits;
-    /// Groups copied from a building, with the doodads standing in them, ready to paste into another.
-    struct WmoClip
-    {
-        std::map<uint32_t, WmoSlot> slots;         // by the id they had; `from` always named
-        std::vector<WmoDoodads::Doodad> doodads;   // groups name those ids; sets index `sets`
-        std::vector<std::string> sets;
-        WmoBox box{};                              // all of them, in the building they came from
-        std::string label;
-    };
-    std::optional<WmoClip> m_wmoClip;
-    /// The file slots without `from` read from: the copy's source, or the building itself when not edited yet.
-    std::string InteriorBase() const;
-    /// Every slot of the session's building with its box (WoW axes, the building's own space).
-    std::vector<std::pair<uint32_t, WmoBox>> InteriorBoxes();
-    /// The doodads standing in these slots: listed by one of them, or (listing none) inside one's box.
-    std::set<uint32_t> DoodadsInSlots(const std::set<uint32_t>& slots);
-    void CopyGroups(bool cut);
-    void PasteGroups();
-    void DeleteGroups();
-    std::optional<Transformable> InteriorGroupTransform();
-    void BeginInterior(uint32_t wmoUid);
-    /// The placement's WMO becomes editable: a project copy only this placement uses, or the original (every placement).
-    void MakeInteriorEditable(bool inPlace);
-    /// The edited placement's matrix in the world; none when it is not loaded.
-    std::optional<DirectX::XMFLOAT4X4> InteriorWorld() const;
-    /// The armed catalog doodad as it would be added at `point` (editor axes, world): the building's axes, the set
-    /// shown, the placing turn and scale, lit like the nearest doodad of that set. None when the placement is not loaded.
-    std::optional<WmoDoodads::Doodad> InteriorDoodadAt(const DirectX::XMFLOAT3& point) const;
-    /// Shows m_interior->live in the viewport (no change recorded).
-    void PreviewInterior();
-    /// Records m_interior->live as one change (nothing when it equals the saved doodads).
-    void CommitInterior(const std::string& label);
-    /// Hover, click select, catalog add; called by the viewport while the Objects tool edits a building.
-    void InteriorViewport(DirectX::FXMVECTOR p0, DirectX::FXMVECTOR dir, const ImVec2& origin, const ImVec2& size);
-    void DrawInteriorPanel();
-    void InteriorOutlines(std::vector<LineVertex>& lines) const;
-    /// Edited WMOs changed (an edit, undo, redo, a project opened): the renderer and the project's file layer follow.
-    void UpdateEditedWmos();
-    /// Re-adds the models of every loaded tile placing `wmo` (its doodads changed).
-    void ReloadTilesWith(const std::string& wmo);
 
     // atmosphere: light volumes (Light.dbc) and their colour, fog and sky sets (AppLights.cpp)
     bool m_gameLight = false;          // viewport shows the game's light at the camera (View menu, Lights tool)
@@ -729,8 +674,7 @@ private:
     Gizmo m_gizmo = Gizmo::Move;
     bool m_gizmoLocal = false, m_gizmoSnap = false;    // Ctrl inverts snapping while dragging a handle
     float m_snapMove = 1.0f, m_snapRotate = 15.0f, m_snapScale = 0.1f;
-    bool m_gizmoActive = false;                         // a handle is being dragged (one edit)
-    std::function<void()> m_gizmoCancel;                // the dragged selection's cancel, should the tool change mid-drag
+    GizmoDrag m_gizmoDrag;                              // the map viewport's handle drag
     std::map<uint32_t, Spawn> m_spawnStart, m_spawnPreview;   // spawns being moved: as they were, as they show now (by guid)
     Trigger m_triggerStart;                             // the trigger being moved, as it was
     Poi m_poiStart;                                     // the point being moved, as it was
@@ -739,7 +683,6 @@ private:
     bool m_fieldEditing = false;                        // a panel position / facing field is previewing (commits on release)
     bool m_carryInside = true;                          // map doodads inside a moved building move with it
     std::set<ObjectRef> m_gizmoRiders;                  // those doodads, for the drag in progress
-    DirectX::XMFLOAT4X4 m_gizmoMatrix{}, m_gizmoStart{};
     Tool m_lastTool = Tool::Sculpt;
 
     // Catalog: browse the client's models and textures; a model picked there is "armed" and placed by clicking.
@@ -877,6 +820,109 @@ private:
     /// drag pans, the wheel zooms. `empty` is written over it when `parts` is empty.
     void DrawScene(ScenePreview& scene, const ImVec2& size, ModelRenderer& models, const MpqChain& mpq, const std::vector<ModelRenderer::Part>& parts,
                    const char* empty);
+    /// The scene's texture at w x h (made again when the size changed); false when it cannot be made.
+    bool SceneTarget(ScenePreview& scene, UINT w, UINT h);
+
+    // Building editor (AppInterior.cpp): one WMO per tab in a window of its own, the building alone in its view. Its
+    // doodads (furniture) and its groups (parts, cut and pasted between buildings) are edited there; the WMO file
+    // changes (a project copy only one placement uses, or the original in place), so the map shows the edit too.
+    struct Interior
+    {
+        int serial = 0;               // the tab's own number: its renderer layer, tile keys and pick id
+        uint32_t wmoUid = 0;          // the map placement it was opened from (0: opened from the Catalog)
+        std::string wmo;              // its model: the WMO whose doodads change (a project copy, or the original in place)
+        std::string origin;           // the file it was opened with (the tab goes back to it when a copy is undone)
+        WmoDoodads live;              // what the view shows: the saved doodads plus the edit in progress
+        WmoDoodads start;             // as they were when a handle drag began
+        std::vector<uint32_t> ids;    // drawn doodad index -> id
+        std::set<uint32_t> sel;       // selected ids
+        std::optional<uint32_t> hover;
+        uint32_t set = 0;             // the set the list and the view show, and new doodads join
+        std::optional<DirectX::XMFLOAT3> point;   // where an added doodad or pasted group would stand (a floor, else y = 0)
+        char filter[64] = {};
+        char newSet[20] = {};
+        bool groups = false;                       // picking and moving the building's groups instead of its doodads
+        std::set<uint32_t> groupSel;               // selected slot ids
+        std::optional<uint32_t> groupHover;
+        std::optional<DirectX::XMFLOAT4X4> groupDrag;   // a handle drag in progress: the move so far (editor axes)
+        ScenePreview scene;                        // its view; the camera orbits `center` from `distance`
+        float speed = 30;                          // fly speed, yards a second (the wheel while looking sets it)
+        bool looking = false, orbiting = false, framed = false;
+        float press[2] = {};                       // where the left button went down (a click moves less than 5 px)
+        GizmoDrag gizmo;
+        int Layer() const { return kBuildingLayer + serial; }
+        int TileKey() const { return kBuildingKey - serial * 2; }   // the building; - 1: the armed doodad following the cursor
+        uint32_t Uid() const { return 0xF0000000u + uint32_t(serial); }
+    };
+    static constexpr int kBuildingLayer = 1 << 24;          // + serial: far above ghost layer ids
+    static constexpr int kBuildingKey = -200000000;         // - serial * 2: below the ground effect preview keys
+    std::vector<std::unique_ptr<Interior>> m_buildings;     // the tabs
+    size_t m_buildingTab = 0;                               // the one shown
+    int m_buildingSerial = 0;
+    bool m_showBuildings = false, m_buildingFront = false;  // window shown; bring it (and the shown tab) forward next frame
+    bool m_buildingSelect = false;                          // the tab bar still has to show m_buildingTab
+    bool m_buildingFocused = false;                         // a building editor panel has the keyboard: keys go to it
+    Interior* Building() { return m_buildingTab < m_buildings.size() ? m_buildings[m_buildingTab].get() : nullptr; }
+    WmoEditAdapter m_wmoEdits;
+    /// Groups copied from a building, with the doodads standing in them, ready to paste into another.
+    struct WmoClip
+    {
+        std::map<uint32_t, WmoSlot> slots;         // by the id they had; `from` always named
+        std::vector<WmoDoodads::Doodad> doodads;   // groups name those ids; sets index `sets`
+        std::vector<std::string> sets;
+        WmoBox box{};                              // all of them, in the building they came from
+        std::string label;
+    };
+    std::optional<WmoClip> m_wmoClip;
+    /// Opens (or brings forward) a tab on a map placement's WMO; the tab can make a copy only that placement uses.
+    void OpenBuilding(uint32_t wmoUid);
+    /// Opens (or brings forward) a tab on a WMO file (the Catalog).
+    void OpenBuildingFile(const std::string& wmo);
+    /// The tab showing `wmo` (case-insensitive), or a new one reading its doodads; null when they cannot be read.
+    Interior* BuildingTab(const std::string& wmo);
+    /// Reads the tab's doodads again: from the project's edit, else as the game has them. False when neither can be read.
+    bool LoadInterior(Interior& in);
+    void CloseBuilding(size_t tab);
+    /// The tab's building on its own layer at the origin (its doodads: set 0 and the set shown), added again.
+    void ShowBuilding(Interior& in);
+    /// The WMO becomes editable: a project copy (used by the tab's placement, if any) or the original (every placement).
+    void MakeInteriorEditable(Interior& in, bool inPlace);
+    /// The placement the tab was opened from, while it is loaded and still shows the tab's file or its source.
+    std::optional<WmoPlacement> InteriorPlacement(const Interior& in) const;
+    /// The armed catalog doodad as it would be added at `point` (the building's own space, editor axes): the set shown,
+    /// the placing turn and scale, lit like the nearest doodad of that set.
+    std::optional<WmoDoodads::Doodad> InteriorDoodadAt(const Interior& in, const DirectX::XMFLOAT3& point) const;
+    /// Shows `in.live` (no change recorded).
+    void PreviewInterior(Interior& in);
+    /// Records `in.live` as one change (nothing when it equals the saved doodads).
+    void CommitInterior(Interior& in, const std::string& label);
+    /// Edited WMOs changed (an edit, undo, redo, a project opened): the renderer, the tabs and the project's file layer follow.
+    void UpdateEditedWmos();
+    /// Re-adds the models of every loaded tile and tab showing `wmo` (its doodads changed).
+    void ReloadTilesWith(const std::string& wmo);
+    // The window: tabs, the view (camera, picking, handles, outlines) and the panel of the shown tab.
+    void DrawBuildings();
+    void DrawBuildingView(Interior& in, const ImVec2& size);
+    /// Hover under a ray: the doodad or group, and the point things would be added at.
+    void BuildingHover(Interior& in, DirectX::FXMVECTOR p0, DirectX::FXMVECTOR dir);
+    void BuildingOutlines(const Interior& in, DirectX::FXMMATRIX viewProj, const ImVec2& origin, const ImVec2& size);
+    /// Points the view at the selection's boxes, else the whole building.
+    bool FrameBuilding(Interior& in);
+    void DrawInteriorPanel(Interior& in);
+    /// Copy, cut, paste, Esc and the shared transform keys while a building editor panel has the keyboard.
+    void BuildingKeys();
+    /// The shown tab's selection as the shared move / rotate / scale controls see it.
+    std::optional<Transformable> BuildingTransform();
+    std::optional<Transformable> InteriorGroupTransform(Interior& in);
+    /// The file slots without `from` read from: the copy's source, or the building itself when not edited yet.
+    std::string InteriorBase(const Interior& in) const;
+    /// Every slot of the building with its box (WoW axes, the building's own space).
+    std::vector<std::pair<uint32_t, WmoBox>> InteriorBoxes(const Interior& in);
+    /// The doodads standing in these slots: listed by one of them, or (listing none) inside one's box.
+    std::set<uint32_t> DoodadsInSlots(const Interior& in, const std::set<uint32_t>& slots);
+    void CopyGroups(Interior& in, bool cut);
+    void PasteGroups(Interior& in);
+    void DeleteGroups(Interior& in);
 
     // NPC viewer (AppNpc.cpp): one creature template in a preview of its own, after wow.export's Creatures tab:
     // animations, skins, equipment, geosets, textures.

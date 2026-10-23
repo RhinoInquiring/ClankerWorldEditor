@@ -83,7 +83,7 @@ Trigger FromFrame(Trigger t, FXMMATRIX m)
 std::optional<App::Transformable> App::ActiveTransform()
 {
     if (m_terrain.Map().empty()) return std::nullopt;
-    if (m_tool == Tool::Objects) return m_interior ? InteriorTransform() : ObjectTransform();
+    if (m_tool == Tool::Objects) return ObjectTransform();
     if (m_tool == Tool::Creatures && m_path) return PathPointTransform();   // editing a path: its points, not the creatures
     if (SpawnTool()) return SpawnTransform();
     if (m_tool == Tool::Triggers) return TriggerTransform();
@@ -431,26 +431,32 @@ std::optional<App::Transformable> App::PathPointTransform()
 
 bool App::UpdateGizmo(const ImVec2& origin, const ImVec2& size)
 {
-    const auto t = ActiveTransform();
+    return RunGizmo(ActiveTransform(), m_gizmoDrag, m_camera.View(), Projection(size.x / size.y, 1.0f, 6000.0f), m_camera.topDown, origin, size, "map");
+}
+
+bool App::RunGizmo(const std::optional<Transformable>& t, GizmoDrag& g, FXMMATRIX viewMatrix, CXMMATRIX projMatrix, bool ortho, const ImVec2& origin,
+                   const ImVec2& size, const char* id)
+{
     const bool allowed = t && (m_gizmo == Gizmo::Move || (m_gizmo == Gizmo::Rotate && t->rotate) ||
                                (m_gizmo == Gizmo::Scale && t->scale != Transformable::Scale::None));
     if (!allowed)
     {
-        if (m_gizmoActive)
+        if (g.active)
         {
-            if (m_gizmoCancel) m_gizmoCancel();
-            m_gizmoActive = false;
+            if (g.cancel) g.cancel();
+            g.active = false;
         }
         return false;
     }
+    ImGuizmo::PushID(id);   // each view's handles are their own (ImGuizmo keeps one drag per id)
     ImGuizmo::SetDrawlist(ImGui::GetWindowDrawList());
     ImGuizmo::SetRect(origin.x, origin.y, size.x, size.y);
-    ImGuizmo::SetOrthographic(m_camera.topDown);
+    ImGuizmo::SetOrthographic(ortho);
     XMFLOAT4X4 view, proj;
-    XMStoreFloat4x4(&view, m_camera.View());
-    XMStoreFloat4x4(&proj, Projection(size.x / size.y, 1.0f, 6000.0f));
-    if (!m_gizmoActive) m_gizmoMatrix = t->frame;
-    const XMFLOAT4X4 before = m_gizmoMatrix;
+    XMStoreFloat4x4(&view, viewMatrix);
+    XMStoreFloat4x4(&proj, projMatrix);
+    if (!g.active) g.matrix = t->frame;
+    const XMFLOAT4X4 before = g.matrix;
 
     const ImGuizmo::OPERATION op = m_gizmo == Gizmo::Move     ? ImGuizmo::TRANSLATE
                                  : m_gizmo == Gizmo::Rotate   ? (t->yawOnly ? ImGuizmo::ROTATE_Y : ImGuizmo::ROTATE)
@@ -460,23 +466,25 @@ bool App::UpdateGizmo(const ImVec2& origin, const ImVec2& size)
     const float snap[3] = { snapValue, snapValue, snapValue };
     // Things that turn about the vertical only keep upright handles; scaling a box works along its own axes.
     const bool local = m_gizmoLocal || (m_gizmo == Gizmo::Scale && t->scale == Transformable::Scale::Axes);
-    ImGuizmo::Manipulate(&view._11, &proj._11, op, local ? ImGuizmo::LOCAL : ImGuizmo::WORLD, &m_gizmoMatrix._11, nullptr, snapping ? snap : nullptr);
+    ImGuizmo::Manipulate(&view._11, &proj._11, op, local ? ImGuizmo::LOCAL : ImGuizmo::WORLD, &g.matrix._11, nullptr, snapping ? snap : nullptr);
 
     const bool dragging = ImGuizmo::IsUsing();
-    if (dragging && !m_gizmoActive)
+    const bool over = ImGuizmo::IsOver();
+    ImGuizmo::PopID();
+    if (dragging && !g.active)
     {
-        m_gizmoStart = before;
+        g.start = before;
         t->begin();
-        m_gizmoCancel = t->cancel;
+        g.cancel = t->cancel;
     }
-    if (dragging) t->preview(XMMatrixInverse(nullptr, XMLoadFloat4x4(&m_gizmoStart)) * XMLoadFloat4x4(&m_gizmoMatrix));
-    if (!dragging && m_gizmoActive)
+    if (dragging) t->preview(XMMatrixInverse(nullptr, XMLoadFloat4x4(&g.start)) * XMLoadFloat4x4(&g.matrix));
+    if (!dragging && g.active)
     {
         t->commit(std::string(m_gizmo == Gizmo::Move ? "Move " : m_gizmo == Gizmo::Rotate ? "Rotate " : "Scale ") + t->what);
-        m_gizmoCancel = nullptr;
+        g.cancel = nullptr;
     }
-    m_gizmoActive = dragging;
-    return dragging || ImGuizmo::IsOver();
+    g.active = dragging;
+    return dragging || over;
 }
 
 void App::ApplyTransform(const Transformable& t, FXMMATRIX delta, const std::string& label)
@@ -486,20 +494,21 @@ void App::ApplyTransform(const Transformable& t, FXMMATRIX delta, const std::str
     t.commit(label);
 }
 
-void App::MoveSelectionTo(const XMFLOAT3& at)
+void App::MoveSelectionTo(const XMFLOAT3& at, bool building)
 {
-    if (const auto t = ActiveTransform())
+    if (const auto t = building ? BuildingTransform() : ActiveTransform())
         ApplyTransform(*t, XMMatrixTranslation(at.x - t->frame._41, at.y - t->frame._42, at.z - t->frame._43), "Move " + t->what);
 }
 
-void App::TransformKeys()
+void App::TransformKeys(bool building)
 {
-    if (!TransformTool() || m_gizmoActive || ImGui::GetIO().WantTextInput) return;
+    const Interior* in = building ? Building() : nullptr;
+    if ((building ? !in || in->gizmo.active : !TransformTool() || m_gizmoDrag.active) || ImGui::GetIO().WantTextInput) return;
     if (ImGui::IsKeyPressed(ImGuiKey_1, false)) m_gizmo = Gizmo::Move;
     if (ImGui::IsKeyPressed(ImGuiKey_2, false)) m_gizmo = Gizmo::Rotate;
     if (ImGui::IsKeyPressed(ImGuiKey_3, false)) m_gizmo = Gizmo::Scale;
     if (ImGui::IsKeyPressed(ImGuiKey_X, false)) m_gizmoLocal = !m_gizmoLocal;
-    const auto t = ActiveTransform();
+    const auto t = building ? BuildingTransform() : ActiveTransform();
     if (!t) return;
     const bool shift = ImGui::GetIO().KeyShift;
     if (ImGui::IsKeyPressed(ImGuiKey_PageUp) || ImGui::IsKeyPressed(ImGuiKey_PageDown))

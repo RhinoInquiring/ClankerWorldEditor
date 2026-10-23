@@ -71,6 +71,7 @@ namespace checks
     int ModelCheck();
     int WmoDoodadCheck();
     int WmoGroupCheck();
+    int BuildingCheck();
     bool SavePng(const std::wstring& path, UINT width, UINT height, std::vector<uint8_t> bgra);
     int SkinCheck();
     int AppearanceCheck();

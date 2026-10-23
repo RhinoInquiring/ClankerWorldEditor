@@ -62,6 +62,7 @@ int RunCheck()
         { L"--model-check", 0, checks::ModelCheck },
         { L"--wmo-doodad-check", 3, checks::WmoDoodadCheck },
         { L"--wmo-group-check", 3, checks::WmoGroupCheck },
+        { L"--building-check", 5, checks::BuildingCheck },
         { L"--render", 0, checks::RenderCheck },
         { L"--loader-check", 0, checks::LoaderCheck },
         { L"--catalog-check", 0, checks::CatalogCheck },

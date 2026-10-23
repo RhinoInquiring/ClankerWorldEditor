@@ -52,23 +52,27 @@ public:
 
     /// `details`: tiles added on kDetailLayer (ground effects) are drawn; off for pictures (minimaps, world maps).
     /// `attached`: a WMO's own doodads count as part of it (Pick); off: only building surfaces.
-    struct DrawSettings { bool doodads = true, wmos = true; float distance = 600.0f; int layer = 0; bool details = true; bool attached = true; };
+    /// `previews`: layer -1 instances (paste ghosts, the armed model) are drawn too. `sceneLit`: the renderer's scene light
+    /// and fog apply (off: the fixed light of thumbnails and viewers).
+    struct DrawSettings { bool doodads = true, wmos = true; float distance = 600.0f; int layer = 0; bool details = true; bool attached = true;
+                          bool previews = true, sceneLit = true; };
     /// Layer for detail doodads (grass): drawn with any layer when DrawSettings::details, never picked.
     static constexpr int kDetailLayer = -2;
     void Draw(DirectX::FXMMATRIX viewProj, const DirectX::XMFLOAT3& eye, const DrawSettings& settings);
 
     /// Nearest object along a ray (triangle-exact), within `maxDistance`; previews (negative tile keys) are skipped.
+    /// `layer`: the layer picked from (0 the map; the building editor draws each building on a layer of its own).
     struct Hit { bool wmo; uint32_t uid; float distance; };
-    std::optional<Hit> Pick(DirectX::FXMVECTOR origin, DirectX::FXMVECTOR dir, float maxDistance, const DrawSettings& settings) const;
+    std::optional<Hit> Pick(DirectX::FXMVECTOR origin, DirectX::FXMVECTOR dir, float maxDistance, const DrawSettings& settings, int layer = 0) const;
     /// Nearest object of one tile key (previews included: spawn models live on negative keys).
     std::optional<Hit> PickTile(int key, DirectX::FXMVECTOR origin, DirectX::FXMVECTOR dir, float maxDistance) const;
     /// The eight corners of an object's model box in the world; false when it is not loaded.
-    bool Corners(bool wmo, uint32_t uid, DirectX::XMFLOAT3 corners[8]) const;
+    bool Corners(bool wmo, uint32_t uid, DirectX::XMFLOAT3 corners[8], int layer = 0) const;
     /// The nearest of one WMO placement's own doodads (index into its mesh's doodad list) along a ray.
     struct DoodadHit { uint32_t index; float distance; };
-    std::optional<DoodadHit> PickDoodad(uint32_t wmoUid, DirectX::FXMVECTOR origin, DirectX::FXMVECTOR dir, float maxDistance) const;
+    std::optional<DoodadHit> PickDoodad(uint32_t wmoUid, DirectX::FXMVECTOR origin, DirectX::FXMVECTOR dir, float maxDistance, int layer = 0) const;
     /// The corners of one of a WMO placement's doodads; false when it is not drawn.
-    bool DoodadCorners(uint32_t wmoUid, uint32_t index, DirectX::XMFLOAT3 corners[8]) const;
+    bool DoodadCorners(uint32_t wmoUid, uint32_t index, DirectX::XMFLOAT3 corners[8], int layer = 0) const;
     /// Swaps a loaded WMO's doodads and sets (an edit in progress or applied); tiles placing it show it once added
     /// again. False when the WMO is not loaded.
     bool SetWmoDoodads(const std::string& wmo, std::vector<ModelMesh::Doodad> doodads, std::vector<ModelMesh::DoodadSet> sets);
@@ -77,7 +81,7 @@ public:
     std::vector<int> Forget(const std::string& name);
     /// The group of one WMO placement under a ray (its own triangles, not its doodads): group index, distance.
     struct GroupHit { uint16_t group; float distance; };
-    std::optional<GroupHit> PickWmoGroup(uint32_t wmoUid, DirectX::FXMVECTOR origin, DirectX::FXMVECTOR dir, float maxDistance) const;
+    std::optional<GroupHit> PickWmoGroup(uint32_t wmoUid, DirectX::FXMVECTOR origin, DirectX::FXMVECTOR dir, float maxDistance, int layer = 0) const;
     /// Where an M2 attachment point (helmet 11, hands 1 / 2, ...) sits in the model, posed at its first animation
     /// frame: attachment offset x bone pose, in editor axes. Null when the model or the point is missing.
     /// `pose` / `timeMs`: posed by that skeleton at that time instead (the NPC viewer).

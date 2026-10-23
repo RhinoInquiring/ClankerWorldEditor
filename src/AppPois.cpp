@@ -527,7 +527,7 @@ void App::DrawPoisPanel(float w)
         ImGui::EndDisabled();
         // Saved once nothing is being dragged or typed (undo puts it back).
         const auto saved = std::find_if(points.begin(), points.end(), [&](const Poi& s) { return s.id == p.id; });
-        if (saved != points.end() && RowOf(*saved) != RowOf(p) && editable && !ImGui::IsAnyItemActive() && !m_gizmoActive)
+        if (saved != points.end() && RowOf(*saved) != RowOf(p) && editable && !ImGui::IsAnyItemActive() && !m_gizmoDrag.active)
             CommitPoi(p.kind, p.id, p, std::string("Edit ") + KindName(p.kind) + " " + std::to_string(p.id));
     }
 }
