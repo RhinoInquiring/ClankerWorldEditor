@@ -25,6 +25,7 @@ format code never touches the GPU; the `App*` files are the UI.
 | --- | --- |
 | `src/Terrain.*` | Terrain: tile streaming, picking, sculpt, paint, holes, areas, copy/paste plans, water, objects, added tiles, export, crack check |
 | `src/Blend.*` | The seam blend of a paste (smooth fill of the band, texture cross-fade) |
+| `src/GroundEffects.*` | Ground effect tables (GroundEffectTexture/Doodad), the per-cell layer map, scattering detail doodads for the preview |
 | `src/Blueprint.*` | Blueprints on disk |
 | `src/Areas.*` | DBC row adapters: AreaTable, WMOAreaTable, WorldMapArea, WorldMapOverlay |
 | `src/Spawns.*` | Creature and gameobject spawns in the world database, SQL export |
@@ -75,6 +76,7 @@ format code never touches the GPU; the `App*` files are the UI.
 | `src/AppNpc.cpp` | NPC viewer: template list, posed preview, animations, skins, equipment, geosets, textures |
 | `src/AppPaths.cpp` | Path editing |
 | `src/AppZones.cpp` | Zones tool, buildings' room names |
+| `src/AppGroundEffects.cpp` | Ground effects tool and the viewport preview of detail doodads |
 | `src/AppTransform.cpp` | Shared move / rotate / scale: each tool's selection as a `Transformable`, the gizmo, keys, Alt+click move, transform bar |
 | `src/AppTriggers.cpp` | Triggers tool: triggers, teleports, entrances, their checks |
 | `src/AppPois.cpp` | POIs tool: landmarks, gossip points, teleports, their checks |
@@ -91,7 +93,7 @@ format code never touches the GPU; the `App*` files are the UI.
 | --- | --- |
 | `src/Checks.*` | The [checks](checks.md)' table (`RunCheck`: the first argument picks one, exactly), helpers they share, every check's declaration |
 | `src/ChecksCore.cpp` | Tiles, structure, normals, streaming, the loader, timing |
-| `src/ChecksTerrain.cpp` | Copy and paste, water, sculpt, shading, impassable, texture swap, new maps, blueprints, roads |
+| `src/ChecksTerrain.cpp` | Copy and paste, water, sculpt, shading, impassable, texture swap, new maps, blueprints, roads, ground effects |
 | `src/ChecksModels.cpp` | Models, skins, appearances, animation, catalog, assets, CASC to MPQ, rendering, map pictures, minimaps |
 | `src/ChecksVersions.cpp` | Ghosts, compare, differences, added tiles |
 | `src/ChecksSources.cpp` | Sources, scanning, MPQ packing, export, CDN, and the file tools (find, extract, where) |

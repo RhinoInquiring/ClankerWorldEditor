@@ -50,8 +50,11 @@ public:
     bool HasTile(int key) const { return m_tileInstances.count(key) != 0; }
     std::vector<int> TileKeys() const;
 
+    /// `details`: tiles added on kDetailLayer (ground effects) are drawn; off for pictures (minimaps, world maps).
     /// `attached`: a WMO's own doodads count as part of it (Pick); off: only building surfaces.
-    struct DrawSettings { bool doodads = true, wmos = true; float distance = 600.0f; int layer = 0; bool attached = true; };
+    struct DrawSettings { bool doodads = true, wmos = true; float distance = 600.0f; int layer = 0; bool details = true; bool attached = true; };
+    /// Layer for detail doodads (grass): drawn with any layer when DrawSettings::details, never picked.
+    static constexpr int kDetailLayer = -2;
     void Draw(DirectX::FXMMATRIX viewProj, const DirectX::XMFLOAT3& eye, const DrawSettings& settings);
 
     /// Nearest object along a ray (triangle-exact), within `maxDistance`; previews (negative tile keys) are skipped.

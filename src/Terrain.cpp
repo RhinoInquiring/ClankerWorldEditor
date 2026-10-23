@@ -5,6 +5,7 @@
 #include "Blend.hpp"
 #include "Models.hpp"
 #include "Catalog.hpp"
+#include "GroundEffects.hpp"
 #include "Loader.hpp"
 
 #include <DirectXCollision.h>
@@ -406,11 +407,14 @@ nlohmann::json TerrainAdapter::LayerState(const LoadedTile& tile, const AdtChunk
     std::vector<uint8_t> rgb(64 * 64 * 3);
     for (size_t i = 0; i < 4096; ++i)
         for (size_t ch = 0; ch < 3; ++ch) rgb[i * 3 + ch] = c.alpha.size() == 4096 * 4 ? c.alpha[i * 4 + ch] : 0;
-    return { { "names", names }, { "flags", flags }, { "effects", effects }, { "alpha", Base64Encode(rgb.data(), rgb.size()) } };
+    return { { "names", names }, { "flags", flags }, { "effects", effects }, { "alpha", Base64Encode(rgb.data(), rgb.size()) },
+             { "noEffect", c.noEffect } };
 }
 
 void TerrainAdapter::SetLayerState(LoadedTile& tile, AdtChunk& c, const nlohmann::json& s)
 {
+    const std::vector<uint8_t> oldAlpha = c.alpha;
+    const uint32_t oldCount = c.layerCount;
     const auto& names = s.at("names");
     c.layerCount = uint32_t(std::min<size_t>(names.size(), 4));
     for (uint32_t l = 0; l < c.layerCount; ++l)
@@ -426,6 +430,9 @@ void TerrainAdapter::SetLayerState(LoadedTile& tile, AdtChunk& c, const nlohmann
     c.alpha.assign(4096 * 4, 0);
     for (size_t i = 0; i < 4096 && i * 3 + 2 < rgb.size(); ++i)
         for (size_t ch = 0; ch < 3; ++ch) c.alpha[i * 4 + ch] = rgb[i * 3 + ch];
+    if (const auto it = s.find("noEffect"); it != s.end()) c.noEffect = it->get<uint64_t>();   // older states lack it: kept
+    // The cells' layers follow a changed alpha; otherwise Blizzard's own map stays (ours agrees on 96% of cells).
+    if (c.alpha != oldAlpha || c.layerCount != oldCount) c.effectMap = PackEffectMap(GroundEffectLayers(c));
 }
 
 namespace
@@ -597,6 +604,7 @@ bool TerrainAdapter::ReplayEdits(LoadedTile& tile, const std::string& map, const
 void TerrainAdapter::RefreshTextures(int key, size_t chunk)
 {
     const LoadedTile& tile = m_tiles.at(key);
+    m_effectsChanged.insert({ key, int(chunk) });
     m_renderer.UpdateChunkTextures(key, chunk, tile.adt.chunks[chunk], tile.adt.textures, m_mpq);
 }
 
@@ -1057,6 +1065,7 @@ void TerrainAdapter::PaintStep(const XMFLOAT3& center, const PaintBrush& brush, 
                     const auto a = LayerAlphas(w);
                     for (int ch = 0; ch < 3; ++ch) c.alpha[i * 4 + size_t(ch)] = uint8_t(std::lround(a[size_t(ch)] * 255.0f));
                 }
+            c.effectMap = PackEffectMap(GroundEffectLayers(c));   // the ground effects follow the paint
             RefreshTextures(key, ci);
         }
 }
@@ -1140,6 +1149,7 @@ bool TerrainAdapter::SwapChunk(int key, size_t ci, const std::string& from, cons
         const auto a = LayerAlphas(w);
         for (int ch = 0; ch < 3; ++ch) c.alpha[i * 4 + size_t(ch)] = uint8_t(std::lround(a[size_t(ch)] * 255.0f));
     }
+    c.effectMap = PackEffectMap(GroundEffectLayers(c));   // layers moved down: the cells follow
     RefreshTextures(key, ci);
     return true;
 }
@@ -1170,6 +1180,90 @@ std::optional<Change> TerrainAdapter::SwapTexture(const std::string& from, const
     for (const ChunkRef& ref : chunks)
         if (m_tiles.count(ref.tile)) SwapChunk(ref.tile, size_t(ref.chunk), from, to, effect);
     return EndPaint(label);
+}
+
+void TerrainAdapter::EffectStep(const XMFLOAT3& center, float radius, const std::string& texture, uint32_t effect)
+{
+    if (!m_painting || texture.empty()) return;
+    const std::string lower = Catalog::Normalize(texture);
+    for (const ChunkRef& ref : ChunksAt(center, radius))
+    {
+        LoadedTile& tile = m_tiles.at(ref.tile);
+        AdtChunk& c = tile.adt.chunks[size_t(ref.chunk)];
+        for (uint32_t l = 0; l < c.layerCount && l < 4; ++l)
+            if (c.textureIds[l] < tile.adt.textures.size() && Catalog::Normalize(tile.adt.textures[c.textureIds[l]]) == lower && c.effectIds[l] != effect)
+            {
+                if (!m_paintBefore.count({ ref.tile, ref.chunk })) m_paintBefore[{ ref.tile, ref.chunk }] = LayerState(tile, c);
+                c.effectIds[l] = effect;
+                m_effectsChanged.insert(ref);
+            }
+    }
+}
+
+std::optional<Change> TerrainAdapter::SetEffect(const std::string& texture, uint32_t effect, const std::vector<ChunkRef>& chunks, const std::string& label)
+{
+    BeginPaint();
+    for (const ChunkRef& ref : chunks)
+        if (const auto it = m_tiles.find(ref.tile); it != m_tiles.end() && size_t(ref.chunk) < it->second.adt.chunks.size())
+        {
+            const AdtChunk& c = it->second.adt.chunks[size_t(ref.chunk)];
+            EffectStep({ c.baseX + kChunkSize / 2, 0, c.baseZ + kChunkSize / 2 }, 0, texture, effect);   // radius 0: that chunk
+        }
+    return EndPaint(label);
+}
+
+void TerrainAdapter::HideEffectStep(const XMFLOAT3& center, float radius, bool hide)
+{
+    if (!m_painting) return;
+    const float cell = kChunkSize / 8;
+    for (const ChunkRef& ref : ChunksAt(center, radius + kChunkSize * 0.75f))   // every chunk the circle reaches (ChunksAt goes by centres)
+    {
+        LoadedTile& tile = m_tiles.at(ref.tile);
+        AdtChunk& c = tile.adt.chunks[size_t(ref.chunk)];
+        uint64_t bits = c.noEffect;
+        for (int cy = 0; cy < 8; ++cy)
+            for (int cx = 0; cx < 8; ++cx)
+            {
+                const float x0 = c.baseX + cx * cell, z0 = c.baseZ + cy * cell;
+                const float dx = (x0 + cell / 2) - center.x, dz = (z0 + cell / 2) - center.z;
+                const bool under = center.x >= x0 && center.x < x0 + cell && center.z >= z0 && center.z < z0 + cell;
+                if (!under && dx * dx + dz * dz > radius * radius) continue;
+                const uint64_t bit = 1ull << (cy * 8 + cx);
+                bits = hide ? bits | bit : bits & ~bit;
+            }
+        if (bits == c.noEffect) continue;
+        if (!m_paintBefore.count({ ref.tile, ref.chunk })) m_paintBefore[{ ref.tile, ref.chunk }] = LayerState(tile, c);
+        c.noEffect = bits;
+        m_effectsChanged.insert(ref);
+    }
+}
+
+std::optional<TerrainAdapter::EffectCell> TerrainAdapter::EffectAt(float x, float z) const
+{
+    const auto ref = ChunkAtGrid(int(std::floor(x / kChunkSize)), int(std::floor(z / kChunkSize)));
+    if (!ref) return std::nullopt;
+    const LoadedTile& tile = m_tiles.at(ref->tile);
+    const AdtChunk& c = *Chunk(*ref);
+    const int cx = std::clamp(int((x - c.baseX) / kChunkSize * 8), 0, 7), cy = std::clamp(int((z - c.baseZ) / kChunkSize * 8), 0, 7);
+    const uint8_t layer = UnpackEffectMap(c.effectMap)[size_t(cy * 8 + cx)];
+    EffectCell out;
+    out.hidden = (c.noEffect >> (cy * 8 + cx)) & 1;
+    if (layer < c.layerCount && c.textureIds[layer] < tile.adt.textures.size())
+    {
+        out.texture = tile.adt.textures[c.textureIds[layer]];
+        out.effect = c.effectIds[layer];
+    }
+    return out;
+}
+
+std::map<std::string, std::map<uint32_t, size_t>> TerrainAdapter::EffectsInUse() const
+{
+    std::map<std::string, std::map<uint32_t, size_t>> out;
+    for (const auto& [key, tile] : m_tiles)
+        for (const AdtChunk& c : tile.adt.chunks)
+            for (uint32_t l = 0; l < c.layerCount && l < 4; ++l)
+                if (c.textureIds[l] < tile.adt.textures.size()) ++out[Catalog::Normalize(tile.adt.textures[c.textureIds[l]])][c.effectIds[l]];
+    return out;
 }
 
 std::optional<std::string> TerrainAdapter::TextureAt(float x, float z) const
@@ -2076,6 +2170,7 @@ void TerrainClipboard::RotateClockwise()
             for (int x = 0; x < 64; ++x)
                 for (int ch = 0; ch < 3; ++ch) out[size_t((x * 64 + (63 - y)) * 3 + ch)] = in[size_t((y * 64 + x) * 3 + ch)];
         e.layers["alpha"] = Base64Encode(out.data(), out.size());
+        if (e.layers.contains("noEffect")) e.layers["noEffect"] = RotateCellBits(e.layers["noEffect"].get<uint64_t>());
     }
 
     // Objects: (x, z) -> (span - z, x) in yards, a -90 degree turn about y, so the yaw drops by 90.
@@ -2227,7 +2322,13 @@ namespace
             const auto a = LayerAlphas(w);
             for (size_t ch = 0; ch < 3; ++ch) rgb[i * 3 + ch] = uint8_t(std::lround(a[ch] * 255.0f));
         }
-        return { { "names", names }, { "flags", flags }, { "effects", effects }, { "alpha", Base64Encode(rgb.data(), rgb.size()) } };
+        nlohmann::json out = { { "names", names }, { "flags", flags }, { "effects", effects }, { "alpha", Base64Encode(rgb.data(), rgb.size()) } };
+        // Cells without ground effects: the side the chunk mostly shows.
+        float pasted = 0;
+        for (size_t i = 0; i < 4096; ++i) pasted += t[i] / 4096;
+        const nlohmann::json& mostly = pasted >= 0.5f ? pasteState : groundState;
+        if (mostly.contains("noEffect")) out["noEffect"] = mostly["noEffect"];
+        return out;
     }
 }
 

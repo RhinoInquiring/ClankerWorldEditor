@@ -75,6 +75,7 @@ int RunCheck()
         { L"--newmap-check", 0, checks::NewMapCheck },
         { L"--swap-check", 0, checks::SwapCheck },
         { L"--impass-check", 0, checks::ImpassCheck },
+        { L"--ground-effect-check", 3, checks::GroundEffectCheck },
         { L"--water-check", 0, checks::WaterCheck },
         { L"--diff-check", 0, checks::DiffCheck },
         { L"--tiles-check", 0, checks::TilesCheck },
@@ -123,7 +124,7 @@ int RunCheck()
         { L"--selftest", 0, [] {
              return FormatsSelfTest() && ChangesSelfTest() && TerrainSelfTest() && BlendSelfTest() && CatalogSelfTest() && BlueprintSelfTest() &&
                     DownportSelfTest() && TriggersSelfTest() && TransformSelfTest() && RoadSelfTest() &&
-                    RacesSelfTest() && WmoEditSelfTest() && WmoComposeSelfTest() ? 0 : 1;
+                    RacesSelfTest() && GroundEffectsSelfTest() && WmoEditSelfTest() && WmoComposeSelfTest() ? 0 : 1;
          } },
         { L"--race-check", 3, checks::RaceCheck },
         { L"--race-look", 6, checks::RaceLookCheck },

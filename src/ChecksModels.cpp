@@ -862,6 +862,34 @@ namespace checks
             roads.onChanged = [&](const std::string& map, const RoadStore::Cells& cells) { terrain.RefreshCells(map, cells); };
             roads.Commit(nullptr, &r, "render road");
         }
+        // WWE_GROUNDFX=<0..4>: the ground effects (grass, flowers) around the eye at that graphics level, as the editor
+        // shows them (density 16/40/64/96/128 per cell, out to 70/110/160/200/260 yd).
+        if (const char* level = std::getenv("WWE_GROUNDFX"))
+        {
+            const int q = std::clamp(std::atoi(level), 0, 4);
+            const int density[] = { 16, 40, 64, 96, 128 };
+            const float reach[] = { 70, 110, 160, 200, 260 };
+            GroundEffects fx;
+            fx.Load(mpq);
+            const auto g0 = std::chrono::steady_clock::now();
+            size_t placed = 0, chunks = 0;
+            for (const auto& [key, tile] : terrain.Tiles())
+                for (size_t ci = 0; ci < tile.adt.chunks.size(); ++ci)
+                {
+                    const AdtChunk& c = tile.adt.chunks[ci];
+                    const float dx = std::max({ c.baseX - eye.x, 0.0f, eye.x - (c.baseX + kChunkSize) });
+                    const float dz = std::max({ c.baseZ - eye.z, 0.0f, eye.z - (c.baseZ + kChunkSize) });
+                    if (dx * dx + dz * dz > reach[q] * reach[q]) continue;
+                    Adt adt;
+                    adt.doodads = ScatterGroundEffects(c, UnpackEffectMap(c.effectMap), fx, density[q], uint32_t(key * 256 + ci),
+                                                       [&](float x, float z) { return terrain.HeightAt(x, z); });
+                    placed += adt.doodads.size();
+                    ++chunks;
+                    models.AddTile(-100000000 - (key * 256 + int(ci)), adt, mpq, ModelRenderer::kDetailLayer);
+                }
+            printf("ground effects: %zu doodads on %zu chunks, %.1f ms\n", placed, chunks,
+                   std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - g0).count());
+        }
         const UINT w = 1280, h = 720;
         // WWE_TOPDOWN=<height>: the editor's top-down view (flat, straight down from that high over the eye's ground).
         const float topDown = std::getenv("WWE_TOPDOWN") ? float(std::atof(std::getenv("WWE_TOPDOWN"))) : 0.0f;

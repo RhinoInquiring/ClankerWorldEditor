@@ -670,7 +670,8 @@ void ModelRenderer::Draw(FXMMATRIX viewProj, const XMFLOAT3& eye, const DrawSett
     std::map<std::pair<GpuMesh*, const Look*>, std::vector<const XMFLOAT4X4*>> groups;
     for (const auto& [key, inst] : m_instances)
     {
-        if ((inst.layer != settings.layer && inst.layer != -1) || (inst.mesh->wmo ? !settings.wmos : !settings.doodads)) continue;
+        if (inst.layer == kDetailLayer ? !settings.details : (inst.layer != settings.layer && inst.layer != -1)) continue;
+        if (inst.mesh->wmo ? !settings.wmos : !settings.doodads) continue;
         if (visible(inst)) groups[{ inst.mesh, inst.look }].push_back(&inst.world);
     }
     size_t total = 0;

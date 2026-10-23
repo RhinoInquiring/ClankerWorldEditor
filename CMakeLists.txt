@@ -65,6 +65,7 @@ add_executable(wow-world-editor WIN32
     src/AppLights.cpp
     src/AppSound.cpp
     src/AppRoads.cpp
+    src/AppGroundEffects.cpp
     src/Differences.cpp
     src/AppInspect.cpp
     src/AppInterior.cpp
@@ -95,6 +96,7 @@ add_executable(wow-world-editor WIN32
     src/Flights.cpp
     src/Formats.cpp
     src/Ghosts.cpp
+    src/GroundEffects.cpp
     src/Loader.cpp
     src/Minimap.cpp
     src/ModelRenderer.cpp

@@ -8,6 +8,7 @@
 #include "Blend.hpp"
 #include "Catalog.hpp"
 #include "Formats.hpp"
+#include "GroundEffects.hpp"
 #include "Ghosts.hpp"
 #include "Minimap.hpp"
 #include "Loader.hpp"
@@ -39,6 +40,7 @@
 #include <mmsystem.h>
 #include <wincodec.h>
 #include <algorithm>
+#include <bit>
 #include <chrono>
 #include <set>
 #include <thread>
@@ -134,4 +136,5 @@ namespace checks
     int SoundCheck();
     int LightCheck();
     int AreaCheck();
+    int GroundEffectCheck();
 }

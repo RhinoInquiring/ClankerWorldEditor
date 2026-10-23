@@ -620,6 +620,8 @@ void App::CloseProject()
     for (const auto& [key, e] : m_wmoEdits.All()) m_models.Forget(e.name);   // an original edited in place reads as the game has it again
     m_wmoEdits.Reset({}, {});
     m_wmoEdits.TakeChanged();
+    m_groundFxChunks.clear();
+    m_groundFxRead = false;   // the next project's client may have other tables
     m_objSel.clear();
     m_races = RacesView{};   // its sources' chains are about to close
     m_creatureModels = CreatureModelsView{};   // the same
@@ -1846,6 +1848,7 @@ std::vector<uint8_t> App::RenderOrtho(float x0, float z0, float spanX, float spa
     options.solo = layer;
     ModelRenderer::DrawSettings models = m_modelSettings;
     models.layer = layer;
+    models.details = false;   // no grass in pictures
     return RenderTopDown(m_device, m_context, m_renderer, m_models, options, models, x0, z0, spanX, spanZ, top, width, height, true);
 }
 
@@ -2936,6 +2939,7 @@ void App::Frame(float dt)
             m_models.AddTile(key, tile.adt, m_mpq);
             if (streamMs() > 8.0f) break;
         }
+    UpdateGroundEffects();
     RunMapJob();
 
     ImGuizmo::BeginFrame();
@@ -3143,6 +3147,7 @@ void App::DrawMenuBar()
         ImGui::MenuItem("Far terrain (whole map, low detail)", nullptr, &m_drawOptions.farTerrain);
         ImGui::MenuItem("Terrain level of detail", nullptr, &m_drawOptions.lod);
         ImGui::MenuItem("Game lighting (time of day in Atmosphere > Lights)", nullptr, &m_gameLight);
+        ImGui::MenuItem("Ground effects (grass, flowers, pebbles)", nullptr, &m_showGroundFx);
         ImGui::MenuItem("Road lines and points (Roads tool)", nullptr, &m_roadLines);
         ImGui::MenuItem("Creatures", nullptr, &m_showSpawns[int(SpawnKind::Creature)]);
         ImGui::MenuItem("Gameobjects", nullptr, &m_showSpawns[int(SpawnKind::GameObject)]);
@@ -3522,10 +3527,11 @@ void App::BuildOverlay(std::vector<LineVertex>& lines) const
             lines.push_back({ { p.x, p.y + 0.2f, p.z - 0.8f }, yellow }); lines.push_back({ { p.x, p.y + 0.2f, p.z + 0.8f }, yellow });
         }
     }
-    if (m_tool != Tool::Sculpt && m_tool != Tool::Paint && m_tool != Tool::Shade && m_tool != Tool::Water) return;
+    if (m_tool == Tool::GroundEffects) BuildGroundEffectOverlay(lines);
+    if (m_tool != Tool::Sculpt && m_tool != Tool::Paint && m_tool != Tool::Shade && m_tool != Tool::Water && m_tool != Tool::GroundEffects) return;
     const XMFLOAT4 ringColors[2] = { { 1, 1, 1, 0.9f }, { 1, 1, 1, 0.35f } };
     const PaintBrush* soft = m_tool == Tool::Paint ? &m_paint : m_tool == Tool::Shade ? &m_shadeBrush : nullptr;
-    const float radius = soft ? soft->radius : m_tool == Tool::Water ? m_water.radius : m_brush.radius;
+    const float radius = soft ? soft->radius : m_tool == Tool::Water ? m_water.radius : m_tool == Tool::GroundEffects ? m_groundFxRadius : m_brush.radius;
     if (m_tool == Tool::Water && m_water.mode == WaterBrush::Mode::Level)   // where Level puts the surface
     {
         XMFLOAT3 prev{};
@@ -3643,6 +3649,7 @@ void App::DrawViewport(float dt)
             else if (io.KeyCtrl && m_tool == Tool::Zones) m_areaRadius = std::clamp(m_areaRadius * (io.MouseWheel > 0 ? 1.15f : 0.87f), 1.0f, 300.0f);
             else if (io.KeyCtrl && m_tool == Tool::Paint) m_paint.radius = std::clamp(m_paint.radius * (io.MouseWheel > 0 ? 1.15f : 0.87f), 1.0f, 150.0f);
             else if (io.KeyCtrl && m_tool == Tool::Shade) m_shadeBrush.radius = std::clamp(m_shadeBrush.radius * (io.MouseWheel > 0 ? 1.15f : 0.87f), 1.0f, 150.0f);
+            else if (io.KeyCtrl && m_tool == Tool::GroundEffects) m_groundFxRadius = std::clamp(m_groundFxRadius * (io.MouseWheel > 0 ? 1.15f : 0.87f), 1.0f, 150.0f);
             else if (io.KeyCtrl) m_brush.radius = std::clamp(m_brush.radius * (io.MouseWheel > 0 ? 1.15f : 0.87f), 1.0f, 300.0f);
             else if (io.KeyAlt && m_tool == Tool::Copy) m_pasteOffset = std::clamp(m_pasteOffset + io.MouseWheel * (io.KeyShift ? 0.1f : 0.5f), -50.0f, 50.0f);
             else if (m_looking)   // flying: the wheel sets the speed
@@ -3909,6 +3916,10 @@ void App::DrawViewport(float dt)
     else if (m_tool == Tool::Roads)
     {
         RoadsViewport(origin, size, viewProj);
+    }
+    else if (m_tool == Tool::GroundEffects)
+    {
+        GroundEffectsViewport();
     }
     else if (m_tool == Tool::Objects && m_interior)
     {
@@ -4321,6 +4332,7 @@ void App::DrawToolsPanel()
     if (m_tool == Tool::Sound) DrawSoundPanel(w);
     if (m_tool == Tool::Roads) DrawRoadsPanel(w);
     if (m_tool == Tool::Water) DrawWaterPanel(w);
+    if (m_tool == Tool::GroundEffects) DrawGroundEffectsPanel(w);
     if (SpawnTool()) DrawSpawnsPanel(w);
     if (m_tool == Tool::Objects && Section("Objects"))
     {
@@ -4643,6 +4655,7 @@ void App::DrawToolsPanel()
         ImGui::SetNextItemWidth(w - 90);
         ImGui::SliderFloat("Object dist", &m_modelSettings.distance, 100.0f, 3000.0f, "%.0f yd", ImGuiSliderFlags_Logarithmic);
         ImGui::TextColored(kQuiet, "%zu models, %zu objects, %zu drawn", m_models.ModelCount(), m_models.InstanceCount(), m_models.DrawnLastFrame());
+        DrawGroundEffectsView(w);
         ImGui::SetNextItemWidth(w - 90);
         ImGui::SliderFloat("Cam speed", &m_camera.speed, 10.0f, 1000.0f, "%.0f yd/s", ImGuiSliderFlags_Logarithmic);
         ImGui::SetNextItemWidth(w - 90);

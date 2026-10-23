@@ -268,6 +268,22 @@ public:
     /// The texture with the largest share at a point (the eyedropper).
     std::optional<std::string> TextureAt(float x, float z) const;
 
+    /// Ground effects (detail doodads). Both steps work inside a BeginPaint / EndPaint stroke (the layers change).
+    /// EffectStep: every layer of `texture` in the chunks within `radius` grows `effect` (GroundEffectTexture id, 0 none).
+    void EffectStep(const DirectX::XMFLOAT3& center, float radius, const std::string& texture, uint32_t effect);
+    /// The same as one change over listed chunks (a tile, every loaded tile).
+    std::optional<Change> SetEffect(const std::string& texture, uint32_t effect, const std::vector<ChunkRef>& chunks, const std::string& label);
+    /// HideEffectStep: cells (8 x 8 per chunk) within `radius` grow no ground effect at all, or with hide false grow
+    /// their layer's again; the cell under the point always.
+    void HideEffectStep(const DirectX::XMFLOAT3& center, float radius, bool hide);
+    /// What grows at a point: the cell's layer texture and its effect id, and whether the cell is hidden.
+    struct EffectCell { std::string texture; uint32_t effect = 0; bool hidden = false; };
+    std::optional<EffectCell> EffectAt(float x, float z) const;
+    /// Textures on the loaded tiles (normalised names) with the ground effects their layers carry: texture -> effect id -> chunks.
+    std::map<std::string, std::map<uint32_t, size_t>> EffectsInUse() const;
+    /// Chunks whose ground effects may look different since the last call (paint, effects, undo of either).
+    std::set<ChunkRef> TakeEffectChanges() { return std::exchange(m_effectsChanged, {}); }
+
     /// Roads drawn over the terrain: the renderer shows every chunk with the open map's roads applied, the tiles keep
     /// the ground underneath (tools edit that), export writes the result.
     void SetRoads(const RoadStore* roads);
@@ -485,6 +501,7 @@ public:
 private:
     bool m_painting = false;
     std::map<std::pair<int, int>, nlohmann::json> m_paintBefore;   // (tile, chunk) -> layers before the stroke
+    std::set<ChunkRef> m_effectsChanged;
     const RoadStore* m_roads = nullptr;
     /// TilesOf for the project's changes, worked out once each (a change never changes once made).
     const std::map<std::string, std::set<int>>& CachedTilesOf(const Change& change) const;

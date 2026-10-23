@@ -1357,4 +1357,215 @@ namespace checks
         printf("%d problem(s)\n", problems);
         return problems ? 1 : 0;
     }
+
+    /// `--ground-effect-check <Data>`: the client's ground effect tables load and their models exist; Blizzard's
+    /// per-cell effect map matches the layer covering most of each cell (GroundEffectLayers) on stock tiles.
+    int GroundEffectCheck()
+    {
+        setvbuf(stdout, nullptr, _IONBF, 0);
+        char dataDir[1024] = {};
+        WideCharToMultiByte(CP_ACP, 0, __wargv[2], -1, dataDir, sizeof dataDir, nullptr, nullptr);
+        MpqChain mpq;
+        mpq.Open(dataDir);
+        int problems = 0;
+        auto check = [&](bool ok, const std::string& what) { printf("%s %s\n", ok ? "ok  " : "FAIL", what.c_str()); problems += !ok; };
+
+        GroundEffects fx;
+        const bool loaded = fx.Load(mpq);
+        check(loaded, "GroundEffectTexture + GroundEffectDoodad load (" + std::to_string(fx.All().size()) + " effects)");
+
+        // Stock tiles: the stored map against the alpha, and two other bit orders to be sure of the layout.
+        struct T { const char* map; int x, y; };
+        const T tiles[] = { { "Azeroth", 32, 48 }, { "Azeroth", 31, 49 }, { "Azeroth", 35, 50 }, { "Kalimdor", 40, 30 },
+                            { "Kalimdor", 31, 50 }, { "Expansion01", 22, 35 }, { "Northrend", 30, 22 }, { "Northrend", 25, 22 } };
+        // (Measured 2026-10-14: summed weight 96.1%; a per-texel vote 93.1%, the topmost layer over half 94.4%.)
+        size_t cells = 0, same = 0, sameMsb = 0, sameColumn = 0, outOfRange = 0, noEffectChunks = 0, noEffectCells = 0;
+        std::map<uint32_t, size_t> densities;   // density of effects in use -> layers using it
+        std::set<std::string> models, missing;
+        for (const T& t : tiles)
+        {
+            const std::string dir = std::string("World\\Maps\\") + t.map + "\\" + t.map;
+            const auto wdt = mpq.Read(dir + ".wdt");
+            const auto bytes = mpq.Read(dir + "_" + std::to_string(t.x) + "_" + std::to_string(t.y) + ".adt");
+            const auto adt = wdt && bytes ? ParseAdt(*bytes, WdtBigAlpha(*wdt)) : std::nullopt;
+            if (!adt) { printf("     %s %d_%d: not in this client\n", t.map, t.x, t.y); continue; }
+            size_t tileCells = 0, tileSame = 0;
+            for (const AdtChunk& c : adt->chunks)
+            {
+                if (c.noEffect) { ++noEffectChunks; noEffectCells += size_t(std::popcount(c.noEffect)); }
+                for (uint32_t l = 0; l < c.layerCount; ++l)
+                    if (const GroundEffect* e = fx.Effect(c.effectIds[l]))
+                    {
+                        if (fx.Describe(*e) != "none") ++densities[e->density];
+                        for (uint32_t d : e->doodads)
+                            if (const std::string m = fx.Model(d); !m.empty() && models.insert(m).second && !mpq.HasOwn(m)) missing.insert(m);
+                    }
+                if (c.layerCount < 2) continue;
+                const auto computed = GroundEffectLayers(c);
+                const auto stored = UnpackEffectMap(c.effectMap);
+                for (int y = 0; y < 8; ++y)
+                    for (int x = 0; x < 8; ++x)
+                    {
+                        const uint8_t s = stored[size_t(y * 8 + x)], want = computed[size_t(y * 8 + x)];
+                        ++cells;
+                        ++tileCells;
+                        same += s == want;
+                        tileSame += s == want;
+                        outOfRange += s >= c.layerCount;
+                        const uint8_t msb = uint8_t((c.effectMap[size_t(y * 2 + x / 4)] >> (6 - 2 * (x % 4))) & 3);
+                        sameMsb += msb == want;
+                        sameColumn += stored[size_t(x * 8 + y)] == want;
+                    }
+            }
+            printf("     %s %d_%d: %zu of %zu cells agree\n", t.map, t.x, t.y, tileSame, tileCells);
+        }
+        const auto share = [&](size_t n) { return cells ? 100.0 * double(n) / double(cells) : 0.0; };
+        printf("     cells of chunks with 2+ layers: %zu; agree %.1f%% (msb-first %.1f%%, transposed %.1f%%); stored layer past the chunk's layers %zu\n",
+               cells, share(same), share(sameMsb), share(sameColumn), outOfRange);        printf("     chunks with noEffect bits: %zu (%zu cells)\n", noEffectChunks, noEffectCells);
+        std::string dens;
+        for (const auto& [d, n] : densities) dens += " " + std::to_string(d) + "x" + std::to_string(n);
+        printf("     densities of effects with doodads in use (density x layers):%s\n", dens.c_str());
+        check(cells > 1000 && share(same) > 90.0 && share(same) > share(sameMsb) && share(same) > share(sameColumn),
+              "the stored cell map is the dominant layer, row-major, 2 bits per cell from the low bits");
+        check(missing.empty(), std::to_string(models.size()) + " detail models referenced, missing: " + (missing.empty() ? std::string("none") : *missing.begin()));
+
+        // Editing on Azeroth 32_48 (Northshire): set a texture's effect, hide cells, paint, export, undo.
+        ComPtr<ID3D11Device> device;
+        ComPtr<ID3D11DeviceContext> context;
+        if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &device, nullptr, &context))) return 1;
+        Renderer renderer;
+        std::string error;
+        if (!renderer.Init(device.Get(), context.Get(), error)) return 1;
+        ChangeStore store;
+        TerrainAdapter terrain(mpq, renderer, store);
+        store.Register(terrain);
+        const int key = TileKey(32, 48);
+        if (!terrain.SetMap("Azeroth", error) || !terrain.LoadNow(32, 48, error)) { printf("%s\n", error.c_str()); return 1; }
+        const LoadedTile& tile = terrain.Tiles().at(key);
+        const Adt original = tile.adt;
+        std::vector<nlohmann::json> states;
+        for (const AdtChunk& c : tile.adt.chunks) states.push_back(TerrainAdapter::LayerState(tile, c));
+        const XMFLOAT3 at{ 32.5f * kTileSize, 0, 48.5f * kTileSize };
+        const auto cell = terrain.EffectAt(at.x, at.z);
+        check(cell && !cell->texture.empty(), "a texture and effect under the tile's middle: " + (cell ? cell->texture + " grows " + std::to_string(cell->effect) : std::string("none")));
+        if (!cell) return 1;
+
+        // Scatter: what grows lands in the chunk, never in hidden cells, as many as the densities say.
+        size_t scattered = 0, outside = 0, expected = 0;
+        for (const AdtChunk& c : tile.adt.chunks)
+        {
+            const auto layers = UnpackEffectMap(c.effectMap);
+            const auto placed = ScatterGroundEffects(c, layers, fx, 64, 7, [&](float x, float z) { return terrain.HeightAt(x, z); });
+            scattered += placed.size();
+            for (const auto& d : placed)
+            {
+                const int cx = int((d.pos[0] - c.baseX) / (kChunkSize / 8)), cy = int((d.pos[2] - c.baseZ) / (kChunkSize / 8));
+                outside += cx < 0 || cy < 0 || cx > 7 || cy > 7 || ((c.noEffect >> (cy * 8 + cx)) & 1) || ((c.holes >> ((cy / 2) * 4 + cx / 2)) & 1);
+            }
+            for (int i = 0; i < 64; ++i)
+                if (const GroundEffect* e = layers[size_t(i)] < c.layerCount ? fx.Effect(c.effectIds[layers[size_t(i)]]) : nullptr;
+                    e && fx.Describe(*e) != "none" && !((c.noEffect >> i) & 1) && !((c.holes >> ((i / 16) * 4 + (i % 8) / 2)) & 1))
+                    expected += size_t(std::lround(double(e->density) * 64 / 128.0));
+        }
+        check(scattered > 1000 && outside == 0 && scattered == expected,
+              std::to_string(scattered) + " detail doodads on the tile at medium (" + std::to_string(expected) + " expected), " + std::to_string(outside) + " misplaced");
+
+        // A different effect with doodads for the texture.
+        uint32_t other = 0;
+        for (const GroundEffect& e : fx.All())
+            if (e.id != cell->effect && e.density && fx.Describe(e) != "none") { other = e.id; break; }
+        terrain.BeginPaint();
+        terrain.EffectStep(at, 40, cell->texture, other);
+        auto change = terrain.EndPaint("effect");
+        check(change.has_value(), "set effect " + std::to_string(other) + " on " + cell->texture);
+        if (!change) return 1;
+        store.Commit(*change);
+        std::set<size_t> effectChunks;
+        for (const auto& e : change->data.at("layers")) effectChunks.insert(size_t(e[2]));
+        size_t carrying = 0;
+        for (size_t ci : effectChunks)
+        {
+            const AdtChunk& c = tile.adt.chunks[ci];
+            for (uint32_t l = 0; l < c.layerCount; ++l)
+                carrying += Catalog::Normalize(tile.adt.textures[c.textureIds[l]]) == Catalog::Normalize(cell->texture) && c.effectIds[l] == other;
+        }
+        check(carrying == effectChunks.size() && effectChunks.size() >= 4, std::to_string(carrying) + " of " + std::to_string(effectChunks.size()) + " chunks' layers carry it");
+        check(terrain.EffectAt(at.x, at.z)->effect == other, "the cell under the point grows it");
+
+        terrain.BeginPaint();
+        terrain.HideEffectStep(at, 10, true);
+        change = terrain.EndPaint("hide");
+        check(change.has_value(), "hide cells");
+        if (change) store.Commit(*change);
+        std::map<size_t, uint64_t> hidden;
+        for (size_t ci = 0; ci < tile.adt.chunks.size(); ++ci)
+            if (tile.adt.chunks[ci].noEffect != original.chunks[ci].noEffect) hidden[ci] = tile.adt.chunks[ci].noEffect;
+        size_t hiddenCells = 0;
+        for (const auto& [ci, bits] : hidden) hiddenCells += size_t(std::popcount(bits & ~original.chunks[ci].noEffect));
+        check(hiddenCells >= 12 && hiddenCells <= 40 && terrain.EffectAt(at.x, at.z)->hidden, std::to_string(hiddenCells) + " cells hidden around the point");
+
+        // Painting moves the cell map with the alpha.
+        const std::string paintTexture = "Tileset\\Elwynn\\ElwynnCobblestoneBase.blp";
+        const XMFLOAT3 paintAt{ at.x + 60, 0, at.z + 60 };
+        PaintBrush brush;
+        brush.radius = 6;
+        brush.pressure = 1;
+        brush.hardness = 1;
+        terrain.BeginPaint();
+        for (int i = 0; i < 20; ++i) terrain.PaintStep(paintAt, brush, paintTexture, false, 0.1f);
+        change = terrain.EndPaint("paint");
+        if (change) store.Commit(*change);
+        check(change && Catalog::Normalize(terrain.EffectAt(paintAt.x, paintAt.z)->texture) == Catalog::Normalize(paintTexture),
+              "after painting, the cell grows the painted texture's effect");
+        // Chunks whose alpha did not change (effects, hidden cells) keep Blizzard's cell map.
+        size_t keptMaps = 0;
+        for (size_t ci : effectChunks) keptMaps += tile.adt.chunks[ci].effectMap == original.chunks[ci].effectMap;
+        check(keptMaps == effectChunks.size(), "setting an effect keeps the chunks' own cell map");
+
+        // Export: effects, hidden cells and the recomputed cell map are written; untouched chunks keep their bytes.
+        const auto out = std::filesystem::temp_directory_path() / "wow-world-editor-groundfxcheck";
+        std::error_code ec;
+        std::filesystem::remove_all(out, ec);
+        terrain.Export(out, error);
+        std::ifstream f(out / "World" / "Maps" / "Azeroth" / "Azeroth_32_48.adt", std::ios::binary);
+        const std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        f.close();
+        const auto back = bytes.empty() ? std::nullopt : ParseAdt(bytes, false);
+        check(back && ValidateAdt(bytes, false).empty(), "exported tile validates");
+        if (back)
+        {
+            size_t right = 0, kept = 0, untouched = 0;
+            for (size_t ci = 0; ci < back->chunks.size(); ++ci)
+            {
+                const AdtChunk &b = back->chunks[ci], &e = tile.adt.chunks[ci];
+                const bool edited = TerrainAdapter::LayerState(tile, e) != states[ci];
+                untouched += !edited;
+                if (edited)
+                    right += b.effectIds == e.effectIds && b.noEffect == e.noEffect && b.effectMap == e.effectMap;
+                else
+                    kept += b.effectMap == original.chunks[ci].effectMap && b.noEffect == original.chunks[ci].noEffect;
+            }
+            check(right + untouched == back->chunks.size(), "edited chunks: effects, hidden cells and cell map written (" + std::to_string(right) + ")");
+            check(kept == untouched, "other chunks keep Blizzard's cell map and hidden cells (" + std::to_string(kept) + "/" + std::to_string(untouched) + ")");
+        }
+        std::filesystem::remove_all(out, ec);
+
+        // Copy with hidden cells, turn: the bits turn with the chunk; four turns give them back.
+        if (!hidden.empty())
+        {
+            TerrainClipboard clip = terrain.Copy({ ChunkRef{ key, int(hidden.begin()->first) } });
+            const uint64_t bits = clip.chunks[0].layers.at("noEffect").get<uint64_t>();
+            clip.RotateClockwise();
+            const uint64_t turned = clip.chunks[0].layers.at("noEffect").get<uint64_t>();
+            for (int i = 0; i < 3; ++i) clip.RotateClockwise();
+            check(turned == RotateCellBits(bits) && clip.chunks[0].layers.at("noEffect").get<uint64_t>() == bits, "copied hidden cells turn with the chunk");
+        }
+
+        for (int i = 0; i < 3; ++i) store.Undo();
+        bool restored = true;
+        for (size_t ci = 0; ci < tile.adt.chunks.size(); ++ci) restored &= TerrainAdapter::LayerState(tile, tile.adt.chunks[ci]) == states[ci];
+        check(restored, "undo restores every chunk's layers, effects and hidden cells");
+        printf("%d problem(s)\n", problems);
+        return problems ? 1 : 0;
+    }
 }

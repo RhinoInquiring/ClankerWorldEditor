@@ -7,6 +7,7 @@
 #include "Differences.hpp"
 #include "Formats.hpp"
 #include "Ghosts.hpp"
+#include "GroundEffects.hpp"
 #include "Loader.hpp"
 #include "ModelRenderer.hpp"
 #include "Mpq.hpp"
@@ -67,7 +68,7 @@ public:
     bool WantsQuit() const { return m_quit; }
 
 private:
-    enum class Tool { Select, Sculpt, Copy, Holes, Objects, Paint, Creatures, Gameobjects, Zones, Triggers, Pois, Flights, Shade, Lights, Sound, Roads, Water };
+    enum class Tool { Select, Sculpt, Copy, Holes, Objects, Paint, Creatures, Gameobjects, Zones, Triggers, Pois, Flights, Shade, Lights, Sound, Roads, Water, GroundEffects };
     /// Tools come in groups (the toolbar's buttons); a group remembers the tool last used in it.
     enum class Group { Terrain, Objects, Units, Regions, Atmosphere };
     static constexpr int kGroups = 5;
@@ -84,6 +85,7 @@ private:
         { Tool::Shade, Group::Terrain, "Shade", "U", ImGuiKey_U, "vertex colours (maps with vertex shading)" },
         { Tool::Holes, Group::Terrain, "Holes", "H", ImGuiKey_H, "cut and fill terrain holes" },
         { Tool::Water, Group::Terrain, "Water", "", ImGuiKey_None, "paint, level and remove water, magma and slime" },
+        { Tool::GroundEffects, Group::Terrain, "Ground effects", "", ImGuiKey_None, "grass, flowers and pebbles: which grow on each texture, and where none" },
         { Tool::Roads, Group::Terrain, "Roads", "", ImGuiKey_None, "roads and paths along splines: paint and grade the ground" },
         { Tool::Copy, Group::Terrain, "Copy", "C", ImGuiKey_C, "copy, paste and blend terrain" },
         { Tool::Objects, Group::Objects, "Place and edit", "O", ImGuiKey_O, "doodads and WMOs" },
@@ -571,6 +573,29 @@ private:
     std::optional<Road> m_roadPending;            // a preview waiting its turn (long roads: previews are spaced out)
     std::chrono::steady_clock::time_point m_roadPreviewAt{};
     float m_roadPreviewMs = 0;                    // how long the last preview took
+    // Ground effects (AppGroundEffects.cpp): the client's detail doodads shown around the camera, edited per texture layer.
+    GroundEffects m_groundFx;
+    bool m_groundFxRead = false;                  // tables read for this project (a client may lack them)
+    std::vector<std::pair<uint32_t, std::string>> m_groundFxList;   // effects with doodads: id, "id  names  (density)"
+    bool m_showGroundFx = true;                   // View > Ground effects
+    int m_groundFxQuality = 1;                    // the client's graphics levels: Low, Fair, Medium, High, Ultra
+    std::map<int, bool> m_groundFxChunks;         // preview model key -> stale (rebuilt when next in reach)
+    uint64_t m_groundFxRevision = ~0ull;
+    std::string m_groundFxMap;
+    bool m_groundFxHide = false;                  // the brush hides cells (Ctrl: shows); off: sets a texture's effect (Ctrl: none)
+    float m_groundFxRadius = 12.0f;
+    std::string m_groundFxTexture;                // the texture whose layers get m_groundFxEffect
+    uint32_t m_groundFxEffect = 0;
+    std::string m_groundFxFilter;
+    static constexpr int kGroundFxKey = -100000000;   // preview model keys: kGroundFxKey - (tile * 256 + chunk)
+    /// Keeps the preview's detail doodads on the chunks within the quality's distance of the camera.
+    void UpdateGroundEffects();
+    void DrawGroundEffectsPanel(float width);
+    /// The preview switch and quality, in every tool's View tab.
+    void DrawGroundEffectsView(float width);
+    void GroundEffectsViewport();
+    void BuildGroundEffectOverlay(std::vector<LineVertex>& lines) const;
+
     bool m_roadLines = true;                      // the Roads tool draws lines, points and handles (off: the road as it will look)
     void DrawRoadsPanel(float width);
     void RoadsViewport(const ImVec2& origin, const ImVec2& size, DirectX::FXMMATRIX viewProj);

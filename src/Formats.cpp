@@ -55,8 +55,9 @@ namespace
         uint32_t flags, indexX, indexY, nLayers, nDoodadRefs, ofsHeight, ofsNormal, ofsLayer, ofsRefs,
                  ofsAlpha, sizeAlpha, ofsShadow, sizeShadow, areaId, nMapObjRefs;
         uint16_t holes, pad;
-        uint8_t lowQualityTextureMap[16];
-        uint32_t predTex, noEffectDoodad, ofsSndEmitters, nSndEmitters, ofsLiquid, sizeLiquid;
+        uint8_t lowQualityTextureMap[16];   // ground effects: the layer per 8 x 8 cell (AdtChunk::effectMap)
+        uint64_t noEffectDoodad;            // ground effects: cells without any (AdtChunk::noEffect)
+        uint32_t ofsSndEmitters, nSndEmitters, ofsLiquid, sizeLiquid;
         float position[3];
         uint32_t ofsMccv, ofsMclv, unused;
     };
@@ -242,6 +243,8 @@ namespace
         c.flags = h.flags;
         c.holes = h.holes;
         c.areaId = h.areaId;
+        std::memcpy(c.effectMap.data(), h.lowQualityTextureMap, 16);
+        c.noEffect = h.noEffectDoodad;
 
         if (auto mcvt = SubChunk(d, start, end, h.ofsHeight, Tag("MCVT")); mcvt && mcvt->second >= 145 * 4)
         {
@@ -1384,6 +1387,8 @@ std::vector<uint8_t> RewriteAdt(const std::vector<uint8_t>& d, const Adt& adt, c
             }
             h.nLayers = layers;
             h.sizeAlpha = uint32_t(mcal.size() + 8);
+            std::memcpy(h.lowQualityTextureMap, c.effectMap.data(), 16);
+            h.noEffectDoodad = c.noEffect;
         }
         if (refsChanged)
         {

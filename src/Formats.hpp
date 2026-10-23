@@ -45,6 +45,11 @@ struct AdtChunk
     std::array<uint32_t, 4> textureIds{};     // indices into Adt::textures
     std::array<uint32_t, 4> layerFlags{};     // MCLY flags as read
     std::array<uint32_t, 4> effectIds{};      // MCLY ground effect (detail doodads) per layer
+    /// Ground effects per 8 x 8 cell (MCNK header): which layer's effect grows there, 2 bits per cell (row y = bytes
+    /// 2y..2y+1 little-endian, cell x at bits 2x), and cells with none at all (bit y * 8 + x). A rewrite writes both
+    /// for chunks whose layers changed: keep effectMap in step with the alpha (GroundEffectMap).
+    std::array<uint8_t, 16> effectMap{};
+    uint64_t noEffect = 0;
     std::vector<uint8_t> alpha;               // 64x64 RGBA: r,g,b = layers 1..3
     std::vector<uint8_t> colors;              // MCCV: 145 x BGRA, 0x7F = 1.0 (neutral); empty = the chunk has none
     std::vector<uint32_t> doodadRefs, wmoRefs;   // MCRF: indices into Adt::doodads / Adt::wmos

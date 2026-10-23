@@ -41,6 +41,7 @@ build\Release\wow-world-editor.exe
 | [New maps](docs/terrain/new-maps.md) | Make a new world map, dungeon or raid: its Map.dbc row, WDT and flat tiles in one step |
 | [Blueprints](docs/terrain/blueprints.md) | Save an area as a reusable piece and place it anywhere, on any map |
 | [Water](docs/terrain/water.md) | Paint, level, slope and remove water, magma, slime and ocean; water travels with copies and pastes |
+| [Ground effects](docs/terrain/ground-effects.md) | Grass, flowers and pebbles shown around the camera at the client's quality levels; set which effect a texture grows, hide cells |
 
 <!-- shot: copy-paste.png - a pinned paste with its blend band -->
 

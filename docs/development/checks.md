@@ -30,6 +30,7 @@ Direct3D device. Checks that write files use a temporary folder and remove it.
 | `--sculpt-check <Data>` | Falloff shapes, sloped flatten lands on its plane, fill only, vertex selection moves with no cracks, even out, undo |
 | `--newmap-check <Data>` | New map: Map.dbc + MapDifficulty rows, WDT/WDL, 2 x 2 flat tiles as one step; loads, exports, undo, redo, overlay rebuilt on reopen |
 | `--impass-check <Data>` | Impassable brush sets MCNK 0x2, export writes exactly those flags, clear, undo |
+| `--ground-effect-check <Data>` | Ground effect tables and models; Blizzard's cell map vs the dominant layer on 8 stock tiles (layout); scatter count and placement; set effect, hide cells, paint, export, rotate a copy, undo |
 | `--swap-check <Data>` | Texture swap: merge into an existing layer (shares add per texel), swap for a new texture, remove, export validates, undo |
 | `--blueprint-check <Data> <map> <x> <y> <out.png>` | Save, load and draw a blueprint |
 | `--model-check <Data> <map> <x> <y>` | Every model a tile places loads, boxes fit |
@@ -55,7 +56,7 @@ Direct3D device. Checks that write files use a temporary folder and remove it.
 | `--asset-check <Data> <other client> <map> <x> <y>` | Paste from another client, cracks, the asset closure. `WWE_WXL=1`: exports for a WXL client: kept files must be ones WXL reads, the FileDataID tables are read back, and every reference resolves through them alone |
 | `--cdn-check <install*product> <game path>` | A file missing on disk misses at once and arrives from the CDN in the background; a file on disk is fetched from the CDN anyway (a range out of its archive) and must match the disk copy byte for byte. Close the editor first: they share the CDN cache |
 | `--casc-to-mpq <install*product> <out dir> [map ...]` | Not a check: converts a CASC client's maps (all, or the named folders) and everything they use to 3.3.5a under `<out dir>\staging`, then packs `<out dir>\<name>.MPQ`; a rerun skips what is staged; `report.txt` lists what was lost |
-| `--render <Data> <map> <x> <y> <out.png> [yaw pitch above fx fz]` | Draws a view to a PNG. WMO-only maps (any x y): fx fz are fractions of the WMO box, above is yards over its middle; with WWE_SERVER=<AC dir> it also checks every creature stands on a WMO floor |
+| `--render <Data> <map> <x> <y> <out.png> [yaw pitch above fx fz]` | Draws a view to a PNG. WMO-only maps (any x y): fx fz are fractions of the WMO box, above is yards over its middle; with WWE_SERVER=<AC dir> it also checks every creature stands on a WMO floor; WWE_GROUNDFX=<0-4> adds the ground effects at that quality (Low..Ultra) |
 | `--map-preview <Data> <map> <out.png>` | The Maps panel picture |
 
 ## Versions
